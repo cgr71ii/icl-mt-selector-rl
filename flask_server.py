@@ -1,0 +1,603 @@
+
+import json
+import base64
+import pickle
+import logging
+import argparse
+
+import utils
+import icl_translation_only_instruction_tuned as mt_icl
+
+import torch
+import numpy as np
+from flask import (
+    Flask,
+    request,
+    jsonify,
+)
+from service_streamer import ThreadedStreamer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+app = Flask("MT-ICL-flask-server")
+
+global_conf = {} # Empty since it will be filled once main is run
+logger = logging.getLogger("MT_ICL")
+
+# Disable (less verbose) 3rd party logging
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+@app.route('/', methods=['GET'])
+def info():
+    available_routes = json.dumps(
+        {
+            "/hello-world": ["GET"],
+            "/translate": ["GET", "POST"],
+        },
+        indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
+
+    return f"Available routes:<br/>{available_routes}"
+
+@app.route('/hello-world', methods=["GET"])
+def hello_world():
+    return jsonify({"ok": "hello world! server is working!", "err": "null"})
+
+@app.route('/translate', methods=["GET", "POST"])
+def translate():
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.warning("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        src_lang = utils.string2list(request_method.getlist("src_lang"))
+        trg_lang = utils.string2list(request_method.getlist("trg_lang"))
+        src_sentences = utils.string2list(request_method.getlist("src_sentence"))
+        src_examples = utils.string2list(request_method.getlist("src_example"))
+        trg_examples = utils.string2list(request_method.getlist("trg_example"))
+        icl_idx_src_sentences = utils.string2list(request_method.getlist("icl_idx_src_sentence"))
+    except KeyError as e:
+        logger.warning("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    # Optional parameters
+    #try:
+    #    foo = request_method.getlist("foo")
+    #except KeyError as e:
+    #    foo = None
+
+    if len(src_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
+        logger.warning("No sentences: %s", src_sentences)
+
+        return jsonify({"ok": "null", "err": "'src_sentence', 'src_lang' and 'trg_lang' are mandatory fields that cannot be empty"})
+
+    logger.debug("Got %d sentences", len(src_sentences))
+
+    if (len(src_lang) != 1 and len(src_lang) != len(src_sentences)) or (len(trg_lang) != 1 and len(trg_lang) != len(src_sentences)):
+        logger.warning("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
+
+        return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
+
+    if len(src_lang) == 1:
+        src_lang = [src_lang[0]] * len(src_sentences)
+    if len(trg_lang) == 1:
+        trg_lang = [trg_lang[0]] * len(src_sentences)
+
+    try:
+        src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
+        src_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_examples]
+        trg_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_examples]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    icl_idx_src_sentences = list(map(lambda d: int(d) - 1, icl_idx_src_sentences)) # the number begins with 1, but we work with 0-based indexes
+    icl_examples = [[] for _ in range(len(src_sentences))]
+
+    if len(src_examples) != len(trg_examples):
+        return jsonify({"ok": "null", "err": f"src_examples: {len(src_examples)} vs trg_examples: {len(trg_examples)}"})
+
+    if len(src_examples) != len(icl_idx_src_sentences):
+        return jsonify({"ok": "null", "err": f"src_examples: {len(src_examples)} vs icl_idx_src_sentences: {len(icl_idx_src_sentences)}"})
+
+    if len(icl_idx_src_sentences) > 0:
+        _min = min(icl_idx_src_sentences)
+        _max = max(icl_idx_src_sentences)
+
+        if 0 <= _min <= _max < len(src_sentences):
+            pass
+        else:
+            return jsonify({"ok": "null", "err": f"icl_idx_src_sentences: {_min} vs {_max} vs {len(src_sentences)}: {icl_idx_src_sentences} vs {src_sentences}"})
+
+        for icl_idx, src_example, trg_example in zip(icl_idx_src_sentences, src_examples, trg_examples):
+            assert isinstance(icl_idx, int), f"icl_idx: {icl_idx} is not an integer: {icl_idx_src_sentences}"
+            assert 0 <= icl_idx < len(src_sentences), f"icl_idx: {icl_idx} vs {len(src_sentences)}: {src_sentences}"
+
+            icl_examples[icl_idx].append([src_example, trg_example])
+
+    # Inference
+
+    disable_streamer = global_conf["disable_streamer"]
+    get_results = global_conf["streamer"].predict if not disable_streamer else translate_batch
+    data = list(zip(src_sentences, icl_examples, src_lang, trg_lang))
+    results = get_results(data)
+
+    # Return results
+    if len(results) != len(src_sentences):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                     len(results), len(src_sentences), results, src_sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)}",
+        })
+
+    for idx, (src_sentence, result) in enumerate(zip(src_sentences, results), 1):
+        logger.debug("Results #%d: %s\t%s", idx, src_sentence, result)
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+#def translate_batch(src_sentences, icl_examples, src_lang, trg_lang):
+def translate_batch(data):
+    src_sentences, icl_examples, src_lang, trg_lang = zip(*data)
+    src_sentences = list(src_sentences)
+    icl_examples = list(icl_examples)
+    src_lang = list(src_lang)
+    trg_lang = list(trg_lang)
+
+    assert len(icl_examples) == len(src_sentences) == len(src_lang) == len(trg_lang), f"Length mismatch: {len(icl_examples)} vs {len(src_sentences)} vs {len(src_lang)} vs {len(trg_lang)}"
+
+    logger.debug("Data batch size: %d", len(src_sentences))
+
+    model = global_conf["model"]
+    tokenizer = global_conf["tokenizer"]
+    device = global_conf["device"]
+    batch_size = global_conf["batch_size"]
+    _max_new_tokens = global_conf["max_new_tokens"]
+
+    # Build prompts
+    _device = device
+    _bsz = batch_size
+    results = []
+
+    while True:
+        try:
+            if model.device != _device:
+                model = model.to(_device)
+
+            _src_sentences = src_sentences[:_bsz]
+            _icl_examples = icl_examples[:_bsz]
+            _src_lang = src_lang[:_bsz]
+            _trg_lang = trg_lang[:_bsz]
+
+            assert len(_icl_examples) == len(_src_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_icl_examples)} vs {len(_src_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
+
+            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz)
+            max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
+
+            logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
+            logger.debug("max_new_tokens: %d", max_new_tokens)
+            logging.debug("Prompts: %s", str(prompts))
+
+            # Translate
+            all_outputs, all_original_outputs = mt_icl.translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=None)
+
+            assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
+
+            results.extend(all_outputs)
+
+            _device = device
+            _bsz = batch_size
+            src_sentences = src_sentences[len(prompts):]
+            icl_examples = icl_examples[len(prompts):]
+            src_lang = src_lang[len(prompts):]
+            trg_lang = trg_lang[len(prompts):]
+        except torch.OutOfMemoryError as e:
+            # Handle OOM
+
+            if _bsz == 1:
+                _device = "cpu"
+                _bsz = batch_size
+
+                logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", batch_size)
+            else:
+                logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
+
+                _bsz = _bsz // 2
+
+        if len(src_sentences) == 0:
+            break
+
+    #return results[target_task] # TODO do we need a list if the streamer is used (it seems so)?
+                                 # https://github.com/ShannonAI/service-streamer/issues/97
+
+    return results
+
+@app.route('/get_embedding_from_model_embedding_matrix', methods=["GET", "POST"])
+def get_embedding_from_model_embedding_matrix():
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.warning("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        tokens = utils.string2list(request_method.getlist("token"))
+    except KeyError as e:
+        logger.warning("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    if len(tokens) == 0:
+        logger.warning("No tokens: %s", tokens)
+
+        return jsonify({"ok": "null", "err": "'tokens' is a mandatory field that cannot be empty"})
+
+    logger.debug("Got %d tokens", len(tokens))
+
+    try:
+        tokens = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in tokens]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    # Inference
+
+    disable_streamer = global_conf["disable_streamer"]
+    get_results = global_conf["streamer_embedding_tokens"].predict if not disable_streamer else embedding_tokens_batch
+    results, results_token_id = get_results(tokens)
+
+    assert len(results.shape) == 2, results.shape
+    assert results.shape[0] == len(tokens), f"{results.shape} | {len(tokens)}"
+    assert len(results) == len(results_token_id), f"Results length mismatch: {len(results)} vs {len(results_token_id)}"
+
+    # Return results
+    if len(results) != len(tokens):
+        logger.error("Results length mismatch with the provided tokens: %s vs %d: %s vs %s",
+                     results.shape, len(tokens), results, tokens)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided tokens: {results.shape} vs {len(tokens)}",
+        })
+
+    for idx, (token, result, result_token_id) in enumerate(zip(tokens, results, results_token_id), 1):
+        logger.debug("Results tokens #%d: %s\t%s\t%s", idx, token, result.shape, result_token_id)
+
+    results = pickle.dumps(results)
+    results = base64.b64encode(results).decode() # base64 tensor
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+def embedding_tokens_batch(tokens):
+    assert isinstance(tokens, list), f"tokens must be a list, got: {type(tokens)}"
+
+    logger.debug("Data batch size (tokens): %d", len(tokens))
+
+    model = global_conf["model"]
+    tokenizer = global_conf["tokenizer"]
+
+    # Build prompts
+    results = []
+    results_token_id = []
+
+    for token in tokens:
+        assert isinstance(token, str), f"token must be a string, got: {type(token)}"
+
+        _token, _token_id = mt_icl.get_token_embedding(token, tokenizer, model)
+
+        assert len(_token.shape) == 1, f"Expected token embedding shape: (hidden_dim,), got: {_token.shape}"
+
+        results.append(_token)
+        results_token_id.append(_token_id)
+
+    results = torch.stack(results)
+
+    assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
+    assert results.shape[0] == len(tokens), f"Results length mismatch: {results.shape[0]} vs {len(tokens)}"
+
+    return results, results_token_id
+
+@app.route('/get_embedding_mean_pooling', methods=["GET", "POST"])
+def embedding_mean_pooling():
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.warning("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        src_lang = utils.string2list(request_method.getlist("src_lang"))
+        trg_lang = utils.string2list(request_method.getlist("trg_lang"))
+        src_sentences = utils.string2list(request_method.getlist("src_sentence"))
+        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
+    except KeyError as e:
+        logger.warning("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    # Optional parameters
+    #try:
+    #    foo = request_method.getlist("foo")
+    #except KeyError as e:
+    #    foo = None
+
+    if len(src_sentences) == 0 or len(trg_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
+        logger.warning("No sentences: %s", src_sentences)
+
+        return jsonify({"ok": "null", "err": "'src_sentence', 'trg_sentence', 'src_lang' and 'trg_lang' are mandatory fields that cannot be empty"})
+
+    logger.debug("Got %d sentences", len(src_sentences))
+
+    if (len(src_lang) != 1 and len(src_lang) != len(src_sentences)) or (len(trg_lang) != 1 and len(trg_lang) != len(src_sentences)):
+        logger.warning("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
+
+        return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
+
+    if len(src_lang) == 1:
+        src_lang = [src_lang[0]] * len(src_sentences)
+    if len(trg_lang) == 1:
+        trg_lang = [trg_lang[0]] * len(src_sentences)
+
+    try:
+        src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
+        trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    # Inference
+
+    disable_streamer = global_conf["disable_streamer"]
+    get_results = global_conf["streamer_embedding_mean_pooling"].predict if not disable_streamer else embedding_mean_pooling_batch
+    data = list(zip(src_sentences, trg_sentences, src_lang, trg_lang))
+    results = get_results(data)
+
+    # Return results
+    if len(results) != len(src_sentences) or len(src_sentences) != len(trg_sentences):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d vs %d: %s vs %s vs %s",
+                     len(results), len(src_sentences), len(trg_sentences), results, src_sentences, trg_sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)} vs {len(trg_sentences)}",
+        })
+
+    for idx, (src_sentence, trg_sentence, result) in enumerate(zip(src_sentences, trg_sentences, results), 1):
+        logger.debug("Results #%d: %s\t%s\t%s", idx, src_sentence, trg_sentence, result)
+
+    results = pickle.dumps(results)
+    results = base64.b64encode(results).decode() # base64 tensor
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+def embedding_mean_pooling_batch(data):
+    # be aware that icl_examples are supported by mt_icl.build_prompt_teacher_forcing, but we are not supporting them here
+
+    src_sentences, trg_sentences, src_lang, trg_lang = zip(*data)
+    src_sentences = list(src_sentences)
+    trg_sentences = list(trg_sentences)
+    src_lang = list(src_lang)
+    trg_lang = list(trg_lang)
+
+    assert len(src_sentences) == len(trg_sentences) == len(src_lang) == len(trg_lang), f"Length mismatch: {len(src_sentences)} vs {len(trg_sentences)} vs {len(src_lang)} vs {len(trg_lang)}"
+
+    logger.debug("Data batch size: %d", len(src_sentences))
+
+    model = global_conf["model"]
+    tokenizer = global_conf["tokenizer"]
+    device = global_conf["device"]
+    batch_size = global_conf["batch_size"]
+
+    # Build prompts
+    _device = device
+    _bsz = batch_size
+    results = []
+
+    while True:
+        try:
+            if model.device != _device:
+                model = model.to(_device)
+
+            _src_sentences = src_sentences[:_bsz]
+            _trg_sentences = trg_sentences[:_bsz]
+            _src_lang = src_lang[:_bsz]
+            _trg_lang = trg_lang[:_bsz]
+
+            assert len(_src_sentences) == len(_trg_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_src_sentences)} vs {len(_trg_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
+
+            _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
+            prompts, _ = mt_icl.build_prompt_teacher_forcing(_sentences, _src_lang, _trg_lang, tokenizer, None, _bsz, add_eos_token=True)
+
+            logging.debug("Prompts: %s", str(prompts))
+
+            # Get embeddings
+            all_outputs = mt_icl.get_embedding_mean_pooling(model, tokenizer, prompts)
+
+            assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz]) == len(trg_sentences[:_bsz])
+
+            results.append(all_outputs)
+
+            _device = device
+            _bsz = batch_size
+            src_sentences = src_sentences[len(prompts):]
+            trg_sentences = trg_sentences[len(prompts):]
+            src_lang = src_lang[len(prompts):]
+            trg_lang = trg_lang[len(prompts):]
+        except torch.OutOfMemoryError as e:
+            # Handle OOM
+
+            if _bsz == 1:
+                _device = "cpu"
+                _bsz = batch_size
+
+                logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", batch_size)
+            else:
+                logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
+
+                _bsz = _bsz // 2
+
+        if len(src_sentences) == 0:
+            break
+
+    results = torch.cat(results, dim=0)
+
+    return results
+
+def main(args):
+    force_cpu = args.force_cpu
+    use_cuda = utils.use_cuda(force_cpu=force_cpu)
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    pretrained_model = args.pretrained_model
+    flask_port = args.flask_port
+    streamer_max_latency = args.streamer_max_latency
+    run_flask_server = not args.do_not_run_flask_server
+    disable_streamer = args.disable_streamer
+
+    if not disable_streamer:
+        logger.warning("Since streamer is enabled, you might get slightly different results: not recommended for production")
+        # Related to https://discuss.pytorch.org/t/slightly-different-results-in-same-machine-and-gpu-but-different-order/173581
+
+    logger.debug("Device: %s", device)
+
+    if "model" not in global_conf:
+        global_conf["model"] = AutoModelForCausalLM.from_pretrained(pretrained_model, torch_dtype=torch.float16, device_map=device)
+    else:
+        # We apply this step in order to avoid loading the model multiple times due to flask debug mode
+        pass
+
+    global_conf["tokenizer"] = AutoTokenizer.from_pretrained(pretrained_model)
+
+    if global_conf["tokenizer"].pad_token is None:
+        # https://github.com/meta-llama/llama3/issues/114#issuecomment-2127131096
+        global_conf["tokenizer"].pad_token = global_conf["tokenizer"].eos_token
+
+    global_conf["device"] = device
+    global_conf["batch_size"] = args.batch_size
+    global_conf["max_new_tokens"] = args.max_new_tokens
+    global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(embedding_tokens_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["streamer_embedding_mean_pooling"] = ThreadedStreamer(embedding_mean_pooling_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["disable_streamer"] = disable_streamer
+
+    # Some guidance
+    logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
+    logger.debug("Example: curl http://127.0.0.1:%d/translate -X POST -d \"" + \
+                 r'src_lang=English&' + \
+                 r'trg_lang=Italian&' + \
+                 r'src_sentence=TG9jYWwgbWVkaWEgcmVwb3J0cyBhbiBhaXJwb3J0IGZpcmUgdmVoaWNsZSByb2xsZWQgb3ZlciB3aGlsZSByZXNwb25kaW5nLgo=&' + \
+                 r'src_lang=English&' + \
+                 r'trg_lang=Spanish&' + \
+                 r'src_sentence=IldlIG5vdyBoYXZlIDQtbW9udGgtb2xkIG1pY2UgdGhhdCBhcmUgbm9uLWRpYWJldGljIHRoYXQgdXNlZCB0byBiZSBkaWFiZXRpYywiIGhlIGFkZGVkLgo=&' + \
+                 r'src_example=SW4gSnVuZSwgdGhlIENvbW1pc3Npb24gcHVibGlzaGVkIHRoZSByZXN1bHRzIG9mIGEgcHVibGljIGNvbnN1bHRhdGlvbiBvbiB0aGUgcHJvcG9zYWxzIHdoaWNoIGZvdW5kIGJyb2FkIHN1cHBvcnQgZm9yIGNhbGxpbmcgdGhlIGFzc2VtYmx5IGEgV2Vsc2ggUGFybGlhbWVudC4K&' + \
+                 r'trg_example=RW4ganVuaW8sIGxhIENvbWlzacOzbiBwdWJsaWPDsyBsb3MgcmVzdWx0YWRvcyBkZSB1bmEgY29uc3VsdGEgcMO6YmxpY2Egc29icmUgbGFzIHByb3B1ZXN0YXMsIGVuIGRvbmRlIHNlIG9idHV2byB1biBhbXBsaW8gYXBveW8gcGFyYSBsbGFtYXIgYSBsYSBhc2FtYmxlYSB1biBQYXJsYW1lbnRvIGRlIEdhbGVzLgo=&' + \
+                 r'icl_idx_src_sentence=2&' + \
+                 r'src_example=V2F0ZXJzJyBzdGF0ZW1lbnQgcXVpY2tseSBkcmV3IGNyaXRpY2lzbSBvbmxpbmUsIGluY2x1ZGluZyBmcm9tIGZvcm1lciBXaGl0ZSBIb3VzZSBwcmVzcyBzZWNyZXRhcnkgQXJpIEZsZWlzY2hlci4K&' + \
+                 r'trg_example=TGEgZGVjbGFyYWNpw7NuIGRlIFdhbHRlcnMgcHJvdm9jw7MgcsOhcGlkYW1lbnRlIGNyw610aWNhcyBlbiBJbnRlcm5ldCwgaW5jbHV5ZW5kbyB1bmEgZGVsIGFudGVyaW9yIHNlY3JldGFyaW8gZGUgcHJlbnNhIGRlIGxhIENhc2EgQmxhbmNhIEFyaSBGbGVpc2NoZXIuCg==&' + \
+                 r'icl_idx_src_sentence=2&' + \
+                 r'src_example=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
+                 r'trg_example=w4AgbCdpbnN0YXIgZCdhdXRyZXMgZXhwZXJ0cywgaWwgc2UgbW9udHJlIHNjZXB0aXF1ZSBxdWFudCDDoCBsYSBwb3NzaWJpbGl0w6kgZGUgZ3XDqXJpciBsZSBkaWFiw6h0ZSwgZmFpc2FudCByZW1hcnF1ZXIgcXVlIGNlcyByw6lzdWx0YXRzIG5lIHNvbnQgcGFzIGFwcGxpY2FibGVzIGF1eCBwZXJzb25uZXMgcXVpIHNvdWZmcmVudCBkw6lqw6AgZGUgZGlhYsOodGUgZGUgdHlwZSAxLgo=&' + \
+                 r'icl_idx_src_sentence=3&' + \
+                 r'src_example=SXQgd2FzIGEgdGhpcmQgRWxpdGUgTGVhZ3VlIGRlZmVhdCBvZiB0aGUgc2Vhc29uIGZvciBBZGFtIEtlZWZlJ3MgbWVuLCB3aG8gaGFkIGNvbWUgZnJvbSBiZWhpbmQgdG8gYmVhdCBEdW5kZWUgMi0xIGluIEJlbGZhc3Qgb24gRnJpZGF5IG5pZ2h0Lgo=&' + \
+                 r'trg_example=RnVlIGxhIHRlcmNlcmEgZGVycm90YSBkZSBsYSB0ZW1wb3JhZGEgZGUgbGEgRWxpdGUgTGVhZ3VlIHBhcmEgZWwgZXF1aXBvIGRlIEFkYW0gS2VlZmUsIHF1aWVuZXMgdHV2aWVyb24gcXVlIGp1Z2FyIGRlc2RlIHVuYSBwb3NpY2nDs24gZW4gZGVzdmVudGFqYSBwYXJhIHZlbmNlciBhIER1bmRlZSAyIGEgMSBlbiBCZWxmYXN0IGVsIHZpZXJuZXMgZW4gbGEgbm9jaGUuCg==&' + \
+                 r'icl_idx_src_sentence=2&' + \
+                 r'src_sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
+                 r'src_lang=English&' + \
+                 r'trg_lang=French&' + \
+                '"', flask_port)
+    logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_from_model_embedding_matrix -X POST -d \"" + \
+                 r'token=PC9zPg==&' + \
+                 r'token=PHM+&' + \
+                '"', flask_port)
+    logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_mean_pooling -X POST -d \"" + \
+                 r'src_lang=English&' + \
+                 r'trg_lang=Spanish&' + \
+                 r'src_sentence=SW4gSnVuZSwgdGhlIENvbW1pc3Npb24gcHVibGlzaGVkIHRoZSByZXN1bHRzIG9mIGEgcHVibGljIGNvbnN1bHRhdGlvbiBvbiB0aGUgcHJvcG9zYWxzIHdoaWNoIGZvdW5kIGJyb2FkIHN1cHBvcnQgZm9yIGNhbGxpbmcgdGhlIGFzc2VtYmx5IGEgV2Vsc2ggUGFybGlhbWVudC4K&' + \
+                 r'trg_sentence=RW4ganVuaW8sIGxhIENvbWlzacOzbiBwdWJsaWPDsyBsb3MgcmVzdWx0YWRvcyBkZSB1bmEgY29uc3VsdGEgcMO6YmxpY2Egc29icmUgbGFzIHByb3B1ZXN0YXMsIGVuIGRvbmRlIHNlIG9idHV2byB1biBhbXBsaW8gYXBveW8gcGFyYSBsbGFtYXIgYSBsYSBhc2FtYmxlYSB1biBQYXJsYW1lbnRvIGRlIEdhbGVzLgo=&' + \
+                 r'src_lang=English&' + \
+                 r'trg_lang=French&' + \
+                 r'src_sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
+                 r'trg_sentence=w4AgbCdpbnN0YXIgZCdhdXRyZXMgZXhwZXJ0cywgaWwgc2UgbW9udHJlIHNjZXB0aXF1ZSBxdWFudCDDoCBsYSBwb3NzaWJpbGl0w6kgZGUgZ3XDqXJpciBsZSBkaWFiw6h0ZSwgZmFpc2FudCByZW1hcnF1ZXIgcXVlIGNlcyByw6lzdWx0YXRzIG5lIHNvbnQgcGFzIGFwcGxpY2FibGVzIGF1eCBwZXJzb25uZXMgcXVpIHNvdWZmcmVudCBkw6lqw6AgZGUgZGlhYsOodGUgZGUgdHlwZSAxLgo=&' + \
+                '"', flask_port)
+    logger.info("Examples might not work if you are not using Flask (e.g., you are using gunicorn) and you may be necesasry to adapt them to the used configuration")
+    logger.info("Sentences are expected to be provided in BASE64 format")
+
+    if run_flask_server:
+        # Run flask server
+        app.run(debug=args.flask_debug, port=flask_port)
+
+def initialization():
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+                                     description="MT_ICL flask server")
+
+    parser.add_argument('--batch-size', type=int, default=16, help="Batch size")
+    parser.add_argument('--pretrained-model', default="meta-llama/Llama-2-7b-chat-hf", help="Pretrained model")
+    parser.add_argument('--max-new-tokens', type=int, default=512, help="Max. length for the generated tokens")
+    parser.add_argument('--force-cpu', action="store_true", help="Run on CPU (i.e. do not check if GPU is possible)")
+    parser.add_argument('--disable-streamer', action="store_true", help="Do not use streamer (it might lead to slower inference and OOM errors)")
+    parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")
+    parser.add_argument('--streamer-max-latency', type=float, default=0.1,
+                        help="Streamer max latency. You will need to modify this parameter if you want to increase the GPU usage")
+    parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
+
+    parser.add_argument('-v', '--verbose', action="store_true", help="Verbose logging mode")
+    parser.add_argument('--flask-debug', action="store_true", help="Flask debug mode. Warning: this option might load the model multiple times")
+
+    args = parser.parse_args()
+
+    return args
+
+def cli():
+    global logger
+
+    args = initialization()
+    logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.flask_server"), level=logging.DEBUG if args.verbose else logging.INFO)
+
+    logger.debug("Arguments processed: {}".format(str(args)))
+
+    main(args)
+
+    if not args.do_not_run_flask_server:
+        logger.info("Bye!")
+    else:
+        logger.info("Execution has finished")
+
+if __name__ == "__main__":
+    cli()
