@@ -32,6 +32,8 @@ def info():
         {
             "/hello-world": ["GET"],
             "/translate": ["GET", "POST"],
+            "/get_embedding_from_model_embedding_matrix": ["GET", "POST"],
+            "/get_embedding_mean_pooling": ["GET", "POST"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
 

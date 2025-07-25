@@ -68,23 +68,19 @@ class StopOnTokensSeq(StoppingCriteria):
 
         return False
 
-#prompt_example_split_char = ' '
-prompt_example_split_char = '\n'
-
-def translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, max_new_tokens=1024, stopping_criteria=None):
+def translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, max_new_tokens=1024, stopping_criteria=None, normalize=True):
     all_outputs, all_original_outputs = [], []
 
     # Tokenize
     inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left").to(model.device)
 
     # Generate with beam search
-    # Decoding: https://proceedings.mlr.press/v202/garcia23a.html
+    # Decoding: https://aclanthology.org/2024.emnlp-main.489/
     output = model.generate(
         **inputs,
         #max_new_tokens=1024,
         max_new_tokens=max_new_tokens,
         num_beams=4,
-        length_penalty=0.6,
         early_stopping=True,
         pad_token_id=tokenizer.eos_token_id,
         do_sample=False,
@@ -105,34 +101,192 @@ def translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, 
 
     for idx in range(len(_decoded_outputs)):
         decoded_output = _decoded_outputs[idx]
-
-#        if is_causal_or_chat == "causal":
-#            decoded_output_split_idx = decoded_output.find(f"{prompt_example_split_char}{src_lang}")
-#
-#            if prompt_example_split_char == '\n':
-#                decoded_output = decoded_output.strip().split('\n')[0]
-#            elif src_lang in decoded_output and decoded_output_split_idx != -1:
-#                decoded_output = decoded_output[:decoded_output_split_idx]
-#            else:
-#                logging.warning("The output does not contain the expected language prefix: printing all the generated content")
-#        elif is_causal_or_chat == "chat":
-#            decoded_output = decoded_output.strip().split('\n')[0]
-#        else:
-#            raise Exception(f"Unexpected: {is_causal_or_chat}")
-##
         decoded_output = decoded_output.strip().split('\n')[0]
-##
         decoded_output = decoded_output
         original_decoded_output = str(_decoded_outputs[idx])
+
+        if normalize:
+            decoded_output = decoded_output.replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip()
+            original_decoded_output = original_decoded_output.replace('\t', r' \t ').replace('\n', r' \n ').replace('\r', '').strip()
 
         all_outputs.append(decoded_output)
         all_original_outputs.append(original_decoded_output)
 
     return all_outputs, all_original_outputs
 
-def main():
-    global prompt_example_split_char
+def get_embedding_mean_pooling(model, tokenizer, prompts):
+    # Tokenize
+    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left").to(model.device)
+    input_ids = inputs["input_ids"].to(model.device)
+    attention_mask = inputs["attention_mask"].to(model.device)
 
+    # Forward pass with hidden states
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        hidden_states = outputs.hidden_states[-1] # shape: (batch_size, seq_len, hidden_dim)
+
+        assert len(hidden_states.shape) == 3, f"hidden_states expected shape: (batch_size, seq_len, hidden_dim); got: {hidden_states.shape}"
+
+    # Mean pooling
+    attention_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+    sum_embeddings = torch.sum(hidden_states * attention_mask_expanded, dim=1)
+    sum_mask = attention_mask_expanded.sum(dim=1)
+    mean_pooled_embeddings = sum_embeddings / sum_mask
+    mean_pooled_embeddings = mean_pooled_embeddings.cpu()
+
+    return mean_pooled_embeddings
+
+def get_token_embedding(token: str, tokenizer, model):
+    token_id = tokenizer.convert_tokens_to_ids(token)
+
+    assert token_id is not None, f"Token '{token}' not found in tokenizer vocabulary."
+
+    embedding_matrix = model.model.embed_tokens.weight # embedding matrix (shape: vocab_size, hidden_dim)
+    token_embedding = embedding_matrix[token_id].cpu()
+
+    return token_embedding, token_id
+
+def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bsz, is_causal_or_chat, teacher_forcing=False, add_eos_token=True,
+                 icl_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]",
+                 zs_template="[src_lang]: [source_text]\n[trg_lang]: ",
+                 zswr_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]"):
+    assert len(src_sentences) <= _bsz
+    assert len(src_sentences) == len(icl_examples), f"{len(src_sentences)} vs {len(icl_examples)}: {src_sentences} vs {icl_examples}"
+    assert isinstance(icl_examples, list)
+
+    if teacher_forcing and icl_examples is None:
+        icl_examples = [[] for _ in range(len(src_sentences))]
+
+    for icl_example in icl_examples:
+        assert isinstance(icl_example, list)
+
+        if len(icl_example) > 0: # ZS is possible
+            for el in icl_example:
+                assert len(el) == 2, f"Each icl_example must have exactly two elements: source and target: {len(el)}: {el}"
+
+    prompts = []
+    src_sentence_n_tokens = -1
+    src_sentence_idx = 0
+
+    while len(prompts) < _bsz and len(prompts) < len(src_sentences):
+        _src_lang = src_lang[src_sentence_idx]
+        _trg_lang = trg_lang[src_sentence_idx]
+        src_sentence = src_sentences[src_sentence_idx]
+
+        if teacher_forcing:
+            assert isinstance(src_sentence, list) or isinstance(src_sentence, tuple)
+            assert len(src_sentence) == 2, f"Each sentence must have exactly two elements: source and target: {len(src_sentence)}: {src_sentence}"
+
+            _src_sentence = src_sentence[0].strip()
+            _trg_sentence = src_sentence[1].strip()
+        else:
+            _src_sentence = src_sentence.strip()
+
+        if is_causal_or_chat == "chat":
+            prompt = []
+            #system_prompt = f"You are a machine translation system that translates sentences from {_src_lang} to {_trg_lang}. You just respond with the translation, without any additional comments."
+
+            #for icl_src, icl_trg in icl_examples[src_sentence_idx]:
+            #    system_prompt += f"\n\nExample instruction: {icl_src}"
+            #    system_prompt += f"\n\nTranslate to {_trg_lang}"
+            #    system_prompt += f"\n\nExample response:\n\nSure, here's the translation:\n{icl_trg}"
+
+            _prompt = ''
+
+            for icl_src, icl_trg in icl_examples[src_sentence_idx]:
+                _prompt2 = str(icl_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+
+                _prompt += _prompt2 + '\n'
+
+            if teacher_forcing:
+                _prompt2 = str(zswr_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+            else:
+                _prompt2 = str(zs_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+
+            _prompt += _prompt2
+
+            #prompt.append({"role": "system", "content": system_prompt})
+            #prompt.append({"role": "user", "content": f"{_src_sentence}\n\nTranslate to {_trg_lang}"})
+            #prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
+
+            prompt.append({"role": "user", "content": _prompt})
+
+            prompt = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            #placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
+
+            #assert placeholder_idx != -1
+            #assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
+
+            # Force the initial response of the model
+            #if teacher_forcing:
+            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the translation:\n{_trg_sentence}"
+            #else:
+            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the translation:\n"
+        elif is_causal_or_chat == "causal":
+            _prompt = ''
+
+            for icl_src, icl_trg in icl_examples[src_sentence_idx]:
+                _prompt2 = str(icl_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+
+                _prompt += _prompt2 + '\n'
+
+            if teacher_forcing:
+                _prompt2 = str(zswr_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+            else:
+                _prompt2 = str(zs_template)
+                _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
+                _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
+                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+
+            _prompt += _prompt2
+            prompt = _prompt
+        else:
+            raise Exception(f"Unknown: {is_causal_or_chat}")
+
+        if teacher_forcing and add_eos_token:
+            prompt += tokenizer.eos_token
+
+        prompts.append(prompt)
+
+        if teacher_forcing:
+            _src_sentence_n_tokens = tokenizer(_src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+            _trg_sentence_n_tokens = tokenizer(_trg_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+            src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens + _trg_sentence_n_tokens)
+        else:
+            _src_sentence_n_tokens = tokenizer(src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+            src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens)
+
+        src_sentence_idx += 1
+
+    assert len(prompts) == len(src_sentences[:_bsz])
+
+    return prompts, src_sentence_n_tokens
+
+def main():
     src_lang = sys.argv[1]
     trg_lang = sys.argv[2]
     src_sentences_fn = sys.argv[3]
@@ -169,7 +323,6 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # Early stopping criteria
-    #stop_seqs = ["<|stop|>", "###END###"]
     stop_seqs = ['\n']
     stop_token_seq_ids = [tokenizer.encode(seq, add_special_tokens=False, return_tensors=None) for seq in stop_seqs]
 
@@ -193,19 +346,15 @@ def main():
         icl_examples = []
 
         logging.info("Few-shots: 0 (zero-shot)")
-
-        if is_causal_or_chat == "causal" and prompt_example_split_char != '\n':
-            logging.warning("prompt_example_split_char=' ', but for the selected configuration is a better idea to set prompt_example_split_char='\\n' in order to split correctly the output translation. Using the latter configuration")
-
-            prompt_example_split_char = '\n'
     else:
         logging.info("Few-shots: %d", len(icl_examples))
 
     for idx, l in enumerate(icl_examples):
         assert len(l) == 2, f"Line {idx + 1} should have exactly two columns: source and target: {l}"
 
-    # Build prompt: https://proceedings.mlr.press/v202/zhang23m
-    # Build prompt: https://aclanthology.org/2024.findings-naacl.176/
+        icl_examples[idx] = (l[0].strip(), l[1].strip())
+
+    # Build prompt
     _device = device
     _bsz = bsz
 
@@ -214,63 +363,16 @@ def main():
             if model.device != _device:
                 model = model.to(_device)
 
-            prompts = []
-            src_sentence_n_tokens = -1
-            src_sentence_idx = 0
+            _src_sentences = src_sentences[:_bsz]
+            _icl_examples = [icl_examples for _ in range(len(_src_sentences))]
+            _src_lang = [src_lang] * len(_src_sentences)
+            _trg_lang = [trg_lang] * len(_src_sentences)
 
-            while len(prompts) < _bsz and len(prompts) < len(src_sentences):
-                src_sentence = src_sentences[src_sentence_idx].strip()
+            assert len(_icl_examples) == len(_src_sentences)
 
-                if is_causal_or_chat == "causal":
-                    #prompt = ''.join([f"{src_lang}: {icl_src}{prompt_example_split_char}{trg_lang}: {icl_trg}{prompt_example_split_char}" for icl_src, icl_trg in icl_examples])
-                    #prompt += f"{src_lang}: {src_sentence}{prompt_example_split_char}{trg_lang}: "
-                    prompt = ''.join([f"{icl_src}={icl_trg}{prompt_example_split_char}" for icl_src, icl_trg in icl_examples])
-                    prompt += f"{src_sentence}="
-                elif is_causal_or_chat == "chat":
-                    # Partially combined with https://aclanthology.org/2024.eacl-short.4/
-                    prompt = []
-                    system_prompt = f"You are a machine translation system that translates sentences from {src_lang} to {trg_lang}. You just respond with the translation, without any additional comments."
-
-                    if len(icl_examples) > 0:
-                        #system_prompt += "\n\n"
-                        system_prompt += "\n"
-
-                    for icl_src, icl_trg in icl_examples:
-                        #system_prompt += f"\nExample instruction and response: {src_lang}: {icl_src}{prompt_example_split_char}{trg_lang}: {icl_trg}{prompt_example_split_char}"
-                        system_prompt += f"\nExample instruction and response: {icl_src}={icl_trg}{prompt_example_split_char}"
-
-                    prompt.append({"role": "system", "content": system_prompt})
-                    #prompt.append({"role": "user", "content": f"{src_lang}: {src_sentence}{prompt_example_split_char}{trg_lang}: "})
-                    #prompt.append({"role": "user", "content": f"{src_lang}: {src_sentence}{prompt_example_split_char}"})
-                    prompt.append({"role": "user", "content": f"{src_sentence}"})
-                    prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
-
-                    prompt = tokenizer.apply_chat_template(
-                        prompt,
-                        tokenize=False,
-                        add_generation_prompt=True
-                    )
-
-                    placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
-
-                    assert placeholder_idx != -1
-                    assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
-
-                    # Force the initial response of the model
-                    #prompt = f"{prompt[:placeholder_idx]}{trg_lang}: "
-                    prompt = f"{prompt[:placeholder_idx]}="
-                else:
-                    raise Exception(f"Unexpected: {is_causal_or_chat}")
-
-                prompts.append(prompt)
-            
-                _src_sentence_n_tokens = tokenizer(src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
-                src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens)
-                src_sentence_idx += 1
-
-            assert len(prompts) == len(src_sentences[:_bsz])
-
-            max_new_tokens = min(1024, src_sentence_n_tokens * 10)
+            prompts, src_sentence_n_tokens = build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, is_causal_or_chat)
+            #max_new_tokens = min(1024, src_sentence_n_tokens * 10)
+            max_new_tokens = 512
 
             logging.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
             logging.debug("max_new_tokens: %d", max_new_tokens)
@@ -278,8 +380,6 @@ def main():
 
             # Translate
             all_outputs, all_original_outputs = translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, max_new_tokens=max_new_tokens, stopping_criteria=stopping_criteria)
-            all_outputs = list(map(lambda s: s.replace('\n', r" \n ").replace('\t', r" \t ").strip(), all_outputs))
-            all_original_outputs = list(map(lambda s: s.replace('\n', r" \n ").replace('\t', r" \t ").strip(), all_original_outputs))
 
             assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
 
