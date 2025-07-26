@@ -1,11 +1,15 @@
 
+import os
 import sys
 import logging
+
+import utils
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.icl_translation"), level=logging.DEBUG)
 
 class StopOnTokens(StoppingCriteria):
     def __init__(self, stop_token_ids):
@@ -42,23 +46,20 @@ class StopOnTokensSeq(StoppingCriteria):
         self.stop_token_ids = set([tuple(l) for l in stop_token_ids])
         self.stop_token_token = [(l, tuple([tokenizer.decode(l2) for l2 in l]), tokenizer.decode(l)) for l in stop_token_ids]
 
-        logging.debug("early stopping tokens: %s", self.stop_token_token)
+        logger.debug("early stopping tokens (format: tuple(ids, tuple(decode(token)), decode)): %s", self.stop_token_token)
 
     def __call__(self, input_ids, scores, **kwargs):
         # input_ids is a tensor of shape (batch_size * beam_size, sequence_length), including the prompt
 
         assert len(input_ids.shape) == 2
 
-        #logging.debug("input_ids.shape: %s", input_ids.shape)
+        #logger.debug("input_ids.shape: %s", input_ids.shape)
 
         stop = [False] * input_ids.shape[0]
 
         for idx in range(len(input_ids)):
             for stop_token_id in self.stop_token_ids:
-                #logging.debug("stop_token_id: %s; tuple(input_ids[idx, -len(stop_token_id):].tolist()): %s", stop_token_id, tuple(input_ids[idx, -len(stop_token_id):].tolist()))
-
-                if len(input_ids[idx]) < len(stop_token_id):
-                    continue
+                #logger.debug("stop_token_id: %s; tuple(input_ids[idx, -len(stop_token_id):].tolist()): %s", stop_token_id, tuple(input_ids[idx, -len(stop_token_id):].tolist()))
 
                 if tuple(input_ids[idx, -len(stop_token_id):].tolist()) == stop_token_id:
                     stop[idx] = True
@@ -68,7 +69,7 @@ class StopOnTokensSeq(StoppingCriteria):
 
         return False
 
-def translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, max_new_tokens=1024, stopping_criteria=None, normalize=True):
+def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=None, normalize=True):
     all_outputs, all_original_outputs = [], []
 
     # Tokenize
@@ -94,16 +95,15 @@ def translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, 
     assert output.shape[0] == len(prompts)
 
     # Decode
-    decoded_outputs = []
-    _decoded_outputs = [tokenizer.decode(output[idx][inputs.input_ids[idx].shape[-1]:], skip_special_tokens=True) for idx in range(output.shape[0])]
+    decoded_outputs = [tokenizer.decode(output[idx][inputs.input_ids[idx].shape[-1]:], skip_special_tokens=True) for idx in range(output.shape[0])]
 
     #print("\n=== TRANSLATION ===")
 
-    for idx in range(len(_decoded_outputs)):
-        decoded_output = _decoded_outputs[idx]
+    for idx in range(len(decoded_outputs)):
+        decoded_output = decoded_outputs[idx]
         decoded_output = decoded_output.strip().split('\n')[0]
         decoded_output = decoded_output
-        original_decoded_output = str(_decoded_outputs[idx])
+        original_decoded_output = str(decoded_outputs[idx])
 
         if normalize:
             decoded_output = decoded_output.replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip()
@@ -146,16 +146,35 @@ def get_token_embedding(token: str, tokenizer, model):
 
     return token_embedding, token_id
 
-def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bsz, is_causal_or_chat, teacher_forcing=False, add_eos_token=True,
-                 icl_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]",
-                 zs_template="[src_lang]: [source_text]\n[trg_lang]: ",
-                 zswr_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]"):
+def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bsz, is_causal_or_chat=None, teacher_forcing=False, add_eos_token=True,
+                 icl_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]\n",
+                 zs_causal_template="[src_lang]: [source_text]\n[trg_lang]: ",
+                 zs_chat_user_template="[src_lang]: [source_text]",
+                 zs_chat_response_prefix_template="[trg_lang]: ",
+                 zswr_causal_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]",
+                 zswr_chat_user_template="[src_lang]: [source_text]",
+                 zswr_chat_response_prefix_template="[trg_lang]: [translation_text]",):
+    if teacher_forcing and icl_examples is None:
+        icl_examples = [[] for _ in range(len(src_sentences))]
+
     assert len(src_sentences) <= _bsz
     assert len(src_sentences) == len(icl_examples), f"{len(src_sentences)} vs {len(icl_examples)}: {src_sentences} vs {icl_examples}"
     assert isinstance(icl_examples, list)
 
-    if teacher_forcing and icl_examples is None:
-        icl_examples = [[] for _ in range(len(src_sentences))]
+    if is_causal_or_chat is None:
+        if "MT_ICL_IS_CAUSAL_OR_CHAT" in os.environ:
+            is_causal_or_chat = os.environ["MT_ICL_IS_CAUSAL_OR_CHAT"].strip().lower()
+
+            assert is_causal_or_chat in ("causal", "chat"), "MT_ICL_IS_CAUSAL_OR_CHAT must be either 'causal' or 'chat'"
+        else:
+            try:
+                tokenizer.apply_chat_template([{"role": "system", "content": "foo"}, {"role": "user", "content": "foo"}])
+            except:
+                is_causal_or_chat = "causal"
+            else:
+                is_causal_or_chat = "chat"
+
+            logger.warning("is_causal_or_chat is None: using inferred value: %s", is_causal_or_chat)
 
     for icl_example in icl_examples:
         assert isinstance(icl_example, list)
@@ -184,7 +203,7 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
 
         if is_causal_or_chat == "chat":
             prompt = []
-            #system_prompt = f"You are a machine translation system that translates sentences from {_src_lang} to {_trg_lang}. You just respond with the translation, without any additional comments."
+            system_prompt = f"You are a machine translation system that translates sentences from {_src_lang} to {_trg_lang}. You just respond with the translation, without any additional comments."
 
             #for icl_src, icl_trg in icl_examples[src_sentence_idx]:
             #    system_prompt += f"\n\nExample instruction: {icl_src}"
@@ -197,22 +216,33 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 _prompt2 = str(icl_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
-                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
-                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+                _prompt2 = _prompt2.replace("[source_text]", icl_src)
+                _prompt2 = _prompt2.replace("[translation_text]", icl_trg)
 
-                _prompt += _prompt2 + '\n'
+                #_prompt += _prompt2 + '\n' # The user decides the format of the prompt
 
             if teacher_forcing:
-                _prompt2 = str(zswr_template)
+                _prompt2 = str(zswr_chat_user_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
                 _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
                 _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+                # response prefix
+                _prompt3 = str(zswr_chat_response_prefix_template)
+                _prompt3 = _prompt3.replace("[src_lang]", _src_lang)
+                _prompt3 = _prompt3.replace("[trg_lang]", _trg_lang)
+                _prompt3 = _prompt3.replace("[source_text]", _src_sentence)
+                _prompt3 = _prompt3.replace("[translation_text]", _trg_sentence)
             else:
-                _prompt2 = str(zs_template)
+                _prompt2 = str(zs_chat_user_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
                 _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
+                # response prefix
+                _prompt3 = str(zs_chat_response_prefix_template)
+                _prompt3 = _prompt3.replace("[src_lang]", _src_lang)
+                _prompt3 = _prompt3.replace("[trg_lang]", _trg_lang)
+                _prompt3 = _prompt3.replace("[source_text]", _src_sentence)
 
             _prompt += _prompt2
 
@@ -220,7 +250,9 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
             #prompt.append({"role": "user", "content": f"{_src_sentence}\n\nTranslate to {_trg_lang}"})
             #prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
 
+            prompt.append({"role": "system", "content": system_prompt})
             prompt.append({"role": "user", "content": _prompt})
+            prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
 
             prompt = tokenizer.apply_chat_template(
                 prompt,
@@ -228,16 +260,18 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 add_generation_prompt=True
             )
 
-            #placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
+            placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
 
-            #assert placeholder_idx != -1
-            #assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
+            assert placeholder_idx != -1
+            assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
 
             # Force the initial response of the model
             #if teacher_forcing:
-            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the translation:\n{_trg_sentence}"
+            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: {_trg_sentence}"
             #else:
-            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the translation:\n"
+            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: "
+
+            prompt = f"{prompt[:placeholder_idx]}{_prompt3}"
         elif is_causal_or_chat == "causal":
             _prompt = ''
 
@@ -245,19 +279,19 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 _prompt2 = str(icl_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
-                _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
-                _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
+                _prompt2 = _prompt2.replace("[source_text]", icl_src)
+                _prompt2 = _prompt2.replace("[translation_text]", icl_trg)
 
-                _prompt += _prompt2 + '\n'
+                #_prompt += _prompt2 + '\n' # The user decides the format of the prompt
 
             if teacher_forcing:
-                _prompt2 = str(zswr_template)
+                _prompt2 = str(zswr_causal_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
                 _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
                 _prompt2 = _prompt2.replace("[translation_text]", _trg_sentence)
             else:
-                _prompt2 = str(zs_template)
+                _prompt2 = str(zs_causal_template)
                 _prompt2 = _prompt2.replace("[src_lang]", _src_lang)
                 _prompt2 = _prompt2.replace("[trg_lang]", _trg_lang)
                 _prompt2 = _prompt2.replace("[source_text]", _src_sentence)
@@ -295,6 +329,7 @@ def main():
     bsz = int(sys.argv[6]) if len(sys.argv) > 6 else 8
 
     assert is_causal_or_chat in ("causal", "chat"), "is_causal_or_chat must be either 'causal' or 'chat'"
+    assert bsz > 0, "Batch size must be a positive integer"
 
     src_sentences = []
     n_original_sentences = 0
@@ -311,7 +346,7 @@ def main():
     discarded_n_sentences = n_original_sentences - len(src_sentences)
     discarded_n_sentences_perc = discarded_n_sentences * 100 / n_original_sentences
 
-    logging.info("Loaded sentences: %d (discarded: %d, %.2f%%)", len(src_sentences), discarded_n_sentences, discarded_n_sentences_perc)
+    logger.info("Loaded sentences: %d (discarded: %d, %.2f%%)", len(src_sentences), discarded_n_sentences, discarded_n_sentences_perc)
 
     # Load model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -345,9 +380,9 @@ def main():
         # zero-shot
         icl_examples = []
 
-        logging.info("Few-shots: 0 (zero-shot)")
+        logger.info("Few-shots: 0 (zero-shot)")
     else:
-        logging.info("Few-shots: %d", len(icl_examples))
+        logger.info("Few-shots: %d", len(icl_examples))
 
     for idx, l in enumerate(icl_examples):
         assert len(l) == 2, f"Line {idx + 1} should have exactly two columns: source and target: {l}"
@@ -374,17 +409,17 @@ def main():
             #max_new_tokens = min(1024, src_sentence_n_tokens * 10)
             max_new_tokens = 512
 
-            logging.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
-            logging.debug("max_new_tokens: %d", max_new_tokens)
-            logging.info("Prompts: %s", str(prompts))
+            logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
+            logger.debug("max_new_tokens: %d", max_new_tokens)
+            logger.info("Prompts: %s", str(prompts))
 
             # Translate
-            all_outputs, all_original_outputs = translate(model, tokenizer, prompts, src_lang, trg_lang, is_causal_or_chat, max_new_tokens=max_new_tokens, stopping_criteria=stopping_criteria)
+            all_outputs, all_original_outputs = translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=stopping_criteria)
 
             assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
 
             for src_sentence, decoded_output, original_decoded_output in zip(src_sentences[:_bsz], all_outputs, all_original_outputs):
-                logging.info("Original output: %s", original_decoded_output)
+                logger.info("Original output: %s", original_decoded_output)
                 print(f"{src_sentence}\t{decoded_output}")
 
             _device = device
@@ -397,9 +432,9 @@ def main():
                 _device = "cpu"
                 _bsz = bsz
 
-                logging.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", bsz)
+                logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", bsz)
             else:
-                logging.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
+                logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
 
                 _bsz = _bsz // 2
 

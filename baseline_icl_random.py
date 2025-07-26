@@ -8,13 +8,25 @@ import requests
 def encode_base64(s):
     return base64.b64encode(s.encode('utf-8')).decode('utf-8')
 
-def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0):
+def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, icl_example_equal_to_src=True):
     for i in range(0, len(lst), batch_size):
         icl_examples = []
-        n_icl_examples = len(lst[i:i+batch_size])
+        bsz = len(lst[i:i+batch_size])
 
-        for _ in range(n_icl_examples):
-            _icl_examples = random.sample(icl_examples_pool, icl_num_examples) if icl_examples_pool is not None and icl_num_examples > 0 else []
+        for j in range(bsz):
+            while True:
+                _icl_examples = random.sample(icl_examples_pool, icl_num_examples) if icl_examples_pool is not None and icl_num_examples > 0 else []
+
+                if icl_example_equal_to_src and len(_icl_examples) > 0:
+                    src_sentence = lst[i + j].strip()
+                    src_icl_examples = {icl_src_example.strip() for icl_src_example, _ in _icl_examples}
+
+                    if src_sentence not in src_icl_examples:
+                        break
+                    else:
+                        assert len(icl_examples_pool) > icl_num_examples, f"icl_examples_pool must contain more examples than icl_num_examples (at least, one more) to guarantee that is possible to sample a different src sentence: {len(icl_examples_pool)} vs {icl_num_examples}"
+                else:
+                    break
 
             icl_examples.append(_icl_examples)
 
@@ -53,17 +65,18 @@ def main():
     random.shuffle(icl_examples_pool)
 
     # Encode each sentence in base64
-    encoded_sentences = [encode_base64(s) for s in sentences]
     url = "http://127.0.0.1:8000/translate"
     src_sentences_idx = 0
 
-    for batch, batch_icl_examples in batchify(encoded_sentences, batch_size, icl_examples_pool=icl_examples_pool, icl_num_examples=icl_num_examples):
+    for batch, batch_icl_examples in batchify(sentences, batch_size, icl_examples_pool=icl_examples_pool, icl_num_examples=icl_num_examples):
         assert len(batch) == len(batch_icl_examples), f"Batch size mismatch: {len(batch)} vs {len(batch_icl_examples)}"
 
         payload = []
 
         for idx, (s, icl_examples) in enumerate(zip(batch, batch_icl_examples), 1):
             assert len(icl_examples) == icl_num_examples, f"Each icl example must have exactly {icl_num_examples} elements, got {len(icl_examples)}"
+
+            s = encode_base64(s)
 
             payload.append(('src_lang', src_lang_value))
             payload.append(('trg_lang', trg_lang_value))

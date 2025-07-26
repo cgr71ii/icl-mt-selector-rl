@@ -26,6 +26,7 @@ def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/L
         "--do-not-run-flask-server", # Necessary for gunicorn in order to work properly
         "--verbose",
         "--disable-streamer", # It should be enabled for crawls of multiple websites, but disabled for a few websites
+        "--debug",
     ])
 
     flask_server.cli()

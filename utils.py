@@ -23,10 +23,16 @@ def set_up_logging_logger(logger, filename=None, level=logging.INFO, format="[%(
             handlers[0] = logging.FileHandler(filename)
 
     formatter = logging.Formatter(format)
+    set_formatter = True
 
-    for h in handlers:
-        h.setFormatter(formatter)
-        logger.addHandler(h)
+    for h in logger.handlers:
+        if h.formatter is not None and h.formatter._fmt == formatter._fmt and isinstance(h, logging.StreamHandler):
+            set_formatter = False
+
+    if set_formatter:
+        for h in handlers:
+            h.setFormatter(formatter)
+            logger.addHandler(h)
 
     logger.setLevel(level)
 

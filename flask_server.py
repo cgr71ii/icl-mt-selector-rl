@@ -1,15 +1,16 @@
 
+import os
 import json
 import base64
 import pickle
 import logging
+import inspect
 import argparse
 
 import utils
-import icl_translation_only_instruction_tuned as mt_icl
+import icl_translation as mt_icl
 
 import torch
-import numpy as np
 from flask import (
     Flask,
     request,
@@ -19,12 +20,21 @@ from service_streamer import ThreadedStreamer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 app = Flask("MT-ICL-flask-server")
-
 global_conf = {} # Empty since it will be filled once main is run
-logger = logging.getLogger("MT_ICL")
+logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.flask_server"), level=logging.INFO)
 
 # Disable (less verbose) 3rd party logging
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+sig_build_prompt = inspect.signature(mt_icl.build_prompt)
+template_kwargs = {} # avoid inline declaration of template_kwargs to preserve the order of the keys
+template_kwargs["icl_template"] = os.environ["MT_ICL_ICL_TEMPLATE"] if "MT_ICL_ICL_TEMPLATE" in os.environ else sig_build_prompt.parameters["icl_template"].default
+template_kwargs["zs_causal_template"] = os.environ["MT_ICL_ZS_CAUSAL_TEMPLATE"] if "MT_ICL_ZS_CAUSAL_TEMPLATE" in os.environ else sig_build_prompt.parameters["zs_causal_template"].default
+template_kwargs["zs_chat_user_template"] = os.environ["MT_ICL_ZS_CHAT_USER_TEMPLATE"] if "MT_ICL_ZS_CHAT_USER_TEMPLATE" in os.environ else sig_build_prompt.parameters["zs_chat_user_template"].default
+template_kwargs["zs_chat_response_prefix_template"] = os.environ["MT_ICL_ZS_CHAT_RESPONSE_PREFIX_TEMPLATE"] if "MT_ICL_ZS_CHAT_RESPONSE_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["zs_chat_response_prefix_template"].default
+template_kwargs["zswr_causal_template"] = os.environ["MT_ICL_ZSWR_CAUSAL_TEMPLATE"] if "MT_ICL_ZSWR_CAUSAL_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_causal_template"].default
+template_kwargs["zswr_chat_user_template"] = os.environ["MT_ICL_ZSWR_CHAT_USER_TEMPLATE"] if "MT_ICL_ZSWR_CHAT_USER_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_chat_user_template"].default
+template_kwargs["zswr_chat_response_prefix_template"] = os.environ["MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE"] if "MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_chat_response_prefix_template"].default
 
 @app.route('/', methods=['GET'])
 def info():
@@ -34,10 +44,28 @@ def info():
             "/translate": ["GET", "POST"],
             "/get_embedding_from_model_embedding_matrix": ["GET", "POST"],
             "/get_embedding_mean_pooling": ["GET", "POST"],
+            "/template_info": ["GET"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
 
     return f"Available routes:<br/>{available_routes}"
+
+@app.route('/template_info', methods=['GET'])
+def template_info():
+    template_kwargs_print = {}
+
+    for k, v in template_kwargs.items():
+        template_kwargs_print[k] = str(v) # preserve the order of the keys and avoid reference copy
+
+    keys = set(template_kwargs_print.keys())
+
+    for k in keys:
+        _k = f"MT_ICL_{k.upper()}"
+        template_kwargs_print[_k] = template_kwargs_print.pop(k)
+
+    template_kwargs_print = json.dumps(template_kwargs_print, indent=4)
+
+    return f"Available template variables (you can modify the values using envvars):\n{template_kwargs_print}"
 
 @app.route('/hello-world', methods=["GET"])
 def hello_world():
@@ -187,12 +215,14 @@ def translate_batch(data):
 
             assert len(_icl_examples) == len(_src_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_icl_examples)} vs {len(_src_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
 
-            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz)
+            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, **template_kwargs)
             max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
 
             logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
             logger.debug("max_new_tokens: %d", max_new_tokens)
-            logging.debug("Prompts: %s", str(prompts))
+
+            if global_conf["debug"]:
+                logger.debug("Prompts: %s", str(prompts))
 
             # Translate
             all_outputs, all_original_outputs = mt_icl.translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=None)
@@ -446,9 +476,11 @@ def embedding_mean_pooling_batch(data):
             assert len(_src_sentences) == len(_trg_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_src_sentences)} vs {len(_trg_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
 
             _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
-            prompts, _ = mt_icl.build_prompt_teacher_forcing(_sentences, _src_lang, _trg_lang, tokenizer, None, _bsz, add_eos_token=True)
+            prompts, _ = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, None, _bsz, teacher_forcing=True, add_eos_token=True, **template_kwargs)
 
-            logging.debug("Prompts: %s", str(prompts))
+
+            if global_conf["debug"]:
+                logger.debug("Prompts: %s", str(prompts))
 
             # Get embeddings
             all_outputs = mt_icl.get_embedding_mean_pooling(model, tokenizer, prompts)
@@ -518,6 +550,7 @@ def main(args):
     global_conf["streamer_embedding_tokens"] = ThreadedStreamer(embedding_tokens_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["streamer_embedding_mean_pooling"] = ThreadedStreamer(embedding_mean_pooling_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["disable_streamer"] = disable_streamer
+    global_conf["debug"] = args.debug
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
@@ -578,6 +611,7 @@ def initialization():
     parser.add_argument('--streamer-max-latency', type=float, default=0.1,
                         help="Streamer max latency. You will need to modify this parameter if you want to increase the GPU usage")
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
+    parser.add_argument('--debug', action="store_true", help="Debug mode")
 
     parser.add_argument('-v', '--verbose', action="store_true", help="Verbose logging mode")
     parser.add_argument('--flask-debug', action="store_true", help="Flask debug mode. Warning: this option might load the model multiple times")
