@@ -1,9 +1,9 @@
 #!/bin/bash
 
 for template in $(echo "template_1 template_2 template_3"); do
-for m in $(echo "Llama-2-7b-chat-hf Llama-2-7b-hf"); do
+for m in $(echo "Llama-2-7b-hf Llama-2-7b-chat-hf"); do
 
-./run_template_gunicorn.sh "${template}.txt" "meta-llama/${m}" &> ./preliminar_experiments_template/experiments_template.gunicorn.${m}.${template}.log &
+./run_template_gunicorn.sh "${template}.txt" "meta-llama/${m}" &>> ./preliminar_experiments_template/experiments_template.gunicorn.${m}.${template}.log &
 pid=$!
 
 sleep 30 # wait for the server to start
@@ -16,6 +16,11 @@ for ldata in $(echo "eng_Latn-fra_Latn:English:French eng_Latn-deu_Latn:English:
     for n_icl in $(echo "0 5"); do
     for seed in $(if [[ "$n_icl" == "0" ]]; then echo "42"; else echo "42 43 44"; fi); do
         f2="./preliminar_experiments_template/${f}.mt.preliminar_experiments.${m}.icl_random_${n_icl}.random_pool_flores_dev.seed_${seed}"
+        if [[ -f "${f2}.out" ]]; then
+            echo "Skipping ${f2} as it already exists."
+            continue
+        fi
+
         echo "$(date) $template $f2"
         cat "$f" | cut -f1 | python3 baseline_icl_random.py "$l1" "$l2" "$f" "${n_icl}" 50 "${seed}" > "${f2}.out" 2> "${f2}.log"
     done
@@ -27,6 +32,8 @@ done
 pgid=$(ps -o pgid= -p "$pid" | tr -d ' ')
 echo "$pid pgid $pgid"
 pkill -SIGINT -g $pgid
+
+sleep 30 # wait for the server to stop
 
 done
 done

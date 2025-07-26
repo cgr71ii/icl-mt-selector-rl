@@ -219,7 +219,7 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 _prompt2 = _prompt2.replace("[source_text]", icl_src)
                 _prompt2 = _prompt2.replace("[translation_text]", icl_trg)
 
-                #_prompt += _prompt2 + '\n' # The user decides the format of the prompt
+                _prompt += _prompt2 #+ '\n' # The user decides the format of the prompt
 
             if teacher_forcing:
                 _prompt2 = str(zswr_chat_user_template)
@@ -282,7 +282,7 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 _prompt2 = _prompt2.replace("[source_text]", icl_src)
                 _prompt2 = _prompt2.replace("[translation_text]", icl_trg)
 
-                #_prompt += _prompt2 + '\n' # The user decides the format of the prompt
+                _prompt += _prompt2 #+ '\n' # The user decides the format of the prompt
 
             if teacher_forcing:
                 _prompt2 = str(zswr_causal_template)
