@@ -51,10 +51,14 @@ echo "$(date) start server script: pid $$"
 
 template_file="$1" # e.g., template_1.txt
 pretrained_model="$2" # e.g., meta-llama/Llama-2-7b-hf
+gport="$3"
 
 if [[ -z "$template_file" ]] || [[ -z "$pretrained_model" ]]; then
     echo "Usage: $0 <template_file> <pretrained_model>"
     exit 1
+fi
+if [[ -z "$gport" ]]; then
+  gport="8000" # default gport
 fi
 
 if [[ ! -f "$template_file" ]]; then
@@ -70,9 +74,10 @@ set +a # Stop exporting future imported variables to child processes
 
 envvars_after=$(export | sort)
 
+echo "$(date) GPUs: $CUDA_VISIBLE_DEVICES"
 echo "$(date) starting gunicorn server with template: $template_file and model: $pretrained_model"
 
-gunicorn --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(8, 0.2, '$pretrained_model')" &
+gunicorn --bind "127.0.0.1:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(8, 0.2, '$pretrained_model', True)" &
 pid=$!
 
 echo "$(date) start server: pid $pid"

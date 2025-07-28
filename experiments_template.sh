@@ -70,7 +70,7 @@ for ldata in $(echo "eng_Latn-deu_Latn:English:German eng_Latn-swh_Latn:English:
     f="flores_200.dev.${l}.out"
     for n_icl in $(echo "0 5"); do
     for seed in $(if [[ "$n_icl" == "0" ]]; then echo "42"; else echo "42 43 44"; fi); do
-        f2="./preliminar_experiments_template/${f}.mt.preliminar_experiments.${m}.icl_random_${n_icl}.random_pool_flores_dev.seed_${seed}"
+        f2="./preliminar_experiments_template/${f}.mt.preliminar_experiments.${template}.${m}.icl_random_${n_icl}.random_pool_flores_dev.seed_${seed}"
         if [[ -f "${f2}.out" ]]; then
             echo "$(date) skipping: ${f2} already exists"
             continue

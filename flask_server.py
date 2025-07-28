@@ -518,7 +518,7 @@ def embedding_mean_pooling_batch(data):
 def main(args):
     force_cpu = args.force_cpu
     use_cuda = utils.use_cuda(force_cpu=force_cpu)
-    device = torch.device("cuda:0" if use_cuda else "cpu")
+    device = "auto" if use_cuda else torch.device("cpu") # auto allows to load a model using several GPUs
     pretrained_model = args.pretrained_model
     flask_port = args.flask_port
     streamer_max_latency = args.streamer_max_latency
@@ -529,10 +529,11 @@ def main(args):
         logger.warning("Since streamer is enabled, you might get slightly different results: not recommended for production")
         # Related to https://discuss.pytorch.org/t/slightly-different-results-in-same-machine-and-gpu-but-different-order/173581
 
-    logger.debug("Device: %s", device)
+    logger.debug("Device: %s (CUDA_VISIBLE_DEVICES=%s)", device, os.environ.get("CUDA_VISIBLE_DEVICES", "NOT_DEFINED"))
 
     if "model" not in global_conf:
         global_conf["model"] = AutoModelForCausalLM.from_pretrained(pretrained_model, torch_dtype=torch.float16, device_map=device)
+        device = global_conf["model"].device # data loading
     else:
         # We apply this step in order to avoid loading the model multiple times due to flask debug mode
         pass
