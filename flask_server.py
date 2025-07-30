@@ -35,6 +35,8 @@ template_kwargs["zs_chat_response_prefix_template"] = os.environ["MT_ICL_ZS_CHAT
 template_kwargs["zswr_causal_template"] = os.environ["MT_ICL_ZSWR_CAUSAL_TEMPLATE"] if "MT_ICL_ZSWR_CAUSAL_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_causal_template"].default
 template_kwargs["zswr_chat_user_template"] = os.environ["MT_ICL_ZSWR_CHAT_USER_TEMPLATE"] if "MT_ICL_ZSWR_CHAT_USER_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_chat_user_template"].default
 template_kwargs["zswr_chat_response_prefix_template"] = os.environ["MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE"] if "MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_chat_response_prefix_template"].default
+template_kwargs["chat_system_prompt_template"] = os.environ["MT_ICL_CHAT_SYSTEM_PROMPT_TEMPLATE"] if "MT_ICL_CHAT_SYSTEM_PROMPT_TEMPLATE" in os.environ else sig_build_prompt.parameters["chat_system_prompt_template"].default
+template_kwargs["user_prefix_template"] = os.environ["MT_ICL_USER_PREFIX_TEMPLATE"] if "MT_ICL_USER_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["user_prefix_template"].default
 
 @app.route('/', methods=['GET'])
 def info():

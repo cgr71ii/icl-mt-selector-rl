@@ -153,7 +153,10 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                  zs_chat_response_prefix_template="[trg_lang]: ",
                  zswr_causal_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]",
                  zswr_chat_user_template="[src_lang]: [source_text]",
-                 zswr_chat_response_prefix_template="[trg_lang]: [translation_text]",):
+                 zswr_chat_response_prefix_template="[trg_lang]: [translation_text]",
+                 chat_system_prompt_template="You are a machine translation system that translates sentences from [src_lang] to [trg_lang]. You just respond with the translation, without any additional comments.",
+                 user_prefix_template='',
+):
     if teacher_forcing and icl_examples is None:
         icl_examples = [[] for _ in range(len(src_sentences))]
 
@@ -203,7 +206,18 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
 
         if is_causal_or_chat == "chat":
             prompt = []
-            system_prompt = f"You are a machine translation system that translates sentences from {_src_lang} to {_trg_lang}. You just respond with the translation, without any additional comments."
+            system_prompt = str(chat_system_prompt_template)
+            system_prompt = system_prompt.replace("[src_lang]", _src_lang)
+            system_prompt = system_prompt.replace("[trg_lang]", _trg_lang)
+            system_prompt = system_prompt.replace("[source_text]", _src_sentence)
+            user_prefix = str(user_prefix_template)
+            user_prefix = user_prefix.replace("[src_lang]", _src_lang)
+            user_prefix = user_prefix.replace("[trg_lang]", _trg_lang)
+            user_prefix = user_prefix.replace("[source_text]", _src_sentence)
+
+            if teacher_forcing:
+                system_prompt = system_prompt.replace("[translation_text]", _trg_sentence)
+                user_prefix = user_prefix.replace("[translation_text]", _trg_sentence)
 
             #for icl_src, icl_trg in icl_examples[src_sentence_idx]:
             #    system_prompt += f"\n\nExample instruction: {icl_src}"
@@ -211,6 +225,7 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
             #    system_prompt += f"\n\nExample response:\n\nSure, here's the translation:\n{icl_trg}"
 
             _prompt = ''
+            _prompt += user_prefix
 
             for icl_src, icl_trg in icl_examples[src_sentence_idx]:
                 _prompt2 = str(icl_template)
@@ -250,9 +265,13 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
             #prompt.append({"role": "user", "content": f"{_src_sentence}\n\nTranslate to {_trg_lang}"})
             #prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
 
-            prompt.append({"role": "system", "content": system_prompt})
+            if system_prompt:
+                prompt.append({"role": "system", "content": system_prompt})
+
             prompt.append({"role": "user", "content": _prompt})
-            prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
+
+            if _prompt3:
+                prompt.append({"role": "assistant", "content": "PLACEHOLDER_PLACEHOLDER"})
 
             prompt = tokenizer.apply_chat_template(
                 prompt,
@@ -260,20 +279,30 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                 add_generation_prompt=True
             )
 
-            placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
+            if _prompt3:
+                placeholder_idx = prompt.find("PLACEHOLDER_PLACEHOLDER")
 
-            assert placeholder_idx != -1
-            assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
+                assert placeholder_idx != -1
+                assert prompt.find("PLACEHOLDER_PLACEHOLDER", placeholder_idx + 1) == -1 # only 1 placeholder
 
-            # Force the initial response of the model
-            #if teacher_forcing:
-            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: {_trg_sentence}"
-            #else:
-            #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: "
+                # Force the initial response of the model
+                #if teacher_forcing:
+                #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: {_trg_sentence}"
+                #else:
+                #    prompt = f"{prompt[:placeholder_idx]}Sure, here's the response: "
 
-            prompt = f"{prompt[:placeholder_idx]}{_prompt3}"
+                prompt = f"{prompt[:placeholder_idx]}{_prompt3}"
         elif is_causal_or_chat == "causal":
+            user_prefix = str(user_prefix_template)
+            user_prefix = user_prefix.replace("[src_lang]", _src_lang)
+            user_prefix = user_prefix.replace("[trg_lang]", _trg_lang)
+            user_prefix = user_prefix.replace("[source_text]", _src_sentence)
+
+            if teacher_forcing:
+                user_prefix = user_prefix.replace("[translation_text]", _trg_sentence)
+
             _prompt = ''
+            _prompt += user_prefix
 
             for icl_src, icl_trg in icl_examples[src_sentence_idx]:
                 _prompt2 = str(icl_template)

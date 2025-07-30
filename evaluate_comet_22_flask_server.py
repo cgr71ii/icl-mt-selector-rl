@@ -117,7 +117,7 @@ def evaluate_comet_22():
         "err": "null",
     })
 
-def evaluate_comet_22_batch(data):   
+def evaluate_comet_22_batch(data):
     src_sentences, mt_sentences, ref_sentences = zip(*data)
     src_sentences = list(src_sentences)
     mt_sentences = list(mt_sentences)
@@ -164,7 +164,7 @@ def evaluate_comet_22_batch(data):
                 _bsz = batch_size
 
                 logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", batch_size)
-            else:   
+            else:
                 logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
 
                 _bsz = _bsz // 2

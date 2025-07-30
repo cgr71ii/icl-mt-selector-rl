@@ -1,0 +1,9 @@
+# [src_lang]: [source_text] ⋄ [trg_lang]: [translation_text]
+# (English: I live in Paris. ⋄ French: J'habite à Paris.)
+MT_ICL_ICL_TEMPLATE="[src_lang]: [source_text]"$'\n'"[trg_lang]: [translation_text]"$'\n'""
+MT_ICL_ZS_CAUSAL_TEMPLATE="[src_lang]: [source_text]"$'\n'"[trg_lang]: "
+MT_ICL_ZS_CHAT_USER_TEMPLATE="[src_lang]: [source_text]"
+MT_ICL_ZS_CHAT_RESPONSE_PREFIX_TEMPLATE="Sure, here's the translation for the last sentence:"$'\n'"[trg_lang]: "
+MT_ICL_ZSWR_CAUSAL_TEMPLATE="[src_lang]: [source_text]"$'\n'"[trg_lang]: [translation_text]"
+MT_ICL_ZSWR_CHAT_USER_TEMPLATE="[src_lang]: [source_text]"
+MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE="Sure, here's the translation for the last sentence:"$'\n'"[trg_lang]: [translation_text]"
