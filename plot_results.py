@@ -4,6 +4,7 @@ import sys
 import matplotlib.pyplot as plt
 
 output_path = sys.argv[1]
+title = sys.argv[2] if len(sys.argv) > 2 else "Scores with Standard Deviation"
 
 # Initialize data lists
 x_vals = []
@@ -79,7 +80,7 @@ plt.fill_between(
 
 plt.xlabel('ICL examples')
 plt.ylabel('Score')
-plt.title('Scores with Standard Deviation')
+plt.title(title)
 plt.legend()
 plt.grid(True)
 
@@ -90,4 +91,4 @@ if not all(isinstance(x, float) for x in x_numeric):
 plt.tight_layout()
 
 plt.savefig(output_path, dpi=300, bbox_inches='tight')
-print(f"Figure saved to {output_path}")
+#print(f"Figure saved to {output_path}")

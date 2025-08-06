@@ -1,10 +1,14 @@
 
+import os
+import random
+import base64
 import logging
 
-import torch as th
+import torch
+import numpy as np
 
 def use_cuda(force_cpu=False):
-    use_cuda = th.cuda.is_available()
+    use_cuda = torch.cuda.is_available()
 
     return True if use_cuda and not force_cpu else False
 
@@ -63,12 +67,12 @@ def set_random_seed(seed: int, using_cuda: bool = False) -> None:
     # Seed numpy RNG
     np.random.seed(seed)
     # seed the RNG for all devices (both CPU and CUDA)
-    th.manual_seed(seed)
+    torch.manual_seed(seed)
 
     if using_cuda:
         # Deterministic operations for CuDNN, it may impact performances
-        th.backends.cudnn.deterministic = True
-        th.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def file_exists(path):
     r = os.path.isfile(path)
@@ -92,7 +96,7 @@ def insert_embeddings(urls, embeddings, index, urls_representation, urls_represe
             urls_representation_url2idx[url] = len(urls_representation_url2idx)
 
 def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expected_dim=2):
-    if isinstance(embeddings, th.Tensor):
+    if isinstance(embeddings, torch.Tensor):
         embeddings = embeddings.detach().cpu().numpy()
     else:
         embeddings = np.array(embeddings)
@@ -107,3 +111,31 @@ def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expe
             raise Exception(f"The embeddings shape length was expected to be either 1 or 2, but got {embeddings.shape}")
 
     return embeddings
+
+def encode_base64(s):
+    return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+
+def batchify(lst, batch_size):
+    for i in range(0, len(lst), batch_size):
+        yield lst[i:i+batch_size]
+
+def last_one_indices(x):
+    assert isinstance(x, torch.Tensor), "Input must be a PyTorch tensor"
+    assert len(x.shape) == 2, "Input tensor must be 2D (batch_size, sequence_length)"
+
+    # Reverse along dim 1
+    reversed_x = x.flip(dims=[1])
+
+    # Find first '1' in reversed (which is last '1' in original)
+    idx_reversed = reversed_x.float().argmax(dim=1)
+
+    # If a row has no 1s, argmax will return 0, so we mask those
+    has_one = x.any(dim=1)
+
+    # Compute original index by subtracting from size
+    last_one_idx = x.size(1) - 1 - idx_reversed
+
+    # Assign -1 to rows with no 1s
+    last_one_idx[~has_one] = -1
+
+    return last_one_idx
