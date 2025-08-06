@@ -182,6 +182,9 @@ def main(args):
     streamer_max_latency = args.streamer_max_latency
     run_flask_server = not args.do_not_run_flask_server
     disable_streamer = args.disable_streamer
+    pretrained_model = args.pretrained_model
+
+    logger.info("Pretrained model: %s", pretrained_model)
 
     if not disable_streamer:
         logger.warning("Since streamer is enabled, you might get slightly different results: not recommended for production")
@@ -191,7 +194,7 @@ def main(args):
 
     if "model" not in global_conf:
         # Load COMET 22 DA
-        model_path = comet.download_model("Unbabel/wmt22-comet-da")
+        model_path = comet.download_model(pretrained_model)
         global_conf["model"] = comet.load_from_checkpoint(model_path)
     else:
         # We apply this step in order to avoid loading the model multiple times due to flask debug mode
@@ -229,6 +232,7 @@ def initialization():
                                      description="MT_ICL evaluate_comet_22.py flask server")
 
     parser.add_argument('--batch-size', type=int, default=16, help="Batch size")
+    parser.add_argument('--pretrained-model', default="Unbabel/wmt22-comet-da", help="Pretrained model")
     parser.add_argument('--force-cpu', action="store_true", help="Run on CPU (i.e. do not check if GPU is possible)")
     parser.add_argument('--disable-streamer', action="store_true", help="Do not use streamer (it might lead to slower inference and OOM errors)")
     parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")

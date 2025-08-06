@@ -1,5 +1,5 @@
 
-def init(batch_size=16, streamer_max_latency=0.1, use_all_gpus=False):
+def init(batch_size=16, streamer_max_latency=0.1, use_all_gpus=False, pretrained_model="Unbabel/wmt22-comet-da"):
     import os
     import sys
     import logging
@@ -25,6 +25,7 @@ def init(batch_size=16, streamer_max_latency=0.1, use_all_gpus=False):
     # Inject args that will be used by the Flask server
     sys.argv.extend([
         "--batch-size", str(batch_size),
+        "--pretrained-model", pretrained_model,
         "--streamer-max-latency", str(streamer_max_latency),
         "--do-not-run-flask-server", # Necessary for gunicorn in order to work properly
         "--verbose",
