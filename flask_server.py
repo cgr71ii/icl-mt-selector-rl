@@ -45,7 +45,7 @@ def info():
             "/hello-world": ["GET"],
             "/translate": ["GET", "POST"],
             "/get_embedding_from_model_embedding_matrix": ["GET", "POST"],
-            "/get_embedding_mean_pooling": ["GET", "POST"],
+            "/get_embedding_pooling": ["GET", "POST"],
             "/template_info": ["GET"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
@@ -102,10 +102,19 @@ def translate():
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
     # Optional parameters
-    #try:
-    #    foo = request_method.getlist("foo")
-    #except KeyError as e:
-    #    foo = None
+    try:
+        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
+    except KeyError as e:
+        trg_sentences = []
+
+    pooling = utils.string2list(request_method.getlist("pooling", "mean"))
+    layer = list(map(int, utils.string2list(request_method.getlist("layer", -1))))
+    get_representation = list(map(bool, map(int, utils.string2list(request_method.getlist("get_representation", False)))))
+
+    if pooling not in ("mean", "max", "last") or len(pooling) != 1:
+        logger.warning("Unknown pooling method or unexpected len: %s (%d)", pooling, len(pooling))
+
+        return jsonify({"ok": "null", "err": f"unknown pooling method or unexpected len: {pooling} ({len(pooling)})"})
 
     if len(src_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
         logger.warning("No sentences: %s", src_sentences)
@@ -119,15 +128,54 @@ def translate():
 
         return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
 
+    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)) or (len(get_representation) != 1 and len(get_representation) != len(src_sentences)):
+        logger.warning("pooling: %s vs layer: %s vs get_representation: %s", pooling, layer, get_representation)
+
+        return jsonify({"ok": "null", "err": "'pooling', 'layer' and 'get_representation' should be lists with a single element or the same length as 'src_sentence'"})
+
     if len(src_lang) == 1:
         src_lang = [src_lang[0]] * len(src_sentences)
     if len(trg_lang) == 1:
         trg_lang = [trg_lang[0]] * len(src_sentences)
+    if len(pooling) == 1:
+        pooling = [pooling[0]] * len(src_sentences)
+    if len(layer) == 1:
+        layer = [layer[0]] * len(src_sentences)
+    if len(get_representation) == 1:
+        get_representation = [get_representation[0]] * len(src_sentences)
+
+    if len(set(pooling)) > 1 or len(set(layer)) > 1 or len(set(get_representation)) > 1:
+        logger.warning("pooling: %s vs layer: %s vs get_representation: %s", pooling, layer, get_representation)
+
+        return jsonify({"ok": "null", "err": "'pooling', 'layer' and 'get_representation' should be a list with a single element or all the same values"})
+
+    if len(trg_sentences) > 0:
+        if len(src_sentences) != len(trg_sentences):
+            logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                        len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
+
+            return jsonify({
+                "ok": "null",
+                "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
+            })
+
+        if not get_representation[0]:
+            logger.warning("get_representation is False, but trg_sentences are provided: %s", trg_sentences)
+
+            return jsonify({
+                "ok": "null",
+                "err": f"get_representation is False, but trg_sentences are provided: {trg_sentences}",
+            })
+    else:
+        trg_sentences = [None] * len(src_sentences)
 
     try:
         src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
         src_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_examples]
         trg_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_examples]
+
+        if trg_sentences[0] is not None:
+            trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
     except Exception as e:
         logger.error("Exception when decoding BASE64: %s", e)
 
@@ -161,8 +209,11 @@ def translate():
 
     disable_streamer = global_conf["disable_streamer"]
     get_results = global_conf["streamer"].predict if not disable_streamer else translate_batch
-    data = list(zip(src_sentences, icl_examples, src_lang, trg_lang))
+    data = list(zip(src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences))
     results = get_results(data)
+
+    if get_representation[0]:
+        assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}"
 
     # Return results
     if len(results) != len(src_sentences):
@@ -174,8 +225,8 @@ def translate():
             "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)}",
         })
 
-    for idx, (src_sentence, result) in enumerate(zip(src_sentences, results), 1):
-        logger.debug("Results #%d: %s\t%s", idx, src_sentence, result)
+    for idx, (src_sentence, result, trg_sentence, _get_representation) in enumerate(zip(src_sentences, results, trg_sentences, get_representation), 1):
+        logger.debug("Results #%d (representation: %s ; target: %s): %s\t%s%s", idx, str(_get_representation), str(trg_sentence is not None), src_sentence, result, f"\t{trg_sentence}" if trg_sentence is not None else '')
 
     return jsonify({
         "ok": results,
@@ -184,15 +235,27 @@ def translate():
 
 #def translate_batch(src_sentences, icl_examples, src_lang, trg_lang):
 def translate_batch(data):
-    src_sentences, icl_examples, src_lang, trg_lang = zip(*data)
+    src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences = zip(*data)
     src_sentences = list(src_sentences)
     icl_examples = list(icl_examples)
     src_lang = list(src_lang)
     trg_lang = list(trg_lang)
+    pooling = list(pooling)
+    layer = list(layer)
+    get_representation = list(get_representation)
+    trg_sentences = list(trg_sentences)
 
-    assert len(icl_examples) == len(src_sentences) == len(src_lang) == len(trg_lang), f"Length mismatch: {len(icl_examples)} vs {len(src_sentences)} vs {len(src_lang)} vs {len(trg_lang)}"
+    assert len(icl_examples) == len(src_sentences) == len(src_lang) == len(trg_lang) == len(pooling) == len(layer) == len(get_representation) == len(trg_sentences), f"Length mismatch: {len(icl_examples)} vs {len(src_sentences)} vs {len(src_lang)} vs {len(trg_lang)} vs {len(pooling)} vs {len(layer)} vs {len(get_representation)} vs {len(trg_sentences)}"
+
+    pooling = pooling[0]
+    layer = layer[0]
+    get_representation = get_representation[0]
+    teacher_forcing = trg_sentences[0] is not None
+    add_eos_token = teacher_forcing
 
     logger.debug("Data batch size: %d", len(src_sentences))
+    logger.debug("Obtaining representation: %s", str(get_representation))
+    logger.debug("Teacher forcing: %s", str(teacher_forcing))
 
     model = global_conf["model"]
     tokenizer = global_conf["tokenizer"]
@@ -211,31 +274,45 @@ def translate_batch(data):
                 model = model.to(_device)
 
             _src_sentences = src_sentences[:_bsz]
+            _trg_sentences = trg_sentences[:_bsz]
             _icl_examples = icl_examples[:_bsz]
             _src_lang = src_lang[:_bsz]
             _trg_lang = trg_lang[:_bsz]
 
             assert len(_icl_examples) == len(_src_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_icl_examples)} vs {len(_src_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
 
-            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, **template_kwargs)
-            max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
+            if teacher_forcing:
+                _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
+            else:
+                _sentences = _src_sentences
 
-            logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
-            logger.debug("max_new_tokens: %d", max_new_tokens)
+            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, **template_kwargs)
 
             if global_conf["debug"]:
                 logger.debug("Prompts: %s", str(prompts))
 
-            # Translate
-            all_outputs, all_original_outputs = mt_icl.translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=None)
+            if get_representation:
+                # Get embeddings
+                all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer)
 
-            assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
+                results.append(all_outputs)
+            else:
+                # Translate
+                max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
 
-            results.extend(all_outputs)
+                logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
+                logger.debug("max_new_tokens: %d", max_new_tokens)
+
+                all_outputs, all_original_outputs = mt_icl.translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=None)
+
+                assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
+
+                results.extend(all_outputs)
 
             _device = device
             _bsz = batch_size
             src_sentences = src_sentences[len(prompts):]
+            trg_sentences = trg_sentences[len(prompts):]
             icl_examples = icl_examples[len(prompts):]
             src_lang = src_lang[len(prompts):]
             trg_lang = trg_lang[len(prompts):]
@@ -254,6 +331,9 @@ def translate_batch(data):
 
         if len(src_sentences) == 0:
             break
+
+    if get_representation:
+        results = torch.cat(results, dim=0)
 
     #return results[target_task] # TODO do we need a list if the streamer is used (it seems so)?
                                  # https://github.com/ShannonAI/service-streamer/issues/97
@@ -357,8 +437,8 @@ def embedding_tokens_batch(tokens):
 
     return results, results_token_id
 
-@app.route('/get_embedding_mean_pooling', methods=["GET", "POST"])
-def embedding_mean_pooling():
+@app.route('/get_embedding_pooling', methods=["GET", "POST"])
+def embedding_pooling():
     if request.method not in ("GET", "POST"):
         return jsonify({"ok": "null", "err": "method is not: GET, POST"})
 
@@ -384,10 +464,13 @@ def embedding_mean_pooling():
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
     # Optional parameters
-    #try:
-    #    foo = request_method.getlist("foo")
-    #except KeyError as e:
-    #    foo = None
+    pooling = utils.string2list(request_method.getlist("pooling", "mean"))
+    layer = list(map(int, utils.string2list(request_method.getlist("layer", -1))))
+
+    if pooling not in ("mean", "max", "last") or len(pooling) != 1:
+        logger.warning("Unknown pooling method or unexpected len: %s (%d)", pooling, len(pooling))
+
+        return jsonify({"ok": "null", "err": f"unknown pooling method or unexpected len: {pooling} ({len(pooling)})"})
 
     if len(src_sentences) == 0 or len(trg_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
         logger.warning("No sentences: %s", src_sentences)
@@ -401,10 +484,33 @@ def embedding_mean_pooling():
 
         return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
 
+    if len(src_sentences) != len(trg_sentences):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                     len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
+        })
+
+    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)):
+        logger.warning("pooling: %s vs layer: %s", pooling, layer)
+
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
+
     if len(src_lang) == 1:
         src_lang = [src_lang[0]] * len(src_sentences)
     if len(trg_lang) == 1:
         trg_lang = [trg_lang[0]] * len(src_sentences)
+    if len(pooling) == 1:
+        pooling = [pooling[0]] * len(src_sentences)
+    if len(layer) == 1:
+        layer = [layer[0]] * len(src_sentences)
+
+    if len(set(pooling)) > 1 or len(set(layer)) > 1:
+        logger.warning("pooling: %s vs layer: %s", pooling, layer)
+
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be a list with a single element or all the same values"})
 
     try:
         src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
@@ -417,18 +523,20 @@ def embedding_mean_pooling():
     # Inference
 
     disable_streamer = global_conf["disable_streamer"]
-    get_results = global_conf["streamer_embedding_mean_pooling"].predict if not disable_streamer else embedding_mean_pooling_batch
-    data = list(zip(src_sentences, trg_sentences, src_lang, trg_lang))
+    get_results = global_conf["streamer_embedding_pooling"].predict if not disable_streamer else embedding_pooling_batch
+    data = list(zip(src_sentences, trg_sentences, src_lang, trg_lang, pooling, layer))
     results = get_results(data)
 
+    assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}"
+
     # Return results
-    if len(results) != len(src_sentences) or len(src_sentences) != len(trg_sentences):
-        logger.error("Results length mismatch with the provided sentences: %d vs %d vs %d: %s vs %s vs %s",
-                     len(results), len(src_sentences), len(trg_sentences), results, src_sentences, trg_sentences)
+    if len(results) != len(src_sentences):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                     len(results), len(src_sentences), results, src_sentences)
 
         return jsonify({
             "ok": "null",
-            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)} vs {len(trg_sentences)}",
+            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)}",
         })
 
     for idx, (src_sentence, trg_sentence, result) in enumerate(zip(src_sentences, trg_sentences, results), 1):
@@ -442,16 +550,22 @@ def embedding_mean_pooling():
         "err": "null",
     })
 
-def embedding_mean_pooling_batch(data):
+def embedding_pooling_batch(data):
     # be aware that icl_examples are supported by mt_icl.build_prompt_teacher_forcing, but we are not supporting them here
+    # TODO add support for icl_examples
 
-    src_sentences, trg_sentences, src_lang, trg_lang = zip(*data)
+    src_sentences, trg_sentences, src_lang, trg_lang, pooling, layer = zip(*data)
     src_sentences = list(src_sentences)
     trg_sentences = list(trg_sentences)
     src_lang = list(src_lang)
     trg_lang = list(trg_lang)
+    pooling = list(pooling)
+    layer = list(layer)
 
-    assert len(src_sentences) == len(trg_sentences) == len(src_lang) == len(trg_lang), f"Length mismatch: {len(src_sentences)} vs {len(trg_sentences)} vs {len(src_lang)} vs {len(trg_lang)}"
+    assert len(src_sentences) == len(trg_sentences) == len(src_lang) == len(trg_lang) == len(pooling) == len(layer), f"Length mismatch: {len(src_sentences)} vs {len(trg_sentences)} vs {len(src_lang)} vs {len(trg_lang)} vs {len(pooling)} vs {len(layer)}"
+
+    pooling = pooling[0]
+    layer = layer[0]
 
     logger.debug("Data batch size: %d", len(src_sentences))
 
@@ -480,12 +594,11 @@ def embedding_mean_pooling_batch(data):
             _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
             prompts, _ = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, None, _bsz, teacher_forcing=True, add_eos_token=True, **template_kwargs)
 
-
             if global_conf["debug"]:
                 logger.debug("Prompts: %s", str(prompts))
 
             # Get embeddings
-            all_outputs = mt_icl.get_embedding_mean_pooling(model, tokenizer, prompts)
+            all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer)
 
             assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz]) == len(trg_sentences[:_bsz])
 
@@ -551,7 +664,7 @@ def main(args):
     global_conf["max_new_tokens"] = args.max_new_tokens
     global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["streamer_embedding_tokens"] = ThreadedStreamer(embedding_tokens_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
-    global_conf["streamer_embedding_mean_pooling"] = ThreadedStreamer(embedding_mean_pooling_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["streamer_embedding_pooling"] = ThreadedStreamer(embedding_pooling_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
 
@@ -560,6 +673,9 @@ def main(args):
     logger.debug("Example: curl http://127.0.0.1:%d/translate -X POST -d \"" + \
                  r'src_lang=English&' + \
                  r'trg_lang=Italian&' + \
+                 r'layer=-1&' + \
+                 r'pooling=mean&' + \
+                 r'get_representation=0&' + \
                  r'src_sentence=TG9jYWwgbWVkaWEgcmVwb3J0cyBhbiBhaXJwb3J0IGZpcmUgdmVoaWNsZSByb2xsZWQgb3ZlciB3aGlsZSByZXNwb25kaW5nLgo=&' + \
                  r'src_lang=English&' + \
                  r'trg_lang=Spanish&' + \
@@ -584,13 +700,17 @@ def main(args):
                  r'token=PC9zPg==&' + \
                  r'token=PHM+&' + \
                 '"', flask_port)
-    logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_mean_pooling -X POST -d \"" + \
+    logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_pooling -X POST -d \"" + \
                  r'src_lang=English&' + \
                  r'trg_lang=Spanish&' + \
+                 r'layer=-1&' + \
+                 r'pooling=mean&' + \
                  r'src_sentence=SW4gSnVuZSwgdGhlIENvbW1pc3Npb24gcHVibGlzaGVkIHRoZSByZXN1bHRzIG9mIGEgcHVibGljIGNvbnN1bHRhdGlvbiBvbiB0aGUgcHJvcG9zYWxzIHdoaWNoIGZvdW5kIGJyb2FkIHN1cHBvcnQgZm9yIGNhbGxpbmcgdGhlIGFzc2VtYmx5IGEgV2Vsc2ggUGFybGlhbWVudC4K&' + \
                  r'trg_sentence=RW4ganVuaW8sIGxhIENvbWlzacOzbiBwdWJsaWPDsyBsb3MgcmVzdWx0YWRvcyBkZSB1bmEgY29uc3VsdGEgcMO6YmxpY2Egc29icmUgbGFzIHByb3B1ZXN0YXMsIGVuIGRvbmRlIHNlIG9idHV2byB1biBhbXBsaW8gYXBveW8gcGFyYSBsbGFtYXIgYSBsYSBhc2FtYmxlYSB1biBQYXJsYW1lbnRvIGRlIEdhbGVzLgo=&' + \
                  r'src_lang=English&' + \
                  r'trg_lang=French&' + \
+                 r'layer=-2&' + \
+                 r'pooling=max&' + \
                  r'src_sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
                  r'trg_sentence=w4AgbCdpbnN0YXIgZCdhdXRyZXMgZXhwZXJ0cywgaWwgc2UgbW9udHJlIHNjZXB0aXF1ZSBxdWFudCDDoCBsYSBwb3NzaWJpbGl0w6kgZGUgZ3XDqXJpciBsZSBkaWFiw6h0ZSwgZmFpc2FudCByZW1hcnF1ZXIgcXVlIGNlcyByw6lzdWx0YXRzIG5lIHNvbnQgcGFzIGFwcGxpY2FibGVzIGF1eCBwZXJzb25uZXMgcXVpIHNvdWZmcmVudCBkw6lqw6AgZGUgZGlhYsOodGUgZGUgdHlwZSAxLgo=&' + \
                 '"', flask_port)
