@@ -73,8 +73,15 @@ def template_info():
 def hello_world():
     return jsonify({"ok": "hello world! server is working!", "err": "null"})
 
-@app.route('/translate', methods=["GET", "POST"])
+@app.route(['/translate', '/get_embedding_pooling'], methods=["GET", "POST"])
 def translate():
+    route_name = request.base_url.rstrip('/').split('/')[-1]
+
+    if route_name not in ("translate", "get_embedding_pooling"):
+        logger.error("Unknown route: %s", route_name)
+
+        return jsonify({"ok": "null", "err": f"unknown route: {route_name}"})
+
     if request.method not in ("GET", "POST"):
         return jsonify({"ok": "null", "err": "method is not: GET, POST"})
 
@@ -96,20 +103,25 @@ def translate():
         src_examples = utils.string2list(request_method.getlist("src_example"))
         trg_examples = utils.string2list(request_method.getlist("trg_example"))
         icl_idx_src_sentences = utils.string2list(request_method.getlist("icl_idx_src_sentence"))
+
+        if route_name == "get_embedding_pooling":
+            trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
     except KeyError as e:
         logger.warning("KeyError: %s", e)
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
     # Optional parameters
-    try:
-        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
-    except KeyError as e:
-        trg_sentences = []
+    if route_name == "translate":
+        try:
+            trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
+        except KeyError as e:
+            trg_sentences = []
 
     pooling = utils.string2list(request_method.getlist("pooling", "mean"))
     layer = list(map(int, utils.string2list(request_method.getlist("layer", -1))))
-    get_representation = list(map(bool, map(int, utils.string2list(request_method.getlist("get_representation", False)))))
+    get_representation = True if route_name == "get_embedding_pooling" else False
+    get_representation = [get_representation] * len(src_sentences)
 
     if pooling not in ("mean", "max", "last") or len(pooling) != 1:
         logger.warning("Unknown pooling method or unexpected len: %s (%d)", pooling, len(pooling))
@@ -128,10 +140,10 @@ def translate():
 
         return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
 
-    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)) or (len(get_representation) != 1 and len(get_representation) != len(src_sentences)):
-        logger.warning("pooling: %s vs layer: %s vs get_representation: %s", pooling, layer, get_representation)
+    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)):
+        logger.warning("pooling: %s vs layer: %s", pooling, layer)
 
-        return jsonify({"ok": "null", "err": "'pooling', 'layer' and 'get_representation' should be lists with a single element or the same length as 'src_sentence'"})
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     if len(src_lang) == 1:
         src_lang = [src_lang[0]] * len(src_sentences)
@@ -141,32 +153,30 @@ def translate():
         pooling = [pooling[0]] * len(src_sentences)
     if len(layer) == 1:
         layer = [layer[0]] * len(src_sentences)
-    if len(get_representation) == 1:
-        get_representation = [get_representation[0]] * len(src_sentences)
 
-    if len(set(pooling)) > 1 or len(set(layer)) > 1 or len(set(get_representation)) > 1:
-        logger.warning("pooling: %s vs layer: %s vs get_representation: %s", pooling, layer, get_representation)
+    if len(set(pooling)) > 1 or len(set(layer)) > 1:
+        logger.warning("pooling: %s vs layer: %s", pooling, layer)
 
-        return jsonify({"ok": "null", "err": "'pooling', 'layer' and 'get_representation' should be a list with a single element or all the same values"})
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be a list with a single element or all the same values"})
 
-    if len(trg_sentences) > 0:
-        if len(src_sentences) != len(trg_sentences):
-            logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
-                        len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
+    if len(src_sentences) != len(trg_sentences) and (len(trg_sentences) > 0 or route_name == "get_embedding_pooling"):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                    len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
 
-            return jsonify({
-                "ok": "null",
-                "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
-            })
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
+        })
 
-        if not get_representation[0]:
-            logger.warning("get_representation is False, but trg_sentences are provided: %s", trg_sentences)
+    if len(trg_sentences) > 0 and not get_representation[0]:
+        logger.warning("this should not happen: get_representation is False, but trg_sentences are provided: %s", trg_sentences)
 
-            return jsonify({
-                "ok": "null",
-                "err": f"get_representation is False, but trg_sentences are provided: {trg_sentences}",
-            })
-    else:
+        return jsonify({
+            "ok": "null",
+            "err": f"this should not happen: get_representation is False, but trg_sentences are provided: {trg_sentences}",
+        })
+
+    if len(trg_sentences) == 0:
         trg_sentences = [None] * len(src_sentences)
 
     try:
@@ -226,7 +236,7 @@ def translate():
         })
 
     for idx, (src_sentence, result, trg_sentence, _get_representation) in enumerate(zip(src_sentences, results, trg_sentences, get_representation), 1):
-        logger.debug("Results #%d (representation: %s ; target: %s): %s\t%s%s", idx, str(_get_representation), str(trg_sentence is not None), src_sentence, result, f"\t{trg_sentence}" if trg_sentence is not None else '')
+        logger.debug("Results #%d (path: %s ; representation: %s ; target: %s): %s\t%s%s", idx, route_name, str(_get_representation), str(trg_sentence is not None), src_sentence, result, f"\t{trg_sentence}" if trg_sentence is not None else '')
 
     return jsonify({
         "ok": results,
@@ -437,199 +447,6 @@ def embedding_tokens_batch(tokens):
 
     return results, results_token_id
 
-@app.route('/get_embedding_pooling', methods=["GET", "POST"])
-def embedding_pooling():
-    if request.method not in ("GET", "POST"):
-        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
-
-    if request.method == "GET":
-        # GET method should be used only for testing purposes since HTML encoding is not being handled
-        request_method = request.args
-    elif request.method == "POST":
-        request_method = request.form
-    else:
-        logger.warning("Unknown method: %s", request.method)
-
-        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
-
-    # Get parameters
-    try:
-        src_lang = utils.string2list(request_method.getlist("src_lang"))
-        trg_lang = utils.string2list(request_method.getlist("trg_lang"))
-        src_sentences = utils.string2list(request_method.getlist("src_sentence"))
-        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
-    except KeyError as e:
-        logger.warning("KeyError: %s", e)
-
-        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
-
-    # Optional parameters
-    pooling = utils.string2list(request_method.getlist("pooling", "mean"))
-    layer = list(map(int, utils.string2list(request_method.getlist("layer", -1))))
-
-    if pooling not in ("mean", "max", "last") or len(pooling) != 1:
-        logger.warning("Unknown pooling method or unexpected len: %s (%d)", pooling, len(pooling))
-
-        return jsonify({"ok": "null", "err": f"unknown pooling method or unexpected len: {pooling} ({len(pooling)})"})
-
-    if len(src_sentences) == 0 or len(trg_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
-        logger.warning("No sentences: %s", src_sentences)
-
-        return jsonify({"ok": "null", "err": "'src_sentence', 'trg_sentence', 'src_lang' and 'trg_lang' are mandatory fields that cannot be empty"})
-
-    logger.debug("Got %d sentences", len(src_sentences))
-
-    if (len(src_lang) != 1 and len(src_lang) != len(src_sentences)) or (len(trg_lang) != 1 and len(trg_lang) != len(src_sentences)):
-        logger.warning("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
-
-        return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
-
-    if len(src_sentences) != len(trg_sentences):
-        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
-                     len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
-
-        return jsonify({
-            "ok": "null",
-            "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
-        })
-
-    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)):
-        logger.warning("pooling: %s vs layer: %s", pooling, layer)
-
-        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
-
-    if len(src_lang) == 1:
-        src_lang = [src_lang[0]] * len(src_sentences)
-    if len(trg_lang) == 1:
-        trg_lang = [trg_lang[0]] * len(src_sentences)
-    if len(pooling) == 1:
-        pooling = [pooling[0]] * len(src_sentences)
-    if len(layer) == 1:
-        layer = [layer[0]] * len(src_sentences)
-
-    if len(set(pooling)) > 1 or len(set(layer)) > 1:
-        logger.warning("pooling: %s vs layer: %s", pooling, layer)
-
-        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be a list with a single element or all the same values"})
-
-    try:
-        src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
-        trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
-    except Exception as e:
-        logger.error("Exception when decoding BASE64: %s", e)
-
-        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
-
-    # Inference
-
-    disable_streamer = global_conf["disable_streamer"]
-    get_results = global_conf["streamer_embedding_pooling"].predict if not disable_streamer else embedding_pooling_batch
-    data = list(zip(src_sentences, trg_sentences, src_lang, trg_lang, pooling, layer))
-    results = get_results(data)
-
-    assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}"
-
-    # Return results
-    if len(results) != len(src_sentences):
-        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
-                     len(results), len(src_sentences), results, src_sentences)
-
-        return jsonify({
-            "ok": "null",
-            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)}",
-        })
-
-    for idx, (src_sentence, trg_sentence, result) in enumerate(zip(src_sentences, trg_sentences, results), 1):
-        logger.debug("Results #%d: %s\t%s\t%s", idx, src_sentence, trg_sentence, result)
-
-    results = pickle.dumps(results)
-    results = base64.b64encode(results).decode() # base64 tensor
-
-    return jsonify({
-        "ok": results,
-        "err": "null",
-    })
-
-def embedding_pooling_batch(data):
-    # be aware that icl_examples are supported by mt_icl.build_prompt_teacher_forcing, but we are not supporting them here
-    # TODO add support for icl_examples
-
-    src_sentences, trg_sentences, src_lang, trg_lang, pooling, layer = zip(*data)
-    src_sentences = list(src_sentences)
-    trg_sentences = list(trg_sentences)
-    src_lang = list(src_lang)
-    trg_lang = list(trg_lang)
-    pooling = list(pooling)
-    layer = list(layer)
-
-    assert len(src_sentences) == len(trg_sentences) == len(src_lang) == len(trg_lang) == len(pooling) == len(layer), f"Length mismatch: {len(src_sentences)} vs {len(trg_sentences)} vs {len(src_lang)} vs {len(trg_lang)} vs {len(pooling)} vs {len(layer)}"
-
-    pooling = pooling[0]
-    layer = layer[0]
-
-    logger.debug("Data batch size: %d", len(src_sentences))
-
-    model = global_conf["model"]
-    tokenizer = global_conf["tokenizer"]
-    device = global_conf["device"]
-    batch_size = global_conf["batch_size"]
-
-    # Build prompts
-    _device = device
-    _bsz = batch_size
-    results = []
-
-    while True:
-        try:
-            if model.device != _device:
-                model = model.to(_device)
-
-            _src_sentences = src_sentences[:_bsz]
-            _trg_sentences = trg_sentences[:_bsz]
-            _src_lang = src_lang[:_bsz]
-            _trg_lang = trg_lang[:_bsz]
-
-            assert len(_src_sentences) == len(_trg_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_src_sentences)} vs {len(_trg_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
-
-            _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
-            prompts, _ = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, None, _bsz, teacher_forcing=True, add_eos_token=True, **template_kwargs)
-
-            if global_conf["debug"]:
-                logger.debug("Prompts: %s", str(prompts))
-
-            # Get embeddings
-            all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer)
-
-            assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz]) == len(trg_sentences[:_bsz])
-
-            results.append(all_outputs)
-
-            _device = device
-            _bsz = batch_size
-            src_sentences = src_sentences[len(prompts):]
-            trg_sentences = trg_sentences[len(prompts):]
-            src_lang = src_lang[len(prompts):]
-            trg_lang = trg_lang[len(prompts):]
-        except torch.OutOfMemoryError as e:
-            # Handle OOM
-
-            if _bsz == 1:
-                _device = "cpu"
-                _bsz = batch_size
-
-                logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", batch_size)
-            else:
-                logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
-
-                _bsz = _bsz // 2
-
-        if len(src_sentences) == 0:
-            break
-
-    results = torch.cat(results, dim=0)
-
-    return results
-
 def main(args):
     force_cpu = args.force_cpu
     use_cuda = utils.use_cuda(force_cpu=force_cpu)
@@ -675,7 +492,6 @@ def main(args):
                  r'trg_lang=Italian&' + \
                  r'layer=-1&' + \
                  r'pooling=mean&' + \
-                 r'get_representation=0&' + \
                  r'src_sentence=TG9jYWwgbWVkaWEgcmVwb3J0cyBhbiBhaXJwb3J0IGZpcmUgdmVoaWNsZSByb2xsZWQgb3ZlciB3aGlsZSByZXNwb25kaW5nLgo=&' + \
                  r'src_lang=English&' + \
                  r'trg_lang=Spanish&' + \
