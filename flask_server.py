@@ -73,7 +73,8 @@ def template_info():
 def hello_world():
     return jsonify({"ok": "hello world! server is working!", "err": "null"})
 
-@app.route(['/translate', '/get_embedding_pooling'], methods=["GET", "POST"])
+@app.route('/translate', methods=["GET", "POST"])
+@app.route('/get_embedding_pooling', methods=["GET", "POST"])
 def translate():
     route_name = request.base_url.rstrip('/').split('/')[-1]
 
@@ -91,7 +92,7 @@ def translate():
     elif request.method == "POST":
         request_method = request.form
     else:
-        logger.warning("Unknown method: %s", request.method)
+        logger.error("Unknown method: %s", request.method)
 
         return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
 
@@ -107,7 +108,7 @@ def translate():
         if route_name == "get_embedding_pooling":
             trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
     except KeyError as e:
-        logger.warning("KeyError: %s", e)
+        logger.error("KeyError: %s", e)
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
@@ -118,32 +119,39 @@ def translate():
         except KeyError as e:
             trg_sentences = []
 
-    pooling = utils.string2list(request_method.getlist("pooling", "mean"))
-    layer = list(map(int, utils.string2list(request_method.getlist("layer", -1))))
+    pooling = utils.string2list(request_method.getlist("pooling"))
+    layer = list(map(int, utils.string2list(request_method.getlist("layer"))))
     get_representation = True if route_name == "get_embedding_pooling" else False
     get_representation = [get_representation] * len(src_sentences)
 
-    if pooling not in ("mean", "max", "last") or len(pooling) != 1:
-        logger.warning("Unknown pooling method or unexpected len: %s (%d)", pooling, len(pooling))
+    if pooling is None or len(pooling) == 0:
+        pooling = ["mean"] * len(src_sentences)
 
-        return jsonify({"ok": "null", "err": f"unknown pooling method or unexpected len: {pooling} ({len(pooling)})"})
+    if layer is None or len(layer) == 0:
+        layer = [-1] * len(src_sentences)
 
     if len(src_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
-        logger.warning("No sentences: %s", src_sentences)
+        logger.error("No sentences: %s", src_sentences)
 
         return jsonify({"ok": "null", "err": "'src_sentence', 'src_lang' and 'trg_lang' are mandatory fields that cannot be empty"})
 
     logger.debug("Got %d sentences", len(src_sentences))
 
     if (len(src_lang) != 1 and len(src_lang) != len(src_sentences)) or (len(trg_lang) != 1 and len(trg_lang) != len(src_sentences)):
-        logger.warning("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
+        logger.error("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
 
         return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
 
     if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)):
-        logger.warning("pooling: %s vs layer: %s", pooling, layer)
+        logger.error("pooling: %s layer: %s vs %d", pooling, layer, len(src_sentences))
 
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
+
+    for idx, p in enumerate(pooling):
+        if p not in ("mean", "max", "last"):
+            logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
+
+            return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
 
     if len(src_lang) == 1:
         src_lang = [src_lang[0]] * len(src_sentences)
@@ -155,11 +163,18 @@ def translate():
         layer = [layer[0]] * len(src_sentences)
 
     if len(set(pooling)) > 1 or len(set(layer)) > 1:
-        logger.warning("pooling: %s vs layer: %s", pooling, layer)
+        # Although it is possible to have different pooling and layer values, this would make inference slower due to batches of different sizes (even 1)
+
+        logger.error("pooling: %s vs layer: %s", pooling, layer)
 
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be a list with a single element or all the same values"})
 
-    if len(src_sentences) != len(trg_sentences) and (len(trg_sentences) > 0 or route_name == "get_embedding_pooling"):
+    if len(trg_sentences) > 0 and route_name != "get_embedding_pooling":
+        logger.error("trg_sentences should not be provided for route: %s", route_name)
+
+        return jsonify({"ok": "null", "err": f"trg_sentences should not be provided for route: {route_name}"})
+
+    if len(src_sentences) != len(trg_sentences) and len(trg_sentences) > 0:
         logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
                     len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
 
@@ -169,7 +184,7 @@ def translate():
         })
 
     if len(trg_sentences) > 0 and not get_representation[0]:
-        logger.warning("this should not happen: get_representation is False, but trg_sentences are provided: %s", trg_sentences)
+        logger.error("this should not happen: get_representation is False, but trg_sentences are provided: %s", trg_sentences)
 
         return jsonify({
             "ok": "null",
@@ -238,6 +253,12 @@ def translate():
     for idx, (src_sentence, result, trg_sentence, _get_representation) in enumerate(zip(src_sentences, results, trg_sentences, get_representation), 1):
         logger.debug("Results #%d (path: %s ; representation: %s ; target: %s): %s\t%s%s", idx, route_name, str(_get_representation), str(trg_sentence is not None), src_sentence, result, f"\t{trg_sentence}" if trg_sentence is not None else '')
 
+    if get_representation[0]:
+        logger.debug("Results shape: %s", results.shape)
+
+        results = pickle.dumps(results)
+        results = base64.b64encode(results).decode() # base64 tensor
+
     return jsonify({
         "ok": results,
         "err": "null",
@@ -305,6 +326,8 @@ def translate_batch(data):
                 # Get embeddings
                 all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer)
 
+                assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz])
+
                 results.append(all_outputs)
             else:
                 # Translate
@@ -361,7 +384,7 @@ def get_embedding_from_model_embedding_matrix():
     elif request.method == "POST":
         request_method = request.form
     else:
-        logger.warning("Unknown method: %s", request.method)
+        logger.error("Unknown method: %s", request.method)
 
         return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
 
@@ -369,12 +392,12 @@ def get_embedding_from_model_embedding_matrix():
     try:
         tokens = utils.string2list(request_method.getlist("token"))
     except KeyError as e:
-        logger.warning("KeyError: %s", e)
+        logger.error("KeyError: %s", e)
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
     if len(tokens) == 0:
-        logger.warning("No tokens: %s", tokens)
+        logger.error("No tokens: %s", tokens)
 
         return jsonify({"ok": "null", "err": "'tokens' is a mandatory field that cannot be empty"})
 
@@ -481,7 +504,6 @@ def main(args):
     global_conf["max_new_tokens"] = args.max_new_tokens
     global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["streamer_embedding_tokens"] = ThreadedStreamer(embedding_tokens_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
-    global_conf["streamer_embedding_pooling"] = ThreadedStreamer(embedding_pooling_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
 
@@ -525,8 +547,8 @@ def main(args):
                  r'trg_sentence=RW4ganVuaW8sIGxhIENvbWlzacOzbiBwdWJsaWPDsyBsb3MgcmVzdWx0YWRvcyBkZSB1bmEgY29uc3VsdGEgcMO6YmxpY2Egc29icmUgbGFzIHByb3B1ZXN0YXMsIGVuIGRvbmRlIHNlIG9idHV2byB1biBhbXBsaW8gYXBveW8gcGFyYSBsbGFtYXIgYSBsYSBhc2FtYmxlYSB1biBQYXJsYW1lbnRvIGRlIEdhbGVzLgo=&' + \
                  r'src_lang=English&' + \
                  r'trg_lang=French&' + \
-                 r'layer=-2&' + \
-                 r'pooling=max&' + \
+                 r'layer=-1&' + \
+                 r'pooling=mean&' + \
                  r'src_sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
                  r'trg_sentence=w4AgbCdpbnN0YXIgZCdhdXRyZXMgZXhwZXJ0cywgaWwgc2UgbW9udHJlIHNjZXB0aXF1ZSBxdWFudCDDoCBsYSBwb3NzaWJpbGl0w6kgZGUgZ3XDqXJpciBsZSBkaWFiw6h0ZSwgZmFpc2FudCByZW1hcnF1ZXIgcXVlIGNlcyByw6lzdWx0YXRzIG5lIHNvbnQgcGFzIGFwcGxpY2FibGVzIGF1eCBwZXJzb25uZXMgcXVpIHNvdWZmcmVudCBkw6lqw6AgZGUgZGlhYsOodGUgZGUgdHlwZSAxLgo=&' + \
                 '"', flask_port)

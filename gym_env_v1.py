@@ -199,7 +199,8 @@ class MTICLEnv(gym.Env):
         self.time_step = 0
         self.current_translations = 0 # former self.current_downloaded_urls TODO
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
-        self.rewards = []
+        self.rewards = [] # TODO
+        self.early_stopping = False # TODO change to True when EoS token is reached but not when maximum number of examples is reached
         self.current_datetime = datetime.datetime.now()
 
         for _ in range(self.state_window_length):
@@ -458,12 +459,30 @@ class MTICLEnv(gym.Env):
 
         return representations
 
+    def is_done(self):
+        limit_examples = self.current_translations >= self.max_icl_examples
+        terminated = limit_examples
+        truncated = self.early_stopping
+
+        assert len(self.icl_embeddings_representation) == self.embeddings_index.ntotal
+
+        return terminated, truncated
+
 if __name__ == "__main__":
     src_lang = sys.argv[1]
     trg_lang = sys.argv[2]
     file_data = sys.argv[3]
     file_data_icl_examples = sys.argv[4]
+    raw_kwargs = sys.argv[5:]
+    parsed_kwargs = {}
 
-    env = MTICLEnv(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.DEBUG)
+    for arg in raw_kwargs:
+        key, sep, value = arg.partition("=")
+
+        assert sep == '=', f"Invalid argument format: {arg}"
+
+        parsed_kwargs[key] = value
+
+    env = MTICLEnv(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
 
     check_env(env)
