@@ -139,6 +139,64 @@ class MTICLEnv(gym.Env):
         self.time_step += 1
         self.time_step_global += 1
 
+        if isinstance(action, str):
+            # Sentence given
+            action_url = action
+            action_url_idx = None
+
+            for idx, url in self.icl_embeddings_representation.items():
+                if url == action_url:
+                    action_url_idx = idx
+
+                    break
+
+            if action_url_idx is None:
+                raise Exception(f"URL not found: {action_url}")
+
+            action_url_distance = 0.0
+            action_url_idx = np.array([[action_url_idx]])
+        else:
+            # Embedding given
+            action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(action)
+            action_url = action_url[0][0]
+            action_url_distance = action_url_distance[0][0]
+
+        assert action_url_idx.shape == (1, 1), action_url_idx.shape
+        assert action_url == self.icl_embeddings_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_embeddings_representation[action_url_idx[0][0]]}"
+        assert action_url_idx[0][0] == self.icl_embeddings_representation_url2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_embeddings_representation_url2idx[action_url]}"
+
+        terminated, truncated, reward = self.apply_step(action_url)
+        representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
+
+        assert representation.shape == (self.action_dim,), representation.shape
+
+        self.last_representation_str.append(representation)
+        self.last_representation_emb.append(action_url)
+
+        self.rewards.append(reward)
+        self.logger_wrapper(gym.logger.debug, "Action in time step #%d (reward: %s; distance: %s): %s",
+                            self.time_step, reward, action_url_distance, action_url)
+
+        #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
+        ## ...
+        observation = self.state_window_type_callback(self.current_state_window)
+
+        #self.new_observation(observation, list(self.last_representation_str), list(self.last_representation_emb), children_urls, previous_observation)
+
+        terminated, truncated = self.is_done()
+
+        if terminated or truncated:
+            average_reward = -np.inf if len(self.rewards) == 0 else (sum(self.rewards) / len(self.rewards))
+            return_value = sum([reward * np.power(self.gamma, t) for t, reward in enumerate(self.rewards)])
+
+            self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s; return: %s with gamma=%s)",
+                                self.time_step, average_reward, sum(self.rewards), return_value, self.gamma)
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        return observation, reward, terminated, truncated, info
+
     def _hard_reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
@@ -148,7 +206,7 @@ class MTICLEnv(gym.Env):
         self.data = []
         self.data_icl_examples = []
         #self.observation_hash_dict = {} # We do not remove this data in _soft_reset because the replay buffer is not reseted after an episode ends
-        #self.sentences2representation = {} # former self.url2representation
+        self.str2representation = {} # former self.url2representation # TODO is it necessary? Too much memory...
 
         # Load data
         self.load_data() # TODO this was previously in _soft_reset and called only after a hard reset (why not directly here?)
@@ -163,7 +221,7 @@ class MTICLEnv(gym.Env):
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
         self.embeddings_index = faiss.IndexFlatL2(self.action_dim)
-        self.icl_embeddings_representation = {} # former self.active_urls_representation
+        self.icl_embeddings_representation = {} # former self.active_urls_representation # idx (insertion order) to embedding
         self.icl_embeddings_representation_icl2idx = {} # former self.active_urls_representation_url2idx
 
         ## ICL examples
@@ -171,10 +229,23 @@ class MTICLEnv(gym.Env):
         representations_emb = self.get_icl_example_representation(self.data_icl_examples)
         self.insert_embeddings(representations_str, representations_emb)
 
+        if len(representations_str) != len(set(representations_str)):
+            self.logger_wrapper(gym.logger.warn, "Duplicate ICL example representations found: %d", len(representations_str) - len(set(representations_str)))
+
+        for _str, emb in zip(representations_str, representations_emb):
+            assert emb.shape[0] == self.action_dim, f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+
+            self.str2representation[_str] = emb
+
         ## EoS token (early stopping action)
         representations_str = [self.eos_token_str]
         representations_emb = self.get_token_representation(representations_str)
         self.insert_embeddings(representations_str, representations_emb)
+
+        for _str, emb in zip(representations_str, representations_emb):
+            assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+
+            self.str2representation[_str] = emb
 
         # soft reset
         observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
@@ -201,6 +272,8 @@ class MTICLEnv(gym.Env):
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
         self.rewards = [] # TODO
         self.early_stopping = False # TODO change to True when EoS token is reached but not when maximum number of examples is reached
+        self.last_representation_str = [] # former self.last_downloaded_url_representation_url
+        self.last_representation_emb = [] # former self.last_downloaded_url_representation
         self.current_datetime = datetime.datetime.now()
 
         for _ in range(self.state_window_length):
@@ -370,6 +443,8 @@ class MTICLEnv(gym.Env):
         return avg, scores
 
     def get_icl_example_representation(self, icl_examples, numpy=True):
+        # format icl_examples: list of lists with two elements: [[src1, trg1], [src2, trg2], ...]
+
         assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
         assert len(icl_examples) > 0, "ICL examples must not be an empty list"
         assert isinstance(icl_examples[0], list), f"Expected icl_examples to be a list of lists, got {type(icl_examples[0])}: {icl_examples[0]}"
@@ -459,6 +534,69 @@ class MTICLEnv(gym.Env):
 
         return representations
 
+    def get_translations(self, src_sentences, icl_examples=None):
+        # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
+        ## len(icl_examples) must be equal to len(src_sentences)
+
+        assert isinstance(src_sentences, list), f"Expected src_sentences to be a list, got {type(src_sentences)}: {src_sentences}"
+        assert len(src_sentences) > 0, "src_sentences must not be an empty list"
+        assert isinstance(src_sentences[0], str), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
+
+        url = self.translate_model_api
+        batch_size = self.batch_size
+        translations = []
+        data = [{"src_sentence": utils.encode_base64(s), "src_examples": [], "trg_examples": [], "icl_idx_src_sentence": []} for s in src_sentences]
+
+        if icl_examples is not None:
+            assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
+            assert len(icl_examples) == len(src_sentences), f"ICL examples length mismatch: {len(icl_examples)} vs {len(src_sentences)}"
+
+            for idx, icl_example in enumerate(icl_examples):
+                assert isinstance(icl_example, list), f"Expected icl_example to be a list, got {type(icl_example)}: {icl_example} (idx: {idx})"
+
+                for icl_example_data in icl_example:
+                    assert isinstance(icl_example_data, list), f"Expected icl_example_data to be a list, got {type(icl_example_data)}: {icl_example_data} (idx: {idx})"
+                    assert len(icl_example_data) == 2, f"Expected each icl example data to be a list of two elements, got {len(icl_example_data)}: {icl_example_data} (idx: {idx})"
+
+                    src_example, trg_example = icl_example_data
+
+                    assert isinstance(src_example, str), f"Expected src_example to be a string, got {type(src_example)}: {src_example} (idx: {idx})"
+                    assert isinstance(trg_example, str), f"Expected trg_example to be a string, got {type(trg_example)}: {trg_example} (idx: {idx})"
+
+                    data[idx]["src_examples"].append(utils.encode_base64(src_example))
+                    data[idx]["trg_examples"].append(utils.encode_base64(trg_example))
+                    data[idx]["icl_idx_src_sentence"].append(str(idx + 1)) # server expects index starting from 1
+
+        for idx, batch in enumerate(utils.batchify(data, batch_size)):
+            payload = []
+
+            for sample in batch:
+                payload.append(('src_lang', self.src_lang))
+                payload.append(('trg_lang', self.trg_lang))
+                payload.append(('src_sentence', sample["src_sentence"]))
+
+                for src_example, trg_example, icl_idx in zip(sample["src_examples"], sample["trg_examples"], sample["icl_idx_src_sentence"]):
+                    payload.append(('src_example', src_example))
+                    payload.append(('trg_example', trg_example))
+                    payload.append(('icl_idx_src_sentence', icl_idx))
+
+            response = requests.post(url, data=payload)
+
+            assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
+            assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+
+            response_text = json.loads(response.text)
+
+            assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
+
+            response_result = response_text["ok"]
+
+            translations.append(response_result)
+
+        assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
+
+        return translations
+
     def is_done(self):
         limit_examples = self.current_translations >= self.max_icl_examples
         terminated = limit_examples
@@ -467,6 +605,107 @@ class MTICLEnv(gym.Env):
         assert len(self.icl_embeddings_representation) == self.embeddings_index.ntotal
 
         return terminated, truncated
+
+    def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_url=True, observations=None,
+                                   _index=None, _urls_representation=None, _urls_representation_are_embeddings=False):
+        """
+            observations: states from which proto_actions were generated
+        """
+        proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
+        results = []
+        index = self.embeddings_index if _index is None else _index
+        urls_representation = self.icl_embeddings_representation if _urls_representation is None else _urls_representation
+
+        assert isinstance(k, int), k
+
+        assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
+
+        if observations is not None:
+            # Create and reconstruct index to perform search using A(provided_state) set and not A(current_state) set (here, capital A is the set of actions)
+            pass # Given that the set of actions do not change given a state, we do not need to reconstruct the index here
+
+        if index.ntotal == 0:
+            # Faiss index is empty
+            self.logger_wrapper(gym.logger.warn, "Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
+
+        self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
+
+        D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
+        _fake_representation_str = self.eos_token_str # Default representation if no hits are found # TODO would be better to use the first or a random entry?
+        _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
+
+        for i in I:
+            results.append([])
+
+            for idx in i:
+                if len(results[-1]) >= k:
+                    break
+                if idx < 0:
+                    break
+
+                url = urls_representation[idx]
+
+                results[-1].append(url)
+
+            if len(results[-1]) == 0:
+                # Use seed URL (we need to add something...)
+                self.logger_wrapper(gym.logger.warn, "No entries close: returning default representation (%s)", _fake_representation_str)
+
+                while len(results[-1]) < k:
+                    results[-1].append(_fake_representation)
+            elif len(results[-1]) != k:
+                # Add items to avoid tensor errors because dimensions don't match
+                while len(results[-1]) < k:
+                    results[-1].append(results[-1][-1])
+
+            assert len(results[-1]) == k
+
+        if distance_expected_zero:
+            for idx1, d1 in enumerate(D):
+                for idx2, d2 in enumerate(d1):
+                    if not np.isclose(d2, 0.0):
+                        self.logger_wrapper(gym.logger.warn, "Expected distance was 0, but got %s in D[%d][%d]: check https://github.com/facebookresearch/faiss/issues/1272", d2, idx1, idx2)
+
+        if not get_url:
+            assert isinstance(results, list)
+
+            if len(results) > 0:
+                assert isinstance(results[0], list)
+
+            all_urls = [q for w in results for q in w] # Flatten list of lists
+
+            if len(all_urls) > 0:
+                assert isinstance(all_urls[0], str), f"Expected all_urls to be a list of strings, got {type(all_urls[0])}: {all_urls[0]}"
+
+            _all_urls_subset = [url for url in all_urls if url not in self.str2representation]
+            _all_urls_representation = [] if len(_all_urls_subset) == 0 else self.get_icl_example_representation(_all_urls_subset)
+
+            assert len(_all_urls_subset) == len(_all_urls_representation)
+
+            for _child_url, _child_url_observation in zip(_all_urls_subset, _all_urls_representation):
+                assert _child_url_observation.shape == (self.action_dim,)
+
+                self.str2representation[_child_url] = _child_url_observation
+
+            results = [torch.tensor(self.str2representation[url]) for url in all_urls]
+            results = torch.stack(results, dim=0).to(self.device)
+
+            assert len(results.shape) == 2, results.shape
+            assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1])
+
+            results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1])).to(self.device)
+
+        return results, D, I
+
+    def apply_step(self, current_action):
+        terminated, truncated = self.is_done()
+        reward = 0.0
+
+        if terminated or truncated:
+            return terminated, truncated, reward
+
+        # TODO finish
+
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]
