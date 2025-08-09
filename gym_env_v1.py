@@ -62,7 +62,6 @@ class MTICLEnv(gym.Env):
 
         self.reset_times = 0
         self.episode = 0
-        self.gamma = utils.dict_or_default(kwargs, "gamma", 0.99)
         self.state_window_length = utils.dict_or_default(kwargs, "state_window_length", 4)
         self.state_window_type = utils.dict_or_default(kwargs, "state_window_type", "concatenate")
         self.max_icl_examples = utils.dict_or_default(kwargs, "max_icl_examples", 4)
@@ -91,6 +90,7 @@ class MTICLEnv(gym.Env):
         ## Other API parameters
         self.embedding_pooling_model_method = utils.dict_or_default(kwargs, "embedding_pooling_model_method", "mean")
         self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", -1)
+        self.l2_normalize_api_embeddings = utils.dict_or_default(kwargs, "l2_normalize_api_embeddings", True)
 
         # Model conf
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
@@ -110,6 +110,11 @@ class MTICLEnv(gym.Env):
         else:
             raise Exception(f"Given window type is not valid: {self.state_window_type} (valid: {self.valid_state_window_type})")
 
+        # Other
+        self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
+        self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
+
+        # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
         self.logger_wrapper(gym.logger.info, "Model hidden size and EoS token (you may need to specify the correct values according to your LLM): %d %s", self.model_hidden_size, self.eos_token_str)
 
@@ -163,7 +168,7 @@ class MTICLEnv(gym.Env):
 
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
         assert action_url == self.icl_embeddings_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_embeddings_representation[action_url_idx[0][0]]}"
-        assert action_url_idx[0][0] == self.icl_embeddings_representation_url2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_embeddings_representation_url2idx[action_url]}"
+        assert action_url_idx[0][0] == self.icl_embeddings_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_embeddings_representation_icl2idx[action_url]}"
 
         terminated, truncated, reward = self.apply_step(action_url)
         representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
@@ -187,10 +192,8 @@ class MTICLEnv(gym.Env):
 
         if terminated or truncated:
             average_reward = -np.inf if len(self.rewards) == 0 else (sum(self.rewards) / len(self.rewards))
-            return_value = sum([reward * np.power(self.gamma, t) for t, reward in enumerate(self.rewards)])
 
-            self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s; return: %s with gamma=%s)",
-                                self.time_step, average_reward, sum(self.rewards), return_value, self.gamma)
+            self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s)", self.time_step, average_reward, sum(self.rewards))
 
         sys.stdout.flush()
         sys.stderr.flush()
@@ -247,6 +250,12 @@ class MTICLEnv(gym.Env):
 
             self.str2representation[_str] = emb
 
+        # Variables for selecting the translation sentences for the episodes
+        self.translation_candidate = -1 # dummy value in order to skip repetition of current ICL example the first time
+        self.translation_candidates_selected_episode = np.array([0] * len(self.data_icl_examples)) # N_episode
+        self.translation_candidates_selected_consecutive_episode = np.array([0] * len(self.data_icl_examples)) # N'_episode
+        self.translation_candidates_reward_mean_exponential_decay_episode = np.array([0.0] * len(self.data_icl_examples)) # Q_episode
+
         # soft reset
         observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
 
@@ -268,7 +277,8 @@ class MTICLEnv(gym.Env):
 
         info = {}
         self.time_step = 0
-        self.current_translations = 0 # former self.current_downloaded_urls TODO
+        #self.current_translations = 0 # former self.current_downloaded_urls
+        self.current_icl_examples = []
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
         self.rewards = [] # TODO
         self.early_stopping = False # TODO change to True when EoS token is reached but not when maximum number of examples is reached
@@ -279,9 +289,16 @@ class MTICLEnv(gym.Env):
         for _ in range(self.state_window_length):
             self.current_state_window.append(np.zeros(self.model_hidden_size))
 
-        observation = self.state_window_type_callback(self.current_state_window)
+        # Select translation sentence for the episode
+        self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
 
-        # TODO get initial observation from self.data using self.time_step
+        # Get the observation for the first time step
+        src_sentence = self.data[self.translation_candidate][0]
+        observation = self.get_translations([src_sentence], only_representation=True)[0]
+
+        self.current_state_window.append(observation)
+
+        observation = self.state_window_type_callback(self.current_state_window)
 
         return observation, info
 
@@ -295,12 +312,10 @@ class MTICLEnv(gym.Env):
             utils.set_random_seed(seed, using_cuda=self.device.type == torch.device("cuda").type)
 
         if self.reset_times == 0 or utils.dict_or_default(options, "always_hard_reset", False):
-            rtn = self._hard_reset(seed=seed, options=options)
+            observation, info = self._hard_reset(seed=seed, options=options)
         else:
             # After first reset, _soft_reset is the default option if "always_hard_reset" is not defined in options
-            rtn = self._soft_reset(seed=seed, options=options)
-
-        observation, info = rtn
+            observation, info = self._soft_reset(seed=seed, options=options)
 
         assert observation.shape == (self.state_dim,), observation.shape
 
@@ -309,7 +324,21 @@ class MTICLEnv(gym.Env):
         return observation, info
 
     def render(self):
-        return self.current_translations
+        if self.translation_candidate < 0:
+            data = {}
+        else:
+            data = {
+                "src_sentence": self.data[self.translation_candidate][0],
+                "reference": self.data[self.translation_candidate][1],
+                "icl_examples": self.data_icl_examples,
+            }
+
+        data["episode"] = self.episode
+
+        try:
+            return json.dumps(data, indent=4)
+        except:
+            return data
 
     def close(self):
         pass
@@ -372,7 +401,6 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): finished! %d entries read (%d URLs loaded)", idx, len(self.data_icl_examples))
 
     def insert_embeddings(self, urls, embeddings, _index=None, _urls_representation=None, _urls_representation_url2idx=None, update_representation=True):
-        # TODO urls is a list of elements with format src_sentence<tab>trg_sentence (or EoS token)
         assert isinstance(urls, list), f"Expected urls to be a list, got {type(urls)}: {urls}"
         assert len(urls) > 0, "urls must not be an empty list"
         assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
@@ -492,6 +520,9 @@ class MTICLEnv(gym.Env):
         if numpy:
             representations = representations.numpy()
 
+        if self.l2_normalize_api_embeddings:
+            representations = utils.l2_normalize(representations)
+
         return representations
 
     def get_token_representation(self, tokens, numpy=True):
@@ -532,9 +563,12 @@ class MTICLEnv(gym.Env):
         if numpy:
             representations = representations.numpy()
 
+        if self.l2_normalize_api_embeddings:
+            representations = utils.l2_normalize(representations)
+
         return representations
 
-    def get_translations(self, src_sentences, icl_examples=None):
+    def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
         ## len(icl_examples) must be equal to len(src_sentences)
 
@@ -542,7 +576,7 @@ class MTICLEnv(gym.Env):
         assert len(src_sentences) > 0, "src_sentences must not be an empty list"
         assert isinstance(src_sentences[0], str), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
 
-        url = self.translate_model_api
+        url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
         batch_size = self.batch_size
         translations = []
         data = [{"src_sentence": utils.encode_base64(s), "src_examples": [], "trg_examples": [], "icl_idx_src_sentence": []} for s in src_sentences]
@@ -580,6 +614,10 @@ class MTICLEnv(gym.Env):
                     payload.append(('trg_example', trg_example))
                     payload.append(('icl_idx_src_sentence', icl_idx))
 
+            if only_representation:
+                payload.append(('pooling', self.embedding_pooling_model_method))
+                payload.append(('layer', self.embedding_pooling_model_layer))
+
             response = requests.post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
@@ -591,14 +629,30 @@ class MTICLEnv(gym.Env):
 
             response_result = response_text["ok"]
 
+            if only_representation:
+                response_result = base64.b64decode(response_result) # base64 tensor representation
+                response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+                response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+
             translations.append(response_result)
+
+        if only_representation:
+            translations = torch.cat(translations, dim=0)
+
+            assert translations.shape == (len(src_sentences), self.model_hidden_size), f"Translations shape mismatch: {translations.shape} vs {(len(src_sentences), self.model_hidden_size)}"
+
+            if numpy:
+                translations = translations.numpy()
+
+            if self.l2_normalize_api_embeddings:
+                translations = utils.l2_normalize(translations)
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
         return translations
 
     def is_done(self):
-        limit_examples = self.current_translations >= self.max_icl_examples
+        limit_examples = len(self.current_icl_examples) >= self.max_icl_examples
         terminated = limit_examples
         truncated = self.early_stopping
 
@@ -628,7 +682,7 @@ class MTICLEnv(gym.Env):
             # Faiss index is empty
             self.logger_wrapper(gym.logger.warn, "Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
 
-        self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
+        #self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
 
         D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
         _fake_representation_str = self.eos_token_str # Default representation if no hits are found # TODO would be better to use the first or a random entry?
@@ -697,15 +751,101 @@ class MTICLEnv(gym.Env):
 
         return results, D, I
 
+    def get_translation_candidate(self):
+        n = len(self.data)
+        repeat = False
+
+        # Repeat current translation candidate?
+        if self.translation_candidate >= 0:
+            idx = self.translation_candidate
+
+            assert 0.0 <= self.translation_candidates_reward_mean_exponential_decay_episode[idx] <= 1.0, f"Reward mean exponential decay must be in [0, 1], got {self.translation_candidates_reward_mean_exponential_decay_episode[idx]} for idx {idx}"
+
+            p = (1.0 - self.translation_candidates_reward_mean_exponential_decay_episode[idx]) / (1 + self.translation_candidates_selected_consecutive_episode[idx])
+            #p = ((1.0 - self.translation_candidates_reward_mean_exponential_decay_episode[idx]) * np.exp(-1.0 * self.translation_candidates_selected_consecutive_episode[idx])).item()
+
+            assert 0.0 <= p <= 1.0, f"Probability p must be in [0, 1], got {p} for idx {idx}: {self.translation_candidates_reward_mean_exponential_decay_episode} / {self.translation_candidates_selected_consecutive_episode}"
+
+            if random.random() < p:
+                self.logger_wrapper(gym.logger.info, "Translation candidate (repeating): #%d (p: %.4f)", idx, p)
+
+                self.translation_candidates_selected_consecutive_episode[idx] += 1
+                repeat = True
+            else:
+                self.translation_candidates_selected_consecutive_episode[idx] = 0
+
+        translation_candidate = self.translation_candidate if repeat else None
+
+        # Select translation candidate
+        if translation_candidate is None:
+            # UCB exploration modification
+            weights = -1.0 * self.translation_candidates_reward_mean_exponential_decay_episode + \
+                        self.translation_candidates_exploration_rate * np.sqrt(np.log(self.episode) / (self.translation_candidates_selected_episode + 1))
+
+            if self.episode == 1:
+                assert np.all(weights == 0.0), f"Weights must be zero at the first episode, got {weights}"
+
+                # utils.softmax will return uniform distribution when all values are the same, even if they are zero
+
+            prob_dist = utils.softmax(weights)
+            translation_candidate = np.random.choice(n, p=prob_dist)
+
+            self.logger_wrapper(gym.logger.info, "Translation candidate: #%d (p: %.4f)", translation_candidate, prob_dist[translation_candidate])
+
+        assert 0 <= translation_candidate < n, f"Translation candidate index must be in [0, {n}), got {translation_candidate}"
+
+        self.translation_candidates_selected_episode[translation_candidate] += 1
+
+        return translation_candidate
+
     def apply_step(self, current_action):
+        assert isinstance(current_action, str), f"Expected current_action to be a string, got {type(current_action)}: {current_action}"
+        assert len(self.current_icl_examples) < self.max_icl_examples, f"Current length of ICL examples ({self.current_icl_examples}) must be less than max ICL examples ({self.max_icl_examples})"
+
+        if current_action == self.eos_token_str:
+            # Early stopping action
+            self.logger_wrapper(gym.logger.info, "Early stopping action (%s) received in time step #%d", current_action, self.time_step)
+
+            assert self.early_stopping is False, "Early stopping action already received in this episode"
+
+            self.early_stopping = True
+        else:
+            self.current_icl_examples.append(current_action.split('\t'))
+
+            assert len(self.current_icl_examples[-1]) == 2, f"Expected current ICL example to have two elements (source and target), got {len(self.current_icl_examples[-1])}: {self.current_icl_examples[-1]}"
+
         terminated, truncated = self.is_done()
         reward = 0.0
 
+        if self.early_stopping:
+            assert terminated or truncated, f"Early stopping action received but not terminated or truncated: {terminated}, {truncated}"
+
         if terminated or truncated:
+            # Compute reward
+            src_sentence, reference = self.data[self.translation_candidate]
+            translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
+            reward = self.get_reward(src_sentence, reference, translation=translation)
+
+            # Update translation candidate mean reward
+            previous_value = self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate]
+            self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate] = \
+                previous_value + self.translation_candidates_reward_mean_exponential_decay_alpha * (reward - previous_value)
+
             return terminated, truncated, reward
 
-        # TODO finish
+        # Update state
+        src_sentence = self.data[self.translation_candidate][0]
+        observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
 
+        self.current_state_window.append(observation)
+
+        # Return
+        terminated, truncated = self.is_done()
+        reward = 0.0
+
+        assert not terminated and not truncated, "Step should not terminate or truncate immediately after applying an action"
+
+        return terminated, truncated, reward
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]

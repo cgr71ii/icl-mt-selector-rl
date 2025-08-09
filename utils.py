@@ -5,6 +5,7 @@ import base64
 import logging
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 def use_cuda(force_cpu=False):
@@ -139,3 +140,24 @@ def last_one_indices(x):
     last_one_idx[~has_one] = -1
 
     return last_one_idx
+
+def softmax(x):
+    softmax_f = lambda x: F.softmax(x, dim=-1)
+
+    if isinstance(x, torch.Tensor):
+        return softmax_f(x)
+    elif isinstance(x, np.ndarray):
+        return softmax_f(torch.tensor(x)).numpy()
+    elif isinstance(x, list):
+        return softmax_f(torch.tensor(x)).numpy().tolist()
+    else:
+        raise Exception(f"Unsupported type for softmax: {type(x)}. Expected torch.Tensor, np.ndarray, or list")
+
+def l2_normalize(emb):
+    assert isinstance(emb, np.ndarray), "Input must be a numpy array"
+    assert len(emb.shape) == 2, "Input array must be 2D (batch_size, embedding_size)"
+
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+
+    return emb / norms
