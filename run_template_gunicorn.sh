@@ -77,6 +77,7 @@ envvars_after=$(export | sort)
 echo "$(date) GPUs: $CUDA_VISIBLE_DEVICES"
 echo "$(date) starting gunicorn server with template: $template_file and model: $pretrained_model"
 
+# use '--bind "0.0.0.0:$gport"'' to bind to all interfaces and be able to access the server from a different machine (or just use a specific interface)
 gunicorn --bind "127.0.0.1:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(8, 0.2, '$pretrained_model', True)" &
 pid=$!
 

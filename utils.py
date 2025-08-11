@@ -161,3 +161,20 @@ def l2_normalize(emb):
     norms[norms == 0.0] = 1.0
 
     return emb / norms
+
+def parse_args(raw_kwargs, sep='='):
+    # expected format: key="value with spaces" or key=value
+    # use case example: parse_args(sys.argv[1:])
+
+    assert isinstance(raw_kwargs, list), "Expected raw_kwargs to be a list of strings"
+
+    parsed_kwargs = {}
+
+    for arg in raw_kwargs:
+        key, _sep, value = arg.partition(sep)
+
+        assert _sep == sep, f"Invalid argument format: {arg}"
+
+        parsed_kwargs[key] = value
+
+    return parsed_kwargs

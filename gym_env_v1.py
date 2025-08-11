@@ -156,7 +156,7 @@ class MTICLEnv(gym.Env):
             action_url = action
             action_url_idx = None
 
-            for idx, url in self.icl_embeddings_representation.items():
+            for idx, url in self.icl_example_representation.items():
                 if url == action_url:
                     action_url_idx = idx
 
@@ -173,9 +173,16 @@ class MTICLEnv(gym.Env):
             action_url = action_url[0][0]
             action_url_distance = action_url_distance[0][0]
 
+            if self.src_data_overlap_src_icl_examples > 0:
+                assert action_url_idx.shape == (1, 2), action_url_idx.shape
+
+                if (action_url_idx[0][0] in (-2, -3)) ^ (action_url_idx[0][1] in (-2, -3)):
+                    valid_idx = 1 if action_url_idx[0][0] in (-2, -3) else 0
+                    action_url_idx = np.array([[action_url_idx[0,valid_idx]]])
+
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
-        assert action_url == self.icl_embeddings_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_embeddings_representation[action_url_idx[0][0]]}"
-        assert action_url_idx[0][0] == self.icl_embeddings_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_embeddings_representation_icl2idx[action_url]}"
+        assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
+        assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
 
         terminated, truncated, reward = self.apply_step(action_url)
         #representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
@@ -223,6 +230,7 @@ class MTICLEnv(gym.Env):
         self.time_step_global = 0
         self.data = []
         self.data_icl_examples = []
+        self.src_data_overlap_src_icl_examples = 0
         #self.observation_hash_dict = {} # We do not remove this data in _soft_reset because the replay buffer is not reseted after an episode ends
         self.str2representation = {} # Needed for knn search
 
@@ -232,6 +240,17 @@ class MTICLEnv(gym.Env):
         assert len(self.data) > 0, "Data must not be empty"
         assert len(self.data_icl_examples) > 0, "ICL examples must not be empty"
 
+        l = gym.logger.warn if self.src_data_overlap_src_icl_examples > 0 else gym.logger.info
+        pr = self.src_data_overlap_src_icl_examples * 100 / len(self.data_icl_examples)
+
+        self.logger_wrapper(l, "Source data overlaps with ICL examples source sentences: %d out of %d (%.2f%%)", self.src_data_overlap_src_icl_examples, len(self.data_icl_examples), pr)
+
+        if self.src_data_overlap_src_icl_examples > 0:
+            self.logger_wrapper(gym.logger.info, "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add an "
+                                                 "additional embedding for the ICL example source sentences to the embeddings. This is done to remove the ICL example source sentence from "
+                                                 "the knn search results, so that the model does not cheat in the translation. If the the translation is not among the retrieved entries in "
+                                                 "the knn search, the less similar entry will be removed")
+
         # Shuffle data in order to avoid model memorization
         random.shuffle(self.data)
         random.shuffle(self.data_icl_examples)
@@ -239,8 +258,8 @@ class MTICLEnv(gym.Env):
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
         self.embeddings_index = faiss.IndexFlatL2(self.action_dim)
-        self.icl_embeddings_representation = {} # former self.active_urls_representation # idx (insertion order) to embedding
-        self.icl_embeddings_representation_icl2idx = {} # former self.active_urls_representation_url2idx
+        self.icl_example_representation = {} # former self.active_urls_representation # idx (insertion order) to icl example
+        self.icl_example_representation_icl2idx = {} # former self.active_urls_representation_url2idx
 
         ## ICL examples
         representations_str = [f"{src_icl}\t{trg_icl}" for src_icl, trg_icl in self.data_icl_examples]
@@ -367,6 +386,8 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "Loading data")
 
+        src_data_set = set()
+
         with open(self.file_data, "rt") as fd:
             for idx, url_entry in enumerate(fd, 1):
                 # Format: source<tab>reference
@@ -378,6 +399,7 @@ class MTICLEnv(gym.Env):
 
                     #src_sentence, trg_sentence = entry_data
 
+                    src_data_set.add(entry_data[0])
                     self.data.append(entry_data)
                 except Exception as e:
                     self.logger_wrapper(gym.logger.error, "Loading data: error in line #%d", idx)
@@ -404,6 +426,9 @@ class MTICLEnv(gym.Env):
 
                     #src_sentence, trg_sentence = entry_data
 
+                    if entry_data[0] in src_data_set:
+                        self.src_data_overlap_src_icl_examples += 1
+
                     self.data_icl_examples.append(entry_data)
                 except Exception as e:
                     self.logger_wrapper(gym.logger.error, "Loading data: error in line #%d", idx)
@@ -425,8 +450,8 @@ class MTICLEnv(gym.Env):
 
         #embeddings = utils.embeddings_index_sanity_check(embeddings, last_dimmension_shape=self.action_dim)
         index = self.embeddings_index if _index is None else _index
-        urls_representation = self.icl_embeddings_representation if _urls_representation is None else _urls_representation
-        urls_representation_url2idx = self.icl_embeddings_representation_icl2idx if _urls_representation_url2idx is None else _urls_representation_url2idx
+        urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
+        urls_representation_url2idx = self.icl_example_representation_icl2idx if _urls_representation_url2idx is None else _urls_representation_url2idx
 
         utils.insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, self.action_dim, update_representation=update_representation)
 
@@ -674,27 +699,33 @@ class MTICLEnv(gym.Env):
         terminated = limit_examples
         truncated = self.early_stopping
 
-        assert len(self.icl_embeddings_representation) == self.embeddings_index.ntotal
+        assert len(self.icl_example_representation) == self.embeddings_index.ntotal
 
         return terminated, truncated
 
-    def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_url=True, observations=None,
-                                   _index=None, _urls_representation=None, _urls_representation_are_embeddings=False):
+    def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
+                                   _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
+                                   remove_overlapping_actions=True):
         """
             observations: states from which proto_actions were generated
         """
         proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
         results = []
         index = self.embeddings_index if _index is None else _index
-        urls_representation = self.icl_embeddings_representation if _urls_representation is None else _urls_representation
+        urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
 
         assert isinstance(k, int), k
-
+        assert k > 0, "k must be greater than 0"
         assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
 
         if observations is not None:
             # Create and reconstruct index to perform search using A(provided_state) set and not A(current_state) set (here, capital A is the set of actions)
             pass # Given that the set of actions do not change given a state, we do not need to reconstruct the index here
+
+        extra_k = remove_overlapping_actions and self.src_data_overlap_src_icl_examples > 0
+
+        if extra_k:
+            k += 1
 
         if index.ntotal == 0:
             # Faiss index is empty
@@ -703,42 +734,88 @@ class MTICLEnv(gym.Env):
         #self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
 
         D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
+        expected_shape = (proto_actions.shape[0], k)
+
+        assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
+        assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
+
         _fake_representation_str = self.eos_token_str # Default representation if no hits are found # TODO would be better to use the first or a random entry?
         _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
 
-        for i in I:
+        # Modify D
+        D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
+        d_modified_idxs = [(_a, _b) for _a, _b in zip(*np.where(I == -1))] if np.any(I == -1) else []
+
+        # Obtain representations from embeddings
+        for idx1, (i, d) in enumerate(zip(I, D)):
+            overlapping_hits = 0
+
             results.append([])
 
-            for idx in i:
+            for idx2, value_idx in enumerate(i):
                 if len(results[-1]) >= k:
                     break
-                if idx < 0:
+                if value_idx < 0:
                     break
 
-                url = urls_representation[idx]
+                url = urls_representation[value_idx]
+
+                assert isinstance(url, str), f"Expected url to be a string, got {type(url)}: {url}"
+
+                if url != self.eos_token_str:
+                    # Check if we need to remove this hit
+                    src_icl_example, trg_icl_example = url.split('\t')
+
+                    if extra_k and self.data[self.translation_candidate][0] == src_icl_example:
+                        self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
+
+                        overlapping_hits += 1
+                        d[idx2] = -200.0 # Set distance to a negative value for invalid indices
+                        i[idx2] = -2
+
+                        d_modified_idxs.append((idx1, idx2))
+
+                        continue
 
                 results[-1].append(url)
+
+            assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
+            assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
+
+            if extra_k and overlapping_hits == 0:
+                # Remove the less similar neighbor
+
+                assert d.shape == (k,), f"Expected d to have shape ({k},), got {d.shape}"
+                assert len(results[-1]) == k, f"Expected results[-1] to have length {k}, got {len(results[-1])}"
+
+                idx2 = np.argmax(d)
+                d[idx2] = -300.0
+                i[idx2] = -3
+
+                del results[-1][idx2]
 
             if len(results[-1]) == 0:
                 # Use seed URL (we need to add something...)
                 self.logger_wrapper(gym.logger.warn, "No entries close: returning default representation (%s)", _fake_representation_str)
-
-                while len(results[-1]) < k:
-                    results[-1].append(_fake_representation)
-            elif len(results[-1]) != k:
+            elif len(results[-1]) < (k - (1 if extra_k else 0)):
                 # Add items to avoid tensor errors because dimensions don't match
-                while len(results[-1]) < k:
-                    results[-1].append(results[-1][-1])
+                self.logger_wrapper(gym.logger.warn, "Not enough entries close: returning %d default representation(s) (%s)", k - len(results[-1]), _fake_representation_str)
 
-            assert len(results[-1]) == k
+            while len(results[-1]) < (k - (1 if extra_k else 0)):
+                results[-1].append(_fake_representation)
+
+            assert len(results[-1]) == (k - (1 if extra_k else 0))
 
         if distance_expected_zero:
             for idx1, d1 in enumerate(D):
                 for idx2, d2 in enumerate(d1):
+                    if (idx1, idx2) in d_modified_idxs:
+                        continue
+
                     if not np.isclose(d2, 0.0):
                         self.logger_wrapper(gym.logger.warn, "Expected distance was 0, but got %s in D[%d][%d]: check https://github.com/facebookresearch/faiss/issues/1272", d2, idx1, idx2)
 
-        if not get_url:
+        if not get_representations_instead_of_embeddings:
             assert isinstance(results, list)
 
             if len(results) > 0:
@@ -763,9 +840,9 @@ class MTICLEnv(gym.Env):
             results = torch.stack(results, dim=0).to(self.device)
 
             assert len(results.shape) == 2, results.shape
-            assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1])
+            assert results.shape == (proto_actions.shape[0] * (k - (1 if extra_k else 0)), proto_actions.shape[1])
 
-            results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1])).to(self.device)
+            results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1])).to(self.device)
 
         return results, D, I
 
@@ -807,8 +884,9 @@ class MTICLEnv(gym.Env):
 
             prob_dist = utils.softmax(weights)
             translation_candidate = np.random.choice(n, p=prob_dist)
+            src_translation_candidate = self.data[translation_candidate][0]
 
-            self.logger_wrapper(gym.logger.info, "Translation candidate: #%d (p: %.4f)", translation_candidate, prob_dist[translation_candidate])
+            self.logger_wrapper(gym.logger.info, "Translation candidate #%d (p: %.4f): %s", translation_candidate, prob_dist[translation_candidate], src_translation_candidate)
 
         assert 0 <= translation_candidate < n, f"Translation candidate index must be in [0, {n}), got {translation_candidate}"
 
@@ -877,16 +955,9 @@ if __name__ == "__main__":
     trg_lang = sys.argv[2]
     file_data = sys.argv[3]
     file_data_icl_examples = sys.argv[4]
-    raw_kwargs = sys.argv[5:]
-    parsed_kwargs = {}
+    parsed_kwargs = utils.parse_args(sys.argv[5:])
 
-    for arg in raw_kwargs:
-        key, sep, value = arg.partition("=")
-
-        assert sep == '=', f"Invalid argument format: {arg}"
-
-        parsed_kwargs[key] = value
-
+    # Initialize and check environment
     env = MTICLEnv(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
 
     check_env(env)
