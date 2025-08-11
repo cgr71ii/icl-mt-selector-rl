@@ -67,8 +67,16 @@ class MTICLEnv(gym.Env):
         self.max_icl_examples = utils.dict_or_default(kwargs, "max_icl_examples", 4)
         self.max_data_entries = utils.dict_or_default(kwargs, "max_data_entries", -1)
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
+        self.state_representation = utils.dict_or_default(kwargs, "state_representation", "translation_and_icl_examples")
 
-        if self.state_window_length < self.max_icl_examples:
+        assert self.state_representation in ("translation_and_icl_examples", "actions"), f"Unexpected state representation: {self.state_representation}"
+
+        if self.state_representation == "translation_and_icl_examples" and self.state_window_type == "concatenate" and self.state_window_length > 1:
+            self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
+
+            self.state_window_length = 1
+
+        if self.state_window_type == "concatenate" and self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d", self.state_window_length, self.max_icl_examples)
 
         # API URLs
@@ -136,7 +144,6 @@ class MTICLEnv(gym.Env):
 
         if terminated or truncated:
             observation = self.state_window_type_callback(self.current_state_window)
-            observation = self.apply_extra_dimension_to_observation(observation)
             reward = 0.0
 
             return observation, reward, terminated, truncated, info
@@ -171,15 +178,15 @@ class MTICLEnv(gym.Env):
         assert action_url_idx[0][0] == self.icl_embeddings_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_embeddings_representation_icl2idx[action_url]}"
 
         terminated, truncated, reward = self.apply_step(action_url)
-        representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
+        #representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
 
-        assert representation.shape == (self.action_dim,), representation.shape
+        #assert representation.shape == (self.action_dim,), representation.shape
 
-        self.last_representation_str.append(representation)
-        self.last_representation_emb.append(action_url)
+        #self.last_representation_str.append(representation)
+        #self.last_representation_emb.append(action_url)
 
         self.rewards.append(reward)
-        self.logger_wrapper(gym.logger.debug, "Action in time step #%d (reward: %s; distance: %s): %s",
+        self.logger_wrapper(gym.logger.info, "Action in time step #%d (reward: %s; distance: %s): %s",
                             self.time_step, reward, action_url_distance, action_url)
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
@@ -188,12 +195,20 @@ class MTICLEnv(gym.Env):
 
         #self.new_observation(observation, list(self.last_representation_str), list(self.last_representation_emb), children_urls, previous_observation)
 
-        terminated, truncated = self.is_done()
+        _terminated, _truncated = self.is_done()
+
+        assert _terminated == terminated, f"Expected terminated: {_terminated}, got: {terminated}"
+        assert _truncated == truncated, f"Expected truncated: {_truncated}, got: {truncated}"
 
         if terminated or truncated:
             average_reward = -np.inf if len(self.rewards) == 0 else (sum(self.rewards) / len(self.rewards))
 
             self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s)", self.time_step, average_reward, sum(self.rewards))
+            reward_sum = sum(self.translation_candidates_reward_mean_episode)
+            reward_steps = len(self.translation_candidates_reward_mean_episode)
+            reward_mean = reward_sum / reward_steps
+
+            self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'last_episode_reward': %s, 'last_episode_steps': %s}", reward_sum, reward_mean, reward, self.time_step)
 
         sys.stdout.flush()
         sys.stderr.flush()
@@ -209,7 +224,7 @@ class MTICLEnv(gym.Env):
         self.data = []
         self.data_icl_examples = []
         #self.observation_hash_dict = {} # We do not remove this data in _soft_reset because the replay buffer is not reseted after an episode ends
-        self.str2representation = {} # former self.url2representation # TODO is it necessary? Too much memory...
+        self.str2representation = {} # Needed for knn search
 
         # Load data
         self.load_data() # TODO this was previously in _soft_reset and called only after a hard reset (why not directly here?)
@@ -256,6 +271,9 @@ class MTICLEnv(gym.Env):
         self.translation_candidates_selected_consecutive_episode = np.array([0] * len(self.data_icl_examples)) # N'_episode
         self.translation_candidates_reward_mean_exponential_decay_episode = np.array([0.0] * len(self.data_icl_examples)) # Q_episode
 
+        # Other
+        self.translation_candidates_reward_mean_episode = []
+
         # soft reset
         observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
 
@@ -280,10 +298,10 @@ class MTICLEnv(gym.Env):
         #self.current_translations = 0 # former self.current_downloaded_urls
         self.current_icl_examples = []
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
-        self.rewards = [] # TODO
-        self.early_stopping = False # TODO change to True when EoS token is reached but not when maximum number of examples is reached
-        self.last_representation_str = [] # former self.last_downloaded_url_representation_url
-        self.last_representation_emb = [] # former self.last_downloaded_url_representation
+        self.rewards = []
+        self.early_stopping = False
+        #self.last_representation_str = [] # former self.last_downloaded_url_representation_url
+        #self.last_representation_emb = [] # former self.last_downloaded_url_representation
         self.current_datetime = datetime.datetime.now()
 
         for _ in range(self.state_window_length):
@@ -830,12 +848,19 @@ class MTICLEnv(gym.Env):
             previous_value = self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate]
             self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate] = \
                 previous_value + self.translation_candidates_reward_mean_exponential_decay_alpha * (reward - previous_value)
+            self.translation_candidates_reward_mean_episode.append(reward)
 
             return terminated, truncated, reward
 
         # Update state
         src_sentence = self.data[self.translation_candidate][0]
-        observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+
+        if self.state_representation  == "translation_and_icl_examples":
+            observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+        elif self.state_representation == "actions":
+            observation = self.get_icl_example_representation([self.current_icl_examples[-1]])
+        else:
+            raise Exception(f"Unknown state representation: {self.state_representation}")
 
         self.current_state_window.append(observation)
 
