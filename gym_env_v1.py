@@ -90,10 +90,10 @@ class MTICLEnv(gym.Env):
         assert isinstance(self.embedding_pooling_model_api, str), f"embedding_pooling_model_api: {type(self.embedding_pooling_model_api)}: {self.embedding_pooling_model_api}"
         assert isinstance(self.eval_model_api, str), f"eval_model_api: {type(self.eval_model_api)}: {self.eval_model_api}"
 
-        self.logger_wrapper(gym.logger.info, "translate_model_api: %s", self.translate_model_api)
-        self.logger_wrapper(gym.logger.info, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
-        self.logger_wrapper(gym.logger.info, "embedding_pooling_model_api: %s", self.embedding_pooling_model_api)
-        self.logger_wrapper(gym.logger.info, "eval_model_api: %s", self.eval_model_api)
+        self.logger_wrapper(gym.logger.debug, "translate_model_api: %s", self.translate_model_api)
+        self.logger_wrapper(gym.logger.debug, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
+        self.logger_wrapper(gym.logger.debug, "embedding_pooling_model_api: %s", self.embedding_pooling_model_api)
+        self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
 
         ## Other API parameters
         self.embedding_pooling_model_method = utils.dict_or_default(kwargs, "embedding_pooling_model_method", "mean")
@@ -132,25 +132,7 @@ class MTICLEnv(gym.Env):
         self.action_space = gym.spaces.Box(-1., 1., shape=(self.action_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
         self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
 
-    def step(self, action):
-        """
-            Action: can be either an embedding (closest existant representation will be obtained) or tab-separated source and target sentences
-        """
-        if self.reset_times == 0:
-            raise Exception("Calling reset() before step() is mandatory")
-
-        terminated, truncated = self.is_done()
-        info = {}
-
-        if terminated or truncated:
-            observation = self.state_window_type_callback(self.current_state_window)
-            reward = 0.0
-
-            return observation, reward, terminated, truncated, info
-
-        self.time_step += 1
-        self.time_step_global += 1
-
+    def preprocess_action(self, action):
         if isinstance(action, str):
             # Sentence given
             action_url = action
@@ -184,6 +166,29 @@ class MTICLEnv(gym.Env):
         assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
         assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
 
+        return action_url, action_url_idx, action_url_distance
+
+    def step(self, action):
+        """
+            Action: can be either an embedding (closest existant representation will be obtained) or tab-separated source and target sentences
+        """
+        if self.reset_times == 0:
+            raise Exception("Calling reset() before step() is mandatory")
+
+        terminated, truncated = self.is_done()
+        info = {}
+
+        if terminated or truncated:
+            observation = self.state_window_type_callback(self.current_state_window)
+            reward = 0.0
+
+            return observation, reward, terminated, truncated, info
+
+        self.time_step += 1
+        self.time_step_global += 1
+
+        # Preprocess action and apply step
+        action_url, action_url_idx, action_url_distance = self.preprocess_action(action)
         terminated, truncated, reward = self.apply_step(action_url)
         #representation = self.str2representation[action_url] # former self.get_url_representation(action_url, apply_model=True).squeeze(0)
 
@@ -192,7 +197,7 @@ class MTICLEnv(gym.Env):
         #self.last_representation_str.append(representation)
         #self.last_representation_emb.append(action_url)
 
-        self.rewards.append(reward)
+        #self.rewards.append(reward)
         self.logger_wrapper(gym.logger.info, "Action in time step #%d (reward: %s; distance: %s): %s",
                             self.time_step, reward, action_url_distance, action_url)
 
@@ -208,9 +213,10 @@ class MTICLEnv(gym.Env):
         assert _truncated == truncated, f"Expected truncated: {_truncated}, got: {truncated}"
 
         if terminated or truncated:
-            average_reward = -np.inf if len(self.rewards) == 0 else (sum(self.rewards) / len(self.rewards))
+            #average_reward = -np.inf if len(self.rewards) == 0 else (sum(self.rewards) / len(self.rewards))
 
-            self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s)", self.time_step, average_reward, sum(self.rewards))
+            #self.logger_wrapper(gym.logger.info, "Average reward for %d steps: %s (sum: %s)", self.time_step, average_reward, sum(self.rewards))
+
             reward_sum = sum(self.translation_candidates_reward_mean_episode)
             reward_steps = len(self.translation_candidates_reward_mean_episode)
             reward_mean = reward_sum / reward_steps
@@ -222,10 +228,24 @@ class MTICLEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
+    def _init_translation_candidate_variables(self):
+        # Variables for selecting the translation sentences for the episodes
+        self.translation_candidate = -1 # dummy value in order to skip repetition of current ICL example the first time
+        self.translation_candidates_selected_episode = np.array([0] * len(self.data)) # N_episode
+        self.translation_candidates_selected_consecutive_episode = np.array([0] * len(self.data)) # N'_episode
+        self.translation_candidates_reward_mean_exponential_decay_episode = np.array([0.0] * len(self.data)) # Q_episode
+
+        # Other
+        self.translation_candidates_reward_mean_episode = []
+
     def _hard_reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        self.logger_wrapper(gym.logger.debug, "Env reset (hard): episode %d", self.episode)
+        assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
+
+        options = {} if options is None else options
+
+        self.logger_wrapper(gym.logger.info, "Env reset (hard): episode %d", self.episode)
 
         self.time_step_global = 0
         self.data = []
@@ -252,8 +272,13 @@ class MTICLEnv(gym.Env):
                                                  "the knn search, the less similar entry will be removed")
 
         # Shuffle data in order to avoid model memorization
-        random.shuffle(self.data)
-        random.shuffle(self.data_icl_examples)
+        if options.get("shuffle_all_data", True):
+            self.logger_wrapper(gym.logger.info, "Data shuffled")
+
+            random.shuffle(self.data)
+            random.shuffle(self.data_icl_examples)
+        else:
+            self.logger_wrapper(gym.logger.info, "Data NOT shuffled")
 
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
@@ -284,14 +309,7 @@ class MTICLEnv(gym.Env):
 
             self.str2representation[_str] = emb
 
-        # Variables for selecting the translation sentences for the episodes
-        self.translation_candidate = -1 # dummy value in order to skip repetition of current ICL example the first time
-        self.translation_candidates_selected_episode = np.array([0] * len(self.data_icl_examples)) # N_episode
-        self.translation_candidates_selected_consecutive_episode = np.array([0] * len(self.data_icl_examples)) # N'_episode
-        self.translation_candidates_reward_mean_exponential_decay_episode = np.array([0.0] * len(self.data_icl_examples)) # Q_episode
-
-        # Other
-        self.translation_candidates_reward_mean_episode = []
+        self._init_translation_candidate_variables()
 
         # soft reset
         observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
@@ -300,24 +318,23 @@ class MTICLEnv(gym.Env):
 
     def _soft_reset(self, seed=None, options=None):
         # Difference with self._hard_reset: we keep all the results from the models to avoid computing them again
+        assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
+
         options = {} if options is None else options
-
-        assert isinstance(options, dict), f"Options must be a dictionary, got {type(options)}: {options}"
-
         is_hard_reset = utils.dict_or_default(options, "reset_from_hard_reset", False)
         is_soft_reset = not is_hard_reset
 
         if is_soft_reset:
             super().reset(seed=seed)
 
-            self.logger_wrapper(gym.logger.debug, "Env reset (soft): episode %d", self.episode)
+            self.logger_wrapper(gym.logger.info, "Env reset (soft): episode %d", self.episode)
 
         info = {}
         self.time_step = 0
         #self.current_translations = 0 # former self.current_downloaded_urls
         self.current_icl_examples = []
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
-        self.rewards = []
+        #self.rewards = []
         self.early_stopping = False
         #self.last_representation_str = [] # former self.last_downloaded_url_representation_url
         #self.last_representation_emb = [] # former self.last_downloaded_url_representation
@@ -341,6 +358,9 @@ class MTICLEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         self.episode += 1
+
+        assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
+
         options = {} if options is None else options
 
         assert isinstance(options, dict), f"Options must be a dictionary, got {type(options)}: {options}"
@@ -862,7 +882,9 @@ class MTICLEnv(gym.Env):
             assert 0.0 <= p <= 1.0, f"Probability p must be in [0, 1], got {p} for idx {idx}: {self.translation_candidates_reward_mean_exponential_decay_episode} / {self.translation_candidates_selected_consecutive_episode}"
 
             if random.random() < p:
-                self.logger_wrapper(gym.logger.info, "Translation candidate (repeating): #%d (p: %.4f)", idx, p)
+                src_translation_candidate = self.data[self.translation_candidate][0]
+
+                self.logger_wrapper(gym.logger.info, "Translation candidate (repeating) #%d (p: %.4f): %s", idx, p, src_translation_candidate)
 
                 self.translation_candidates_selected_consecutive_episode[idx] += 1
                 repeat = True
