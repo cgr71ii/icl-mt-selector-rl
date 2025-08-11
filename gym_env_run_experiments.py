@@ -71,8 +71,8 @@ init_training_episodes = 10
 #max_steps = max_episodes * max_icl_examples
 max_steps = 1e10 # fake value due to callback StopTrainingOnMaxEpisodes
 init_training_steps = init_training_episodes * max_icl_examples
-env = env_class(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.DEBUG, **{"max_data_entries": max_data_entries, **parsed_kwargs})
-env_eval = env_eval_class(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.INFO, **{"max_data_entries": max_data_entries, **parsed_kwargs})
+env = env_class(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
+env_eval = env_eval_class(src_lang, trg_lang, file_data, file_data_icl_examples, gym_logger_level=gym.logger.INFO, **parsed_kwargs)
 retrieve_embeddings = lambda proto_action, _k, observations: env.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0] # Get only the result, not I or D
 callbacks = []
 model = DDPG(
@@ -107,7 +107,7 @@ model = DDPG(
 #assert init_training_episodes < max_episodes
 
 # Add callbacks
-stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=5, min_evals=5, verbose=1) # early stopping
+stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=5, min_evals=10, verbose=1) # early stopping
 # EvalCallback
 ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
 ## it does not evaluate the model performance when training finishes (we evaluate below)
