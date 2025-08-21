@@ -54,7 +54,8 @@ class MTICLEnv(gym.Env):
         self.trg_lang = trg_lang
         self.file_data = file_data # format: source<tab>reference
         self.file_data_icl_examples = file_data_icl_examples # format: source<tab>reference
-        self.custom_env_id = utils.dict_or_default(kwargs, "custom_env_id", '-')
+        self.custom_env_id = utils.dict_or_default(kwargs, "custom_env_id", "none")
+        self._seed = utils.dict_or_default(kwargs, "_seed", None)
 
         assert utils.file_exists(self.file_data), self.file_data
         assert utils.file_exists(self.file_data_icl_examples), self.file_data_icl_examples
@@ -68,11 +69,12 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples = []
         self.knn_callback = utils.dict_or_default(kwargs, "knn_callback", self.get_closest_neighbors_urls)
         self.knn_callback_data_icl_examples = utils.dict_or_default(kwargs, "knn_callback_data_icl_examples", self.data_icl_examples)
+        self.is_self_knn_callback = self.knn_callback.__func__ is self.__class__.get_closest_neighbors_urls and self.knn_callback.__self__ is self
 
         assert isinstance(self.knn_callback_data_icl_examples, list), type(self.knn_callback_data_icl_examples)
 
         #if self.knn_callback is not self.get_closest_neighbors_urls: # each time we call self, a dynamic object is created to wrap the instance, so id() changes each time
-        if self.knn_callback.__func__ is not self.__class__.get_closest_neighbors_urls or self.knn_callback.__self__ is not self:
+        if not self.is_self_knn_callback:
             assert "knn_callback_data_icl_examples" in kwargs
             assert self.knn_callback_data_icl_examples is not self.data_icl_examples, "If knn_callback is not get_closest_neighbors_urls, knn_callback_data_icl_examples must not be the same as self.data_icl_examples"
 
@@ -156,11 +158,19 @@ class MTICLEnv(gym.Env):
         self.dimensionality_reduction_factor_state_and_action = utils.dict_or_default(kwargs, "dimensionality_reduction_factor_state_and_action", 1)
         self.add_n_random_saturated_actions = utils.dict_or_default(kwargs, "add_n_random_saturated_actions", 0)
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
+        self.prob_add_saturated_action = utils.dict_or_default(kwargs, "prob_add_saturated_action", 0.0)
+        self.add_saturated_action_k = utils.dict_or_default(kwargs, "add_saturated_action_k", 1)
+        self.add_saturated_action_storage = set()
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
         assert self.model_hidden_size % self.dimensionality_reduction_factor_state_and_action == 0, f"Model hidden size {self.model_hidden_size} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.state_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"State dimension {self.state_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.action_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"Action dimension {self.action_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
+
+        if self.prob_add_saturated_action > 0.0:
+            assert self.prob_add_saturated_action <= 1.0, self.prob_add_saturated_action
+            #assert self.is_self_knn_callback
+            assert self.add_saturated_action_k > 0, self.add_saturated_action_k
 
         if self.dimensionality_reduction_factor_state_and_action > 1:
             self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d", self.dimensionality_reduction_factor_state_and_action)
@@ -224,7 +234,7 @@ class MTICLEnv(gym.Env):
 
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
 
-        if self.knn_callback.__func__ is self.__class__.get_closest_neighbors_urls and self.knn_callback.__self__ is self:
+        if self.is_self_knn_callback:
             assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
             assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
 
@@ -250,6 +260,40 @@ class MTICLEnv(gym.Env):
 
         self.time_step += 1
         self.time_step_global += 1
+
+        assert isinstance(action, np.ndarray), type(action)
+        assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
+
+        if self.prob_add_saturated_action > 0.0 and random.random() < self.prob_add_saturated_action:
+            saturated_vector = np.ones_like(action)
+            saturated_vector[action < 0.0] = -1.0
+            str_key = ','.join(map(str, saturated_vector.astype(np.int64).tolist()))
+
+            #assert self.is_self_knn_callback, "If you want to use saturated actions, knn_callback must be set to self.get_closest_neighbors_urls"
+
+            if str_key not in self.add_saturated_action_storage:
+                saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_{len(self.add_saturated_action_storage) * self.add_saturated_action_k + idx}" for idx in range(self.add_saturated_action_k)]
+                saturated_vector = np.tile(saturated_vector, (self.add_saturated_action_k, 1)).astype(np.float32)
+
+                assert len(saturated_vector_str) == self.add_saturated_action_k
+                assert saturated_vector.shape == (self.add_saturated_action_k, self.action_dim), f"Expected shape {(self.add_saturated_action_k, self.action_dim)}, got {saturated_vector.shape}"
+
+                self.add_saturated_action_storage.add(str_key)
+                self.insert_embeddings(saturated_vector_str, saturated_vector, check_l2_norm=False,
+                                       _index=None if self.is_self_knn_callback else self.knn_callback.__self__.embeddings_index,
+                                       _urls_representation=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation,
+                                       _urls_representation_url2idx=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation_icl2idx)
+
+                for _str, emb in zip(saturated_vector_str, saturated_vector):
+                    assert emb.shape == (self.action_dim,), f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+
+                    _str2representation = None if self.is_self_knn_callback else self.knn_callback.__self__.str2representation
+
+                    assert _str not in _str2representation
+
+                    _str2representation[_str] = emb
+
+                self.logger_wrapper(gym.logger.info, "Saturated actions added (%d): %d", self.add_saturated_action_k, self.add_saturated_action_k * len(self.add_saturated_action_storage))
 
         # Preprocess action and apply step
         action_url, action_url_idx, action_url_distance = self.preprocess_action(action)
@@ -334,7 +378,7 @@ class MTICLEnv(gym.Env):
         self.str2representation = {} # Needed for knn search and apply_step
 
         # Load data
-        self.load_data() # TODO this was previously in _soft_reset and called only after a hard reset (why not called directly by _hard_reset()?)
+        self.load_data()
 
         assert len(self.data) > 0, "Data must not be empty"
         assert len(self.data_icl_examples) > 0, "ICL examples must not be empty"
@@ -535,7 +579,11 @@ class MTICLEnv(gym.Env):
 
         assert isinstance(options, dict), f"Options must be a dictionary, got {type(options)}: {options}"
 
+        seed = seed if seed is not None else self._seed if (self.reset_times == 0 and self._seed is not None) else None
+
         if seed is not None:
+            self.logger_wrapper(gym.logger.debug, "Reset seed: %s", seed)
+
             utils.set_random_seed(seed, using_cuda=self.device.type == torch.device("cuda").type)
 
         if not options.get("skip_hard_reset", False) and (self.reset_times == 0 or utils.dict_or_default(options, "always_hard_reset", False)):
@@ -949,7 +997,7 @@ class MTICLEnv(gym.Env):
         assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
         assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
-        _fake_representation_str = self.eos_token_str # Default representation if no hits are found # TODO would be better to use the first or a random entry?
+        _fake_representation_str = self.eos_token_str # Default representation if no hits are found
         _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
 
         # Modify D
@@ -972,7 +1020,7 @@ class MTICLEnv(gym.Env):
 
                 assert isinstance(url, str), f"Expected url to be a string, got {type(url)}: {url}"
 
-                if url != self.eos_token_str and not url.startswith("random_saturated_"):
+                if url != self.eos_token_str and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
                     # Check if we need to remove this hit
                     src_icl_example, trg_icl_example = url.split('\t')
 
@@ -1122,7 +1170,7 @@ class MTICLEnv(gym.Env):
             assert self.early_stopping is False, "Early stopping action already received in this episode"
 
             self.early_stopping = True
-        elif current_action.startswith("random_saturated_"):
+        elif current_action.startswith("random_saturated_") or current_action.startswith("saturated_vector_env_"):
             self.logger_wrapper(gym.logger.info, "Saturated action (%s) received in time step #%d", current_action, self.time_step)
 
             assert self.early_stopping_saturation is False, "Early stopping action (saturation) already received in this episode"

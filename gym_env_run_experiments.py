@@ -69,11 +69,13 @@ class VectorFromPoolActionNoise(ActionNoise):
 
 def make_env(rank, env_cls, env_args, env_kwargs, seed=0):
     def _init():
-        env = env_cls(*env_args, **env_kwargs)
+        sys.stderr.flush()
+        env = env_cls(*env_args, **{"_seed": seed + rank, **env_kwargs})
 
-        env.reset(seed=seed + rank, options={"soft_reset_after_hard_reset": False})  # optional: different seed
+        #env.reset(seed=seed + rank, options={"soft_reset_after_hard_reset": False})
 
         return env
+
     return _init
 
 if __name__ == "__main__":
@@ -128,17 +130,24 @@ if __name__ == "__main__":
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
 
+    # Some values
+    #k = 0.01
+    #k = 100
+    k = 10
+
     # Other kwargs
     parsed_kwargs_training = {}
     parsed_kwargs_training["initial_time_sleep"] = num_envs * 2 # sleep to synchronize all environments
+    parsed_kwargs_training["prob_add_saturated_action"] = 1.0
+    parsed_kwargs_training["add_saturated_action_k"] = k
     parsed_kwargs_training_dummy = {}
-    parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 1000000
+    #parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 100000
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
     save_freq = len(data_to_be_translated_training) * max_icl_examples // num_envs # steps (save model approx. once per epoch)
     eval_freq = len(data_to_be_translated_training) // 2 * max_icl_examples // num_envs # steps
-    save_path = "./rl_models11/"
+    save_path = "./rl_models12/"
     name_prefix = f"rl_model_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
@@ -153,9 +162,6 @@ if __name__ == "__main__":
     #vec_env_class = DummyVecEnv
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
-    #k = 0.01
-    #k = 100
-    k = 10
     batch_size = 256
     net_arch = {"pi": [400, 300], "qf": [400, 300]} # paper architecture
     gamma = 1.0
@@ -172,7 +178,7 @@ if __name__ == "__main__":
     #env = env_class(src_lang, trg_lang, file_data_training, file_data_icl_examples_training, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
-    env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy}))
+    env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy})) # WARN: each vectorized environments receives a copy of this environment
 
     env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
 
@@ -192,11 +198,12 @@ if __name__ == "__main__":
     retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
-    pool_action_noise = VectorFromPoolActionNoise(np.array(env_training_dummy.random_vectors, copy=True)) # force bad actions with small probability
+    #pool_action_noise = VectorFromPoolActionNoise(np.array(env_training_dummy.random_vectors, copy=True)) # force bad actions with small probability
 
-    del env_training_dummy.random_vectors
+    #del env_training_dummy.random_vectors
 
-    action_noise = SelectActionNoiseFromList([normal_action_noise, pool_action_noise], p=[0.95, 0.05])
+    #action_noise = SelectActionNoiseFromList([normal_action_noise, pool_action_noise], p=[0.95, 0.05])
+    action_noise = normal_action_noise
     callbacks = []
     #model_class = DDPG
     model_class = TD3
@@ -234,6 +241,7 @@ if __name__ == "__main__":
         action_noise=action_noise,
         lambda_penalty=1e-3,
         max_grad_norm=1.0,
+        invert_grad=True,
     )
 
     #assert init_training_episodes < max_episodes
