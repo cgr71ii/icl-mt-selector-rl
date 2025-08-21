@@ -220,6 +220,7 @@ if __name__ == "__main__":
             "actor_lr_schedule": lambda foo: actor_learning_rate, # callable
             "actor_layer_norm_input": True,
             "actor_layer_norm_before_activation": True,
+            "actor_last_layer_init_uniform_value": 0.001,
         },
         gamma=gamma,
         device=device,
@@ -232,6 +233,7 @@ if __name__ == "__main__":
         buffer_size=replay_buffer_size,
         action_noise=action_noise,
         lambda_penalty=1e-3,
+        max_grad_norm=1.0,
     )
 
     #assert init_training_episodes < max_episodes
@@ -290,6 +292,7 @@ if __name__ == "__main__":
             "actor_lr_schedule": lambda foo: actor_learning_rate, # callable
             "actor_layer_norm_input": True,
             "actor_layer_norm_before_activation": True,
+            "actor_last_layer_init_uniform_value": None,
         },
     )
 
@@ -315,6 +318,7 @@ if __name__ == "__main__":
             "actor_lr_schedule": lambda foo: actor_learning_rate, # callable
             "actor_layer_norm_input": True,
             "actor_layer_norm_before_activation": True,
+            "actor_last_layer_init_uniform_value": None,
         },
     )
 
