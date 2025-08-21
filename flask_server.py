@@ -238,7 +238,11 @@ def translate():
     results = get_results(data)
 
     if get_representation[0]:
-        assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}"
+        if not disable_streamer and isinstance(results, list):
+            results = torch.stack(results, dim=0)
+
+        assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}: {results}"
+        assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
 
     # Return results
     if len(results) != len(src_sentences):
@@ -414,7 +418,12 @@ def get_embedding_from_model_embedding_matrix():
 
     disable_streamer = global_conf["disable_streamer"]
     get_results = global_conf["streamer_embedding_tokens"].predict if not disable_streamer else embedding_tokens_batch
-    results, results_token_id = get_results(tokens)
+    _results = get_results(tokens)
+    results = _results[0] if disable_streamer else _results
+    results_token_id = _results[1] if disable_streamer else [-1 for _ in range(len(tokens))]
+
+    if not disable_streamer and isinstance(results, list):
+        results = torch.stack(results, dim=0)
 
     assert len(results.shape) == 2, results.shape
     assert results.shape[0] == len(tokens), f"{results.shape} | {len(tokens)}"
@@ -503,7 +512,7 @@ def main(args):
     global_conf["batch_size"] = args.batch_size
     global_conf["max_new_tokens"] = args.max_new_tokens
     global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
-    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(embedding_tokens_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
 

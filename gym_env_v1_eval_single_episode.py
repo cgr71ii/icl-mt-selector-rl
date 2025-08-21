@@ -86,6 +86,7 @@ class MTICLEvalSingleEpisodeEnv(gym_env.MTICLEnv):
         assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
 
         options = {} if options is None else options
+        _seed = seed if self.reset_times == 0 else None
 
         if self.reset_times == 0:
             assert self.episode == 0, f"Reset times is 0, but episode is {self.episode}. This should not happen."
@@ -108,7 +109,7 @@ class MTICLEvalSingleEpisodeEnv(gym_env.MTICLEnv):
 
             return observation, info # fake
 
-        observation, info = super().reset(seed=seed, options=options)
+        observation, info = super().reset(seed=_seed, options=options)
 
         assert self.translation_candidate == self.episode - 1, f"Expected translation candidate to be {self.episode - 1}, but got {self.translation_candidate}"
 

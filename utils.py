@@ -80,8 +80,8 @@ def file_exists(path):
 
     return r
 
-def insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, action_dim, update_representation=True):
-    embeddings = embeddings_index_sanity_check(embeddings, last_dimmension_shape=action_dim)
+def insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, action_dim, update_representation=True, check_l2_norm=True):
+    embeddings = embeddings_index_sanity_check(embeddings, last_dimmension_shape=action_dim, check_l2_norm=check_l2_norm)
 
     index.add(embeddings)
 
@@ -96,11 +96,15 @@ def insert_embeddings(urls, embeddings, index, urls_representation, urls_represe
             urls_representation[len(urls_representation)] = url
             urls_representation_url2idx[url] = len(urls_representation_url2idx)
 
-def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expected_dim=2):
+def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expected_dim=2, check_l2_norm=True):
     if isinstance(embeddings, torch.Tensor):
         embeddings = embeddings.detach().cpu().numpy()
     else:
         embeddings = np.array(embeddings)
+
+    if check_l2_norm:
+        c, v = check_l2_normalized(embeddings)
+        assert c, f"Embeddings are not L2 normalized: {v}: {embeddings}"
 
     if last_dimmension_shape >= 0 and embeddings.shape[-1] != last_dimmension_shape:
         raise Exception(f"Embeddings last dimmension was expected to be {last_dimmension_shape}, but got {embeddings.shape[-1]}")
@@ -155,12 +159,24 @@ def softmax(x):
 
 def l2_normalize(emb):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
-    assert len(emb.shape) == 2, "Input array must be 2D (batch_size, embedding_size)"
+    assert len(emb.shape) in (1, 2), "Input array must be 2D (batch_size, embedding_size)"
 
-    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.linalg.norm(emb, axis=-1, keepdims=True)
     norms[norms == 0.0] = 1.0
+    result = emb / norms
 
-    return emb / norms
+    assert np.all((-1 <= result) & (result <= 1)), f"L2 normalization failed: {result}"
+
+    return result
+
+def check_l2_normalized(emb, tol=1e-6):
+    assert isinstance(emb, np.ndarray), "Input must be a numpy array"
+    assert len(emb.shape) in (1, 2), "Input array must be 1D (embedding_size) or 2D (batch_size, embedding_size)"
+
+    norms = np.linalg.norm(emb, axis=-1)
+    v = np.abs(norms - 1)
+
+    return np.all(v <= tol), np.sum(v).item()
 
 def parse_args(raw_kwargs, sep='='):
     # expected format: key="value with spaces" or key=value
@@ -178,3 +194,26 @@ def parse_args(raw_kwargs, sep='='):
         parsed_kwargs[key] = value
 
     return parsed_kwargs
+
+def fixed_orthogonal_projection(v, out_dim, seed=42, random_matrix=None):
+    assert isinstance(v, np.ndarray), "Input must be a numpy array"
+
+    in_dim = v.shape[-1]
+    rng = np.random.default_rng(seed)
+
+    assert in_dim > out_dim, f"Input dimension {in_dim} must be greater than output dimension {out_dim}"
+
+    # Generate random matrix and compute orthogonal basis
+    _random_matrix = rng.random((in_dim, out_dim), dtype=np.float32) if random_matrix is None else random_matrix
+
+    assert _random_matrix.shape == (in_dim, out_dim), f"Expected shape {(in_dim, out_dim)}, but got {_random_matrix.shape}"
+
+    # QR decomposition gives orthonormal columns
+    Q, _ = np.linalg.qr(_random_matrix)
+
+    # Project the action
+    result = v @ Q  # shape: (1024,)
+
+    assert result.shape[-1] == out_dim, f"Expected output shape {out_dim}, but got {result.shape[-1]}"
+
+    return result

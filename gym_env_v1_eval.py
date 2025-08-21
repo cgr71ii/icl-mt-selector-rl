@@ -35,9 +35,10 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
         assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
 
         options = {} if options is None else options
+        _seed = seed if self.reset_times == 0 else None
 
         if self.reset_times == 0:
-            assert self.episode == 0, f"Reset times is 0, but episode is {self.episode}. This should not happen."
+            assert self.episode <= 0, f"Reset times is 0, but episode is {self.episode}. This should not happen."
 
             if "shuffle_all_data" not in options:
                 options["shuffle_all_data"] = False # deterministic sweeping
@@ -48,7 +49,7 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
             self.reset_times += 1 # to avoid infinite loop
 
             for _ in range(self.state_window_length):
-                self.current_state_window.append(np.zeros(self.model_hidden_size))
+                self.current_state_window.append(np.zeros(self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action))
 
             observation = self.state_window_type_callback(self.current_state_window)
             info = {}
@@ -57,7 +58,7 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
 
             return observation, info # fake
 
-        observation, info = super().reset(seed=seed, options=options)
+        observation, info = super().reset(seed=_seed, options=options)
 
         assert self.translation_candidate == self.episode - 1, f"Expected translation candidate to be {self.episode - 1}, but got {self.translation_candidate}"
 
