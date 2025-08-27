@@ -69,11 +69,17 @@ class StopOnTokensSeq(StoppingCriteria):
 
         return False
 
-def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=None, normalize=True):
+def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=None, normalize=True, lock=None):
     all_outputs, all_original_outputs = [], []
 
     # Tokenize
-    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left").to(model.device)
+    if lock is not None:
+        lock.acquire()
+    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left")
+    if lock is not None:
+        lock.release()
+
+    inputs = inputs.to(model.device)
 
     # Generate with beam search
     # Decoding: https://aclanthology.org/2024.emnlp-main.489/
@@ -114,9 +120,15 @@ def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=
 
     return all_outputs, all_original_outputs
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1):
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None):
     # Tokenize
+
+    if lock is not None:
+        lock.acquire()
     inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left").to(model.device)
+    if lock is not None:
+        lock.release()
+
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
 
@@ -170,6 +182,7 @@ def get_token_embedding(token: str, tokenizer, model):
     return token_embedding, token_id
 
 def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bsz, is_causal_or_chat=None, teacher_forcing=False, add_eos_token=True,
+                 lock=None,
                  icl_template="[src_lang]: [source_text]\n[trg_lang]: [translation_text]\n",
                  zs_causal_template="[src_lang]: [source_text]\n[trg_lang]: ",
                  zs_chat_user_template="[src_lang]: [source_text]",
@@ -358,6 +371,9 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
 
         prompts.append(prompt)
 
+        if lock is not None:
+            lock.acquire()
+
         if teacher_forcing:
             _src_sentence_n_tokens = tokenizer(_src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
             _trg_sentence_n_tokens = tokenizer(_trg_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
@@ -365,6 +381,9 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
         else:
             _src_sentence_n_tokens = tokenizer(src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
             src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens)
+
+        if lock is not None:
+            lock.release()
 
         src_sentence_idx += 1
 

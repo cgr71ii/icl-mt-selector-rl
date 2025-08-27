@@ -67,6 +67,21 @@ class VectorFromPoolActionNoise(ActionNoise):
     def __repr__(self) -> str:
         return f"VectorFromPoolActionNoise(len(pool)={len(self.pool)})"
 
+class DelayedEvalCallback(sb3_cb.EvalCallback):
+    def __init__(self, *args, learning_starts=0, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.learning_starts = learning_starts
+
+    def _on_step(self) -> bool:
+        # Only start evaluating after learning_starts
+        if self.num_timesteps < self.learning_starts:
+            self.n_calls = 0 # so it starts from this point when this conditions does not hold
+
+            return True
+
+        return super()._on_step()
+
 def make_env(rank, env_cls, env_args, env_kwargs, seed=0):
     def _init():
         sys.stderr.flush()
@@ -112,13 +127,18 @@ if __name__ == "__main__":
     num_envs = parsed_kwargs.get("num_envs", 6)
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 4)
-    state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
+    max_icl_examples = 1 # TODO remove
+    #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
+    state_representation = parsed_kwargs.get("state_representation", "sentence_and_icl_examples")
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
-    dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 1)
+    dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256)
+    repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
 
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
+    #max_data_icl_examples_entries = 100 # TODO remove
+    max_data_entries = 100 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
@@ -126,9 +146,15 @@ if __name__ == "__main__":
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy"] = eval_strategy
     parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = dimensionality_reduction_factor_state_and_action
+    parsed_kwargs["repeat_translation_candidates"] = repeat_translation_candidates
+    parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
+    parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
+
+    assert parsed_kwargs["knn_api_retrieve"] is not None
+    assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
     #k = 0.01
@@ -138,20 +164,30 @@ if __name__ == "__main__":
     # Other kwargs
     parsed_kwargs_training = {}
     parsed_kwargs_training["initial_time_sleep"] = num_envs * 2 # sleep to synchronize all environments
-    parsed_kwargs_training["prob_add_saturated_action"] = 1.0
+    parsed_kwargs_training["prob_add_saturated_action"] = 1.0 # vectorized environment, so it does not work
     parsed_kwargs_training["add_saturated_action_k"] = k
+    parsed_kwargs_training["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
+    parsed_kwargs_training["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
     parsed_kwargs_training_dummy = {}
     #parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 100000
+    parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
+    parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
+
+    del parsed_kwargs["knn_api_retrieve"]
+    del parsed_kwargs["knn_api_insert"]
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
     save_freq = len(data_to_be_translated_training) * max_icl_examples // num_envs # steps (save model approx. once per epoch)
     eval_freq = len(data_to_be_translated_training) // 2 * max_icl_examples // num_envs # steps
-    save_path = "./rl_models12/"
+    save_freq = 1e1000 # TODO remove
+    eval_freq = 200 # TODO remove
+    save_path = "./rl_models17/"
     name_prefix = f"rl_model_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     max_episodes_epochs = 10 # repeat N times
+    max_episodes_epochs = 10000 # TODO remove
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
 
     # Environment
@@ -171,7 +207,9 @@ if __name__ == "__main__":
     seed = 42
     critic_learning_rate = 1e-3
     actor_learning_rate = 1e-4
-    init_training_episodes = 1000
+    #init_training_episodes = 1000
+    init_training_episodes = 200 # TODO remove
+    #init_training_episodes = 10 # TODO remove
     #max_steps = max_episodes * max_icl_examples
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     init_training_steps = init_training_episodes * max_icl_examples
@@ -182,8 +220,8 @@ if __name__ == "__main__":
 
     env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
 
-    parsed_kwargs_training["knn_callback"] = env_training_dummy.get_closest_neighbors_urls # avoid non-stationary behaviour due to different fake actions among the different environments
-    parsed_kwargs_training["knn_callback_data_icl_examples"] = env_training_dummy.data_icl_examples
+    #parsed_kwargs_training["knn_callback"] = env_training_dummy.get_closest_neighbors_urls # avoid non-stationary behaviour due to different fake actions among the different environments
+    #parsed_kwargs_training["knn_callback_data_icl_examples"] = env_training_dummy.data_icl_examples
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=42) for rank in range(num_envs)], **vec_env_kwargs)
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", **parsed_kwargs), filename=monitor_filename, override_existing=True)
     env_eval_test = env_eval_test_class(src_lang_test, trg_lang_test, file_data_test, file_data_icl_examples_test, gym_logger_level=gym.logger.INFO, custom_env_id="eval_test", **parsed_kwargs)
@@ -247,12 +285,13 @@ if __name__ == "__main__":
     #assert init_training_episodes < max_episodes
 
     # Add callbacks
-    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=5, min_evals=5, verbose=1) # early stopping
+    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=7, min_evals=0, verbose=1) # early stopping
     # EvalCallback
     ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
     ## it does not evaluate the model performance when training finishes (we evaluate below)
-    callbacks.append(sb3_cb.EvalCallback(
+    callbacks.append(DelayedEvalCallback(
         env_eval_dev,
+        learning_starts=init_training_steps,
         best_model_save_path=save_path,
         log_path=save_path,
         eval_freq=eval_freq,
