@@ -159,18 +159,19 @@ def insert_embedding():
     if saturated_v:
         # we assume that all vectors have to be the same (due to add_saturated_action_k)
         add_saturated_action_storage = global_conf["add_saturated_action_storage"]
+        str_key = [','.join(map(str, v.astype(np.int64).tolist())) for v in embedding]
+        str_key_seen = [s in add_saturated_action_storage for s in str_key] # pre-compute because different saturated vectors can be sent at once
 
-        for idx, saturated_vector in enumerate(embedding[1:]):
+        #for idx, saturated_vector in enumerate(embedding[1:]):
             #assert np.isclose(saturated_vector, embedding[0]).all() # Not always true anymore because several saturated vectors can be sent at once
+
+        for idx, saturated_vector in enumerate(embedding):
             assert np.isclose(np.abs(saturated_vector).sum(), np.prod(saturated_vector.shape)), f"{np.abs(saturated_vector).sum()} vs {np.prod(saturated_vector.shape)}"
 
-        str_key = ','.join(map(str, saturated_vector.astype(np.int64).tolist()))
-
-        if str_key in add_saturated_action_storage:
-            for idx in range(len(embedding)):
+            if str_key_seen[idx]:
                 skip_idxs.add(idx)
 
-        add_saturated_action_storage.add(str_key)
+            add_saturated_action_storage.add(str_key[idx])
 
     src_sentence = [_str for idx, _str in enumerate(src_sentence) if idx not in skip_idxs]
     embedding = [e for idx, e in enumerate(embedding) if idx not in skip_idxs]
@@ -305,6 +306,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     eos_token_str = global_conf["eos_token_str"]
     action_dim = global_conf["dim"]
     debug = global_conf["debug"]
+    max_distance_threshold = global_conf["max_distance_threshold"]
     proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with saturated vectors
     results = []
 
@@ -328,23 +330,26 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
     assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
-    _fake_representation_str = eos_token_str # Default representation if no hits are found
+    _fake_representation_str = global_conf["saturated_action_embedding_name"] # Default representation if no hits are found
+    _fake_representation = _fake_representation_str
 
     # Modify D
     D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
     d_modified_idxs = [(_a, _b) for _a, _b in zip(*np.where(I == -1))] if np.any(I == -1) else []
 
-    # Obtain representations from embeddings
+    # Obtain representations (str) from kNN idxs
     for idx1, (i, d) in enumerate(zip(I, D)):
         overlapping_hits = 0
 
         results.append([])
 
-        for idx2, value_idx in enumerate(i):
+        for idx2, (value_idx, value_distance) in enumerate(zip(i, d)):
             if len(results[-1]) >= k:
                 break
             if value_idx < 0:
-                break
+                assert i[idx2:] == -1 * np.ones_like(i[idx2:]), f"Expected all remaining indices to be -1, got {i[idx2:]}"
+
+                break # No more valid indices as -1 values are at the end of the list
 
             url = urls_representation[value_idx]
 
@@ -358,12 +363,22 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
                     logger.debug("Removing overlapping action: %s", src_icl_example)
 
                     overlapping_hits += 1
-                    d[idx2] = -200.0 # Set distance to a negative value for invalid indices
+                    d[idx2] = -200.0
                     i[idx2] = -2
 
                     d_modified_idxs.append((idx1, idx2))
 
-                    continue
+                    continue # do not add this entry
+
+            if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
+                logger.debug("Removing distant action: %s (distance: %s > %s)", url, value_distance, max_distance_threshold)
+
+                d[idx2] = -400.0
+                i[idx2] = -4
+
+                d_modified_idxs.append((idx1, idx2))
+
+                continue # do not add this entry
 
             results[-1].append(url)
 
@@ -382,12 +397,9 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
 
             del results[-1][idx2]
 
-        if len(results[-1]) == 0:
-            # Use seed URL (we need to add something...)
-            logger.warn("No entries close: returning default representation (%s)", _fake_representation_str)
-        elif len(results[-1]) < (k - (1 if extra_k else 0)):
+        if len(results[-1]) < (k - (1 if extra_k else 0)):
             # Add items to avoid tensor errors because dimensions don't match
-            logger.warn("Not enough entries close: returning %d default representation(s) (%s)", k - len(results[-1]), _fake_representation_str)
+            logger.debug("Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
 
         while len(results[-1]) < (k - (1 if extra_k else 0)):
             results[-1].append(_fake_representation)
@@ -407,6 +419,8 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         logger.error("faiss.D (first and last 5): %s ... %s", D[:,:5], D[:,-5:])
 
     if not get_representations_instead_of_embeddings:
+        # Get embeddings instead of strings
+
         assert isinstance(results, list)
 
         if len(results) > 0:
@@ -445,6 +459,8 @@ def main(args):
     # Global variables
     global_conf["dim"] = args.dim
     global_conf["eos_token_str"] = args.eos_token_str
+    global_conf["saturated_action_embedding"] = np.ones((global_conf["dim"],), dtype=np.float32)
+    global_conf["saturated_action_embedding_name"] = f"saturated_vector_env_kNN_special"
     global_conf["embedding_index"] = faiss.IndexFlatL2(global_conf["dim"])
     global_conf["representation"] = {}
     global_conf["representation_item2idx"] = {}
@@ -452,6 +468,25 @@ def main(args):
     global_conf["add_saturated_action_storage"] = set()
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
+    global_conf["max_distance_threshold"] = args.max_distance_threshold
+
+    # Add saturated action embedding
+    saturated_action_embedding = global_conf["saturated_action_embedding"]
+    saturated_action_embedding_name = global_conf["saturated_action_embedding_name"]
+    add_saturated_action_storage = global_conf["add_saturated_action_storage"]
+
+    assert len(saturated_action_embedding.shape) == 1
+
+    str_key = ','.join(map(str, saturated_action_embedding.astype(np.int64).tolist()))
+
+    add_saturated_action_storage.add(str_key)
+
+    representations_str = [saturated_action_embedding_name]
+    representations_emb = np.expand_dims(saturated_action_embedding, axis=0).astype(np.float32)
+
+    assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+
+    knn_insert_embedding(representations_str, representations_emb, check_l2_norm=False)
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
@@ -465,8 +500,9 @@ def initialization():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,
                                      description="MT_ICL kNN flask server")
 
-    parser.add_argument('--dim', type=int, required=True, help="Embedding dimensionliaty")
+    parser.add_argument('--dim', type=int, required=True, help="Embedding dimensionality")
     parser.add_argument('--eos-token-str', type=str, default="</s>", help="EOS token")
+    parser.add_argument('--max-distance-threshold', type=float, default=np.inf, help="kNN maximum distance threshold. If the closest neighbor is further than this threshold, it will be ignored and the default representation will be returned instead")
     parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
     parser.add_argument('--debug', action="store_true", help="Debug mode")

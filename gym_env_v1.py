@@ -198,9 +198,11 @@ class MTICLEnv(gym.Env):
 
         # Need to be defined here
         self.saturated_action_embedding = np.ones((self.action_dim,), dtype=np.float32) # not using np.zeros as it is the initialized observation
+        self.saturated_action_embedding_name = f"saturated_vector_env_{self.custom_env_id}_special"
+        self.saturated_action_embedding_state = np.ones((self.state_dim,), dtype=np.float32)
 
         if self.apply_l2_normalization:
-            self.saturated_action_embedding = utils.l2_normalize(self.saturated_action_embedding)
+            self.saturated_action_embedding_state = utils.l2_normalize(self.saturated_action_embedding_state)
 
         # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
@@ -459,6 +461,29 @@ class MTICLEnv(gym.Env):
 
             self.insert_embeddings(random_vectors_str, self.random_vectors, check_l2_norm=False)
 
+        time.sleep(self.initial_time_sleep)
+
+        ## Special token for detecting unexpected actions
+        self.logger_wrapper(gym.logger.info, "Inserting representation for unexpected actions")
+
+        assert len(self.saturated_action_embedding.shape) == 1
+
+        str_key = ','.join(map(str, self.saturated_action_embedding.astype(np.int64).tolist()))
+
+        self.add_saturated_action_storage.add(str_key)
+
+        representations_str = [self.saturated_action_embedding_name]
+        representations_emb = np.expand_dims(self.saturated_action_embedding, axis=0).astype(np.float32)
+
+        assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+
+        self.insert_embeddings(representations_str, representations_emb, check_l2_norm=False)
+
+        for _str, emb in zip(representations_str, representations_emb):
+            assert emb.shape[0] == self.action_dim, f"Expected representation shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+
+            self.str2representation[_str] = emb
+
         self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
 
     def _hard_reset(self, seed=None, options=None):
@@ -659,6 +684,8 @@ class MTICLEnv(gym.Env):
         assert len(urls) > 0, "urls must not be an empty list"
         assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
 
+        embeddings = utils.embeddings_index_sanity_check(embeddings, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
+
         if self.knn_api_insert is not None:
             assert _index is None
             assert _urls_representation is None
@@ -686,7 +713,6 @@ class MTICLEnv(gym.Env):
 
             return
 
-        #embeddings = utils.embeddings_index_sanity_check(embeddings, last_dimmension_shape=self.action_dim)
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
         urls_representation_url2idx = self.icl_example_representation_icl2idx if _urls_representation_url2idx is None else _urls_representation_url2idx
@@ -962,7 +988,7 @@ class MTICLEnv(gym.Env):
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
                                    _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
-                                   remove_overlapping_actions=True, add_saturated_action=False, debug=False):
+                                   remove_overlapping_actions=True, add_saturated_action=False, max_distance_threshold=np.inf, debug=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -980,17 +1006,26 @@ class MTICLEnv(gym.Env):
                 saturated_vector = np.ones_like(proto_actions)
                 saturated_vector[proto_actions < 0.0] = -1.0
                 str_key = [','.join(map(str, v.astype(np.int64).tolist())) for v in saturated_vector]
-                seen_str_key = [s in self.add_saturated_action_storage for s in str_key]
-                seen_str_key = np.array(seen_str_key, dtype=bool)
-                saturated_vector = saturated_vector[seen_str_key == False]
-                n_saturated_vector = (seen_str_key == False).sum().item()
+                not_seen_str_key = [s not in self.add_saturated_action_storage for s in str_key]
+                not_seen_str_key_count = collections.defaultdict(int)
+                not_seen_str_key_unique = list(not_seen_str_key)
+
+                for idx, v in enumerate(str_key):
+                    not_seen_str_key_count[v] += 1
+
+                    if not_seen_str_key_count[v] > 1:
+                        not_seen_str_key_unique[idx] = False
+
+                not_seen_str_key_unique = np.array(not_seen_str_key_unique, dtype=bool)
+                saturated_vector = saturated_vector[not_seen_str_key_unique == True]
+                n_saturated_vector = (not_seen_str_key_unique == True).sum().item()
 
                 assert len(saturated_vector.shape) == 2, saturated_vector.shape
                 assert n_saturated_vector == saturated_vector.shape[0], f"Expected {saturated_vector.shape[0]} unseen saturated vectors, got {n_saturated_vector}"
                 #assert self.is_self_knn_callback, "If you want to use saturated actions, knn_callback must be set to self.get_closest_neighbors_urls"
 
                 if n_saturated_vector > 0:
-                    saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_k{idx % n_saturated_vector + 1}_{len(self.add_saturated_action_storage) * self.add_saturated_action_k * n_saturated_vector + idx}" for idx in range(self.add_saturated_action_k * n_saturated_vector)]
+                    saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_{(len(self.add_saturated_action_storage) - 1) * self.add_saturated_action_k + idx}" for idx in range(self.add_saturated_action_k * n_saturated_vector)]
                     saturated_vector = np.tile(saturated_vector, (self.add_saturated_action_k, 1)).astype(np.float32)
 
                     assert len(saturated_vector_str) == self.add_saturated_action_k * n_saturated_vector
@@ -1003,15 +1038,16 @@ class MTICLEnv(gym.Env):
                                             _index=None if self.is_self_knn_callback else self.knn_callback.__self__.embeddings_index,
                                             _urls_representation=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation,
                                             _urls_representation_url2idx=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation_icl2idx)
+
                     for _str, emb in zip(saturated_vector_str, saturated_vector):
                         _str2representation = self.str2representation if self.is_self_knn_callback else self.knn_callback.__self__.str2representation
 
                         assert emb.shape == (self.action_dim,), f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
-                        assert _str not in _str2representation
+                        assert _str not in _str2representation, _str
 
                         _str2representation[_str] = emb
 
-                self.logger_wrapper(gym.logger.info, "Saturated actions added: %d (total: %d)", self.add_saturated_action_k * n_saturated_vector, self.add_saturated_action_k * len(self.add_saturated_action_storage))
+                self.logger_wrapper(gym.logger.info, "Saturated actions added: %d (total: %d)", self.add_saturated_action_k * n_saturated_vector, self.add_saturated_action_k * (len(self.add_saturated_action_storage) - 1))
 #            nbefore = len(self.add_saturated_action_storage)
 #
 #            for proto_action in proto_actions:
@@ -1108,24 +1144,26 @@ class MTICLEnv(gym.Env):
         assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
         assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
-        _fake_representation_str = self.eos_token_str # Default representation if no hits are found
+        _fake_representation_str = self.saturated_action_embedding_name # Default representation if no hits are found
         _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
 
         # Modify D
         D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
         d_modified_idxs = [(_a, _b) for _a, _b in zip(*np.where(I == -1))] if np.any(I == -1) else []
 
-        # Obtain representations from embeddings
+        # Obtain representations (str) from kNN idxs
         for idx1, (i, d) in enumerate(zip(I, D)):
             overlapping_hits = 0
 
             results.append([])
 
-            for idx2, value_idx in enumerate(i):
+            for idx2, (value_idx, value_distance) in enumerate(zip(i, d)):
                 if len(results[-1]) >= k:
                     break
                 if value_idx < 0:
-                    break
+                    assert i[idx2:] == -1 * np.ones_like(i[idx2:]), f"Expected all remaining indices to be -1, got {i[idx2:]}"
+
+                    break # No more valid indices as -1 values are at the end of the list
 
                 url = urls_representation[value_idx]
 
@@ -1139,12 +1177,22 @@ class MTICLEnv(gym.Env):
                         self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
-                        d[idx2] = -200.0 # Set distance to a negative value for invalid indices
+                        d[idx2] = -200.0
                         i[idx2] = -2
 
                         d_modified_idxs.append((idx1, idx2))
 
-                        continue
+                        continue # do not add this entry
+
+                if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
+                    self.logger_wrapper(gym.logger.debug, "Removing distant action: %s (distance: %s > %s)", url, value_distance, max_distance_threshold)
+
+                    d[idx2] = -400.0
+                    i[idx2] = -4
+
+                    d_modified_idxs.append((idx1, idx2))
+
+                    continue # do not add this entry
 
                 results[-1].append(url)
 
@@ -1163,12 +1211,9 @@ class MTICLEnv(gym.Env):
 
                 del results[-1][idx2]
 
-            if len(results[-1]) == 0:
-                # Use seed URL (we need to add something...)
-                self.logger_wrapper(gym.logger.warn, "No entries close: returning default representation (%s)", _fake_representation_str)
-            elif len(results[-1]) < (k - (1 if extra_k else 0)):
+            if len(results[-1]) < (k - (1 if extra_k else 0)):
                 # Add items to avoid tensor errors because dimensions don't match
-                self.logger_wrapper(gym.logger.warn, "Not enough entries close: returning %d default representation(s) (%s)", k - len(results[-1]), _fake_representation_str)
+                self.logger_wrapper(gym.logger.debug, "Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
 
             while len(results[-1]) < (k - (1 if extra_k else 0)):
                 results[-1].append(_fake_representation)
@@ -1185,6 +1230,8 @@ class MTICLEnv(gym.Env):
                         self.logger_wrapper(gym.logger.warn, "Expected distance was 0, but got %s in D[%d][%d]: check https://github.com/facebookresearch/faiss/issues/1272", d2, idx1, idx2)
 
         if not get_representations_instead_of_embeddings:
+            # Get embeddings instead of strings
+
             assert isinstance(results, list)
 
             if len(results) > 0:
@@ -1312,7 +1359,7 @@ class MTICLEnv(gym.Env):
 #                assert current_action in _str2representation, current_action
 #
 #                observation = _str2representation[current_action]
-                observation = self.saturated_action_embedding
+                observation = self.saturated_action_embedding_state
 
             if self.state_window_type == "concatenate" and self.state_representation == "sentence_and_icl_examples":
                 assert self.state_window_length == 1, self.state_window_length
@@ -1337,6 +1384,9 @@ class MTICLEnv(gym.Env):
                 observation = self.str2representation[icl_example]
             else:
                 raise Exception(f"Unknown state representation: {self.state_representation}")
+
+        if self.apply_l2_normalization:
+            assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
         self.current_state_window.append(observation)
 
