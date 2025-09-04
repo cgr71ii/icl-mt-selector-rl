@@ -127,7 +127,7 @@ if __name__ == "__main__":
     num_envs = parsed_kwargs.get("num_envs", 6)
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 4)
-    max_icl_examples = 1 # TODO remove
+    #max_icl_examples = 1 # TODO remove
     #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
     state_representation = parsed_kwargs.get("state_representation", "sentence_and_icl_examples")
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
@@ -138,14 +138,14 @@ if __name__ == "__main__":
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
     #max_data_icl_examples_entries = 100 # TODO remove
-    max_data_entries = 100 # TODO remove
+    #max_data_entries = 100 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy"] = eval_strategy
-    parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = dimensionality_reduction_factor_state_and_action
+    parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(dimensionality_reduction_factor_state_and_action)
     parsed_kwargs["repeat_translation_candidates"] = repeat_translation_candidates
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
@@ -161,6 +161,8 @@ if __name__ == "__main__":
     #k = 100
     k = 10
 
+    assert isinstance(k, int) # other parameters use k assuming integer instead of float
+
     # Other kwargs
     parsed_kwargs_training = {}
     parsed_kwargs_training["initial_time_sleep"] = num_envs * 2 # sleep to synchronize all environments
@@ -170,6 +172,8 @@ if __name__ == "__main__":
     parsed_kwargs_training["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
     parsed_kwargs_training_dummy = {}
     #parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 100000
+    parsed_kwargs_training_dummy["prob_add_saturated_action"] = 1.0 # vectorized environment, so it does not work
+    parsed_kwargs_training_dummy["add_saturated_action_k"] = k
     parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
 
@@ -182,7 +186,7 @@ if __name__ == "__main__":
     eval_freq = len(data_to_be_translated_training) // 2 * max_icl_examples // num_envs # steps
     save_freq = 1e1000 # TODO remove
     eval_freq = 200 # TODO remove
-    save_path = "./rl_models17/"
+    save_path = "./rl_models21/"
     name_prefix = f"rl_model_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
@@ -208,8 +212,8 @@ if __name__ == "__main__":
     critic_learning_rate = 1e-3
     actor_learning_rate = 1e-4
     #init_training_episodes = 1000
-    init_training_episodes = 200 # TODO remove
-    #init_training_episodes = 10 # TODO remove
+    #init_training_episodes = 500 # TODO remove
+    init_training_episodes = 10 # TODO remove
     #max_steps = max_episodes * max_icl_examples
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     init_training_steps = init_training_episodes * max_icl_examples
@@ -230,8 +234,8 @@ if __name__ == "__main__":
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=True, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
     retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
     n_actions = env.unwrapped.action_space.shape[-1]

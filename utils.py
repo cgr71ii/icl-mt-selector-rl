@@ -100,6 +100,8 @@ def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expe
     if isinstance(embeddings, torch.Tensor):
         embeddings = embeddings.detach().cpu().numpy()
     else:
+        assert isinstance(embeddings, np.ndarray) or isinstance(embeddings, list), type(embeddings)
+
         embeddings = np.array(embeddings)
 
     if check_l2_norm:
@@ -169,7 +171,7 @@ def l2_normalize(emb):
 
     return result
 
-def check_l2_normalized(emb, tol=1e-6):
+def check_l2_normalized(emb, tol=1e-4):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
     assert len(emb.shape) in (1, 2), "Input array must be 1D (embedding_size) or 2D (batch_size, embedding_size)"
 

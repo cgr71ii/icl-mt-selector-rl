@@ -161,7 +161,8 @@ def insert_embedding():
         add_saturated_action_storage = global_conf["add_saturated_action_storage"]
 
         for idx, saturated_vector in enumerate(embedding[1:]):
-            assert np.isclose(saturated_vector, embedding[0]).all()
+            #assert np.isclose(saturated_vector, embedding[0]).all() # Not always true anymore because several saturated vectors can be sent at once
+            assert np.isclose(np.abs(saturated_vector).sum(), np.prod(saturated_vector.shape)), f"{np.abs(saturated_vector).sum()} vs {np.prod(saturated_vector.shape)}"
 
         str_key = ','.join(map(str, saturated_vector.astype(np.int64).tolist()))
 
@@ -179,18 +180,16 @@ def insert_embedding():
 
         str2representation[_str] = e
 
-    logger.debug("Got %d embeddings: inserting %d", initial_n, len(embedding))
+    logger.debug("Got %d embeddings (saturated: %s): inserting %d", initial_n, saturated_v, len(embedding))
 
-    if len(embedding) == 0:
-        return jsonify({
-            "ok": "ok",
-            "err": "null",
-        })
+    if len(embedding) > 0:
+        embedding = np.array(embedding, dtype=np.float32)
 
-    embedding = np.array(embedding, dtype=np.float32)
+        assert len(embedding.shape) == 2, embedding.shape
+        assert embedding.shape[1] == global_conf["dim"], f"{embedding.shape[1]} vs {global_conf['dim']}"
 
-    # Apply
-    knn_insert_embedding(src_sentence, embedding, check_l2_norm=check_l2_norm)
+        # Apply
+        knn_insert_embedding(src_sentence, embedding, check_l2_norm=check_l2_norm)
 
     return jsonify({
         "ok": "ok",
@@ -209,8 +208,19 @@ def knn_insert_embedding(urls, embeddings, check_l2_norm=True):
     index = global_conf["embedding_index"]
     urls_representation = global_conf["representation"]
     urls_representation_url2idx = global_conf["representation_item2idx"]
+    debug = global_conf["debug"]
+    total = index.ntotal
+
+    if debug:
+        logger.debug("insert.embedding (first element): %s", embeddings[0])
 
     utils.insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, dim, update_representation=True, check_l2_norm=check_l2_norm)
+
+    total2 = index.ntotal
+
+    logger.debug("Index updated: %d -> %d", total, total2)
+
+    assert total + embeddings.shape[0] == total2, f"total + n != total2: {total} + {embeddings.shape[0]} != {total2}"
 
 @app.route('/retrieve', methods=["GET", "POST"])
 def retrieve():
@@ -384,6 +394,18 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
 
         assert len(results[-1]) == (k - (1 if extra_k else 0))
 
+    if debug:
+        results2, results3 = [], []
+
+        for r in results[:1]:
+            results2.append(r[:5])
+            results3.append(r[-5:])
+
+        logger.error("faiss.proto_actions (k=%d): %s", k, proto_actions)
+        logger.error("faiss.closest_str (first and last 5): %s ... %s", results2, results3)
+        logger.error("faiss.I (first and last 5): %s ... %s", I[:,:5], I[:,-5:])
+        logger.error("faiss.D (first and last 5): %s ... %s", D[:,:5], D[:,-5:])
+
     if not get_representations_instead_of_embeddings:
         assert isinstance(results, list)
 
@@ -394,10 +416,6 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
 
         if len(all_urls) > 0:
             assert isinstance(all_urls[0], str), f"Expected all_urls to be a list of strings, got {type(all_urls[0])}: {all_urls[0]}"
-
-        if debug:
-            logger.error("faiss.I (first and last 5): %s ... %s", I[:,:5], I[:,-5:])
-            #logger.error("faiss.D (min max mean stdev): %s %s %s %s", np.min(D, axis=1), np.max(D, axis=1), np.mean(D, axis=1), np.std(D, ddof=1, axis=1))
 
         _all_urls_subset = [url for url in all_urls if url not in str2representation]
 
@@ -410,6 +428,12 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         assert results.shape == (proto_actions.shape[0] * (k - (1 if extra_k else 0)), proto_actions.shape[1])
 
         results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1]))
+
+        if debug:
+            results2 = results[0,:5]
+            results3 = results[0,-5:]
+
+            logger.error("faiss.closest_embedding (first and last 5): %s ... %s", results2, results3)
 
     return results, D, I
 

@@ -216,8 +216,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        action_url, action_url_distance, action_url_idx = self.knn_callback(action, k=1)
-
+        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1, add_saturated_action=self.prob_add_saturated_action > 0.0)
         valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
@@ -268,37 +267,6 @@ class MTICLEnv(gym.Env):
 
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
-
-        if random.random() < self.prob_add_saturated_action:
-            saturated_vector = np.ones_like(action)
-            saturated_vector[action < 0.0] = -1.0
-            str_key = ','.join(map(str, saturated_vector.astype(np.int64).tolist()))
-
-            #assert self.is_self_knn_callback, "If you want to use saturated actions, knn_callback must be set to self.get_closest_neighbors_urls"
-
-            if str_key not in self.add_saturated_action_storage:
-                saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_{len(self.add_saturated_action_storage) * self.add_saturated_action_k + idx}" for idx in range(self.add_saturated_action_k)]
-                saturated_vector = np.tile(saturated_vector, (self.add_saturated_action_k, 1)).astype(np.float32)
-
-                assert len(saturated_vector_str) == self.add_saturated_action_k
-                assert saturated_vector.shape == (self.add_saturated_action_k, self.action_dim), f"Expected shape {(self.add_saturated_action_k, self.action_dim)}, got {saturated_vector.shape}"
-
-                self.add_saturated_action_storage.add(str_key)
-                self.insert_embeddings(saturated_vector_str, saturated_vector, check_l2_norm=False,
-                                        _index=None if self.is_self_knn_callback else self.knn_callback.__self__.embeddings_index,
-                                        _urls_representation=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation,
-                                        _urls_representation_url2idx=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation_icl2idx)
-
-                for _str, emb in zip(saturated_vector_str, saturated_vector):
-                    assert emb.shape == (self.action_dim,), f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
-
-                    _str2representation = self.str2representation if self.is_self_knn_callback else self.knn_callback.__self__.str2representation
-
-                    assert _str not in _str2representation
-
-                    _str2representation[_str] = emb
-
-                self.logger_wrapper(gym.logger.info, "Saturated actions added (%d): %d", self.add_saturated_action_k, self.add_saturated_action_k * len(self.add_saturated_action_storage))
 
         # Preprocess action and apply step
         action_url, action_url_idx, action_url_distance = self.preprocess_action(action)
@@ -687,6 +655,10 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): finished! %d entries read (%d URLs loaded)", idx, len(self.data_icl_examples))
 
     def insert_embeddings(self, urls, embeddings, _index=None, _urls_representation=None, _urls_representation_url2idx=None, update_representation=True, check_l2_norm=True):
+        assert isinstance(urls, list), f"Expected urls to be a list, got {type(urls)}: {urls}"
+        assert len(urls) > 0, "urls must not be an empty list"
+        assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
+
         if self.knn_api_insert is not None:
             assert _index is None
             assert _urls_representation is None
@@ -705,18 +677,14 @@ class MTICLEnv(gym.Env):
 
             response = requests.post(self.knn_api_insert, data=payload)
 
-            assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+            assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
+            assert len(response.text) > 0, f"Response text is empty"
 
             response_text = json.loads(response.text)
 
             assert response_text["err"] == "null", f"Response error: {response_text['err']}"
 
             return
-
-        assert isinstance(urls, list), f"Expected urls to be a list, got {type(urls)}: {urls}"
-        assert len(urls) > 0, "urls must not be an empty list"
-        assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
 
         #embeddings = utils.embeddings_index_sanity_check(embeddings, last_dimmension_shape=self.action_dim)
         index = self.embeddings_index if _index is None else _index
@@ -994,17 +962,104 @@ class MTICLEnv(gym.Env):
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
                                    _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
-                                   remove_overlapping_actions=True, debug=False):
+                                   remove_overlapping_actions=True, add_saturated_action=False, debug=False):
         """
             observations: states from which proto_actions were generated
         """
+        #proto_actions = utils.l2_normalize(proto_actions) if self.apply_l2_normalization else proto_actions
+        #proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
+        proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with self.add_n_random_saturated_actions > 0
+        assert isinstance(proto_actions, np.ndarray), f"Expected proto_actions to be a numpy array, got {type(proto_actions)}: {proto_actions}"
+        assert len(proto_actions.shape) == 2, f"Expected proto_actions to be a 2D numpy array, got shape {proto_actions.shape}: {proto_actions}"
+        assert proto_actions.shape[-1] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected proto_actions last dimension to be {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}, got {proto_actions.shape[-1]}"
+        assert isinstance(k, int), k
+        assert k > 0, "k must be greater than 0"
+
+        if add_saturated_action:
+            if random.random() < self.prob_add_saturated_action:
+                saturated_vector = np.ones_like(proto_actions)
+                saturated_vector[proto_actions < 0.0] = -1.0
+                str_key = [','.join(map(str, v.astype(np.int64).tolist())) for v in saturated_vector]
+                seen_str_key = [s in self.add_saturated_action_storage for s in str_key]
+                seen_str_key = np.array(seen_str_key, dtype=bool)
+                saturated_vector = saturated_vector[seen_str_key == False]
+                n_saturated_vector = (seen_str_key == False).sum().item()
+
+                assert len(saturated_vector.shape) == 2, saturated_vector.shape
+                assert n_saturated_vector == saturated_vector.shape[0], f"Expected {saturated_vector.shape[0]} unseen saturated vectors, got {n_saturated_vector}"
+                #assert self.is_self_knn_callback, "If you want to use saturated actions, knn_callback must be set to self.get_closest_neighbors_urls"
+
+                if n_saturated_vector > 0:
+                    saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_k{idx % n_saturated_vector + 1}_{len(self.add_saturated_action_storage) * self.add_saturated_action_k * n_saturated_vector + idx}" for idx in range(self.add_saturated_action_k * n_saturated_vector)]
+                    saturated_vector = np.tile(saturated_vector, (self.add_saturated_action_k, 1)).astype(np.float32)
+
+                    assert len(saturated_vector_str) == self.add_saturated_action_k * n_saturated_vector
+                    assert saturated_vector.shape == (self.add_saturated_action_k * n_saturated_vector, self.action_dim), f"Expected shape {(self.add_saturated_action_k, self.action_dim)}, got {saturated_vector.shape}"
+
+                    for s in str_key:
+                        self.add_saturated_action_storage.add(s)
+
+                    self.insert_embeddings(saturated_vector_str, saturated_vector, check_l2_norm=False,
+                                            _index=None if self.is_self_knn_callback else self.knn_callback.__self__.embeddings_index,
+                                            _urls_representation=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation,
+                                            _urls_representation_url2idx=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation_icl2idx)
+                    for _str, emb in zip(saturated_vector_str, saturated_vector):
+                        _str2representation = self.str2representation if self.is_self_knn_callback else self.knn_callback.__self__.str2representation
+
+                        assert emb.shape == (self.action_dim,), f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+                        assert _str not in _str2representation
+
+                        _str2representation[_str] = emb
+
+                self.logger_wrapper(gym.logger.info, "Saturated actions added: %d (total: %d)", self.add_saturated_action_k * n_saturated_vector, self.add_saturated_action_k * len(self.add_saturated_action_storage))
+#            nbefore = len(self.add_saturated_action_storage)
+#
+#            for proto_action in proto_actions:
+#                assert len(proto_action.shape) == 1
+#                assert proto_action.shape[0] == self.action_dim
+#
+#                if random.random() < self.prob_add_saturated_action:
+#                    saturated_vector = np.ones_like(proto_action)
+#                    saturated_vector[proto_action < 0.0] = -1.0
+#                    str_key = ','.join(map(str, saturated_vector.astype(np.int64).tolist()))
+#
+#                    #assert self.is_self_knn_callback, "If you want to use saturated actions, knn_callback must be set to self.get_closest_neighbors_urls"
+#
+#                    if str_key not in self.add_saturated_action_storage:
+#                        saturated_vector_str = [f"saturated_vector_env_{self.custom_env_id}_{len(self.add_saturated_action_storage) * self.add_saturated_action_k + idx}" for idx in range(self.add_saturated_action_k)]
+#                        saturated_vector = np.tile(saturated_vector, (self.add_saturated_action_k, 1)).astype(np.float32)
+#
+#                        assert len(saturated_vector_str) == self.add_saturated_action_k
+#                        assert saturated_vector.shape == (self.add_saturated_action_k, self.action_dim), f"Expected shape {(self.add_saturated_action_k, self.action_dim)}, got {saturated_vector.shape}"
+#
+#                        self.add_saturated_action_storage.add(str_key)
+#                        self.insert_embeddings(saturated_vector_str, saturated_vector, check_l2_norm=False,
+#                                                _index=None if self.is_self_knn_callback else self.knn_callback.__self__.embeddings_index,
+#                                                _urls_representation=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation,
+#                                                _urls_representation_url2idx=None if self.is_self_knn_callback else self.knn_callback.__self__.icl_example_representation_icl2idx)
+#
+#                        for _str, emb in zip(saturated_vector_str, saturated_vector):
+#                            assert emb.shape == (self.action_dim,), f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+#
+#                            _str2representation = self.str2representation if self.is_self_knn_callback else self.knn_callback.__self__.str2representation
+#
+#                            assert _str not in _str2representation
+#
+#                            _str2representation[_str] = emb
+#
+#            nafter = len(self.add_saturated_action_storage)
+#            ntotal = nafter - nbefore
+#
+#            if ntotal > 0:
+#                self.logger_wrapper(gym.logger.info, "Saturated actions added: %d (total: %d)", ntotal * self.add_saturated_action_k, self.add_saturated_action_k * len(self.add_saturated_action_storage))
+
         if self.knn_api_retrieve is not None:
             _action = pickle.dumps(proto_actions)
             _action = base64.b64encode(_action).decode() # base64 tensor
             payload = [
                 ("embedding", _action),
                 ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
-                ("k", k)
+                ("k", str(k))
             ]
             response = requests.post(self.knn_api_retrieve, data=payload)
 
@@ -1026,16 +1081,10 @@ class MTICLEnv(gym.Env):
 
             return results, D, I
 
-        #proto_actions = utils.l2_normalize(proto_actions) if self.apply_l2_normalization else proto_actions
-        #proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
-        proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with self.add_n_random_saturated_actions > 0
         results = []
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
 
-        assert proto_actions.shape[-1] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected proto_actions last dimension to be {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}, got {proto_actions.shape[-1]}"
-        assert isinstance(k, int), k
-        assert k > 0, "k must be greater than 0"
         assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
 
         if observations is not None:
