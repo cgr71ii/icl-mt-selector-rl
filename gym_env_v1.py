@@ -7,6 +7,7 @@ import base64
 import random
 import datetime
 import collections
+import statistics
 
 import utils
 
@@ -30,6 +31,39 @@ from sacrebleu.metrics import CHRF
 #     order_enforce=True,
 #     autoreset=False,
 #)
+
+class ActionBoxSampleFromList(gym.spaces.Box):
+    def __init__(self, *args, sample_p=None, sample_list_actions=None, sample_list_actions_is_callable=False, error_when_sampling=False, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.sample_p = sample_p
+        self.sample_list_actions = sample_list_actions
+        self.sample_list_actions_is_callable = sample_list_actions_is_callable
+        self.error_when_sampling = error_when_sampling
+
+        if self.sample_p is not None:
+            assert isinstance(self.sample_p, float), type(self.sample_p)
+            assert 0.0 <= self.sample_p <= 1.0, self.sample_p
+
+        if self.sample_list_actions is not None and not self.sample_list_actions_is_callable:
+            assert isinstance(self.sample_list_actions, (list, np.ndarray)), type(self.sample_list_actions)
+            assert len(self.sample_list_actions) > 0, len(self.sample_list_actions)
+            assert all(action.shape == self._shape for action in self.sample_list_actions), f"{len(self.sample_list_actions[0].shape)}... vs {self._shape}"
+
+    def sample(self, *args, **kwargs):
+        assert not self.error_when_sampling, "Sampling from ActionBoxSampleFromList is disabled (error_when_sampling=True)"
+
+        if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
+            if self.sample_list_actions_is_callable:
+                action = self.sample_list_actions()
+            elif len(self.sample_list_actions):
+                action = random.choice(self.sample_list_actions)
+
+            assert action.shape == self._shape, f"{action.shape} vs {self._shape}"
+
+            return action
+
+        return super().sample(*args, **kwargs)
 
 class MTICLEnv(gym.Env):
     """Custom Environment for selecting ICL examples for MT using LLMs that follows gym interface."""
@@ -95,6 +129,11 @@ class MTICLEnv(gym.Env):
             assert self.is_self_knn_callback, "Two different kNN options selected: callback and API"
 
             self.logger_wrapper(gym.logger.info, "Embeddings retrieved from API kNN (%s) and saturated vectors added to a different kNN (%s)", self.knn_api_retrieve, self.knn_api_insert)
+
+        initial_sample_list_actions = utils.dict_or_default(kwargs, "initial_sample_list_actions", None)
+
+        if "initial_sample_list_actions" in kwargs:
+            del kwargs["initial_sample_list_actions"] # self.logger_wrapper message TOO long...
 
         self.logger_wrapper(gym.logger.info, "Provided arguments: %s", kwargs)
 
@@ -165,16 +204,23 @@ class MTICLEnv(gym.Env):
         self.apply_l2_normalization = utils.dict_or_default(kwargs, "apply_l2_normalization", True)
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "chrf2")
         self.dimensionality_reduction_factor_state_and_action = utils.dict_or_default(kwargs, "dimensionality_reduction_factor_state_and_action", 1)
+        self.dimensionality_reduction_type = utils.dict_or_default(kwargs, "dimensionality_reduction_type", "fixed_orthogonal_projection")
         self.add_n_random_saturated_actions = utils.dict_or_default(kwargs, "add_n_random_saturated_actions", 0)
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.prob_add_saturated_action = utils.dict_or_default(kwargs, "prob_add_saturated_action", 0.0)
         self.add_saturated_action_k = utils.dict_or_default(kwargs, "add_saturated_action_k", 1)
         self.add_saturated_action_storage = set()
+        self.max_distance_threshold = utils.dict_or_default(kwargs, "max_distance_threshold", "inf")
+        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
         assert self.model_hidden_size % self.dimensionality_reduction_factor_state_and_action == 0, f"Model hidden size {self.model_hidden_size} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.state_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"State dimension {self.state_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.action_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"Action dimension {self.action_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
+        assert self.dimensionality_reduction_type in ("fixed_orthogonal_projection", "iterative_nonoverlapping_average"), self.dimensionality_reduction_type
+
+        if self.is_eval_env and self.max_distance_threshold != "inf":
+            self.logger_wrapper(gym.logger.warning, "This is an evaluation environment, but max_distance_threshold is not 'inf': %s", self.max_distance_threshold)
 
         if self.prob_add_saturated_action > 0.0:
             assert self.prob_add_saturated_action <= 1.0, self.prob_add_saturated_action
@@ -184,9 +230,6 @@ class MTICLEnv(gym.Env):
             if not self.is_self_knn_callback:
                 self.logger_wrapper(gym.logger.warning, "If the environment is vectorized with SubprocVecEnv, using self.prob_add_saturated_action > 0.0 will NOT have any effect")
 
-        if self.dimensionality_reduction_factor_state_and_action > 1:
-            self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d", self.dimensionality_reduction_factor_state_and_action)
-
         if self.add_n_random_saturated_actions > 0:
             self.logger_wrapper(gym.logger.info, "Be aware that %d random saturated vectors (random values of -1 and 1) are being added: this helps to prevent the actor saturation if self.action_dim is small enough", self.add_n_random_saturated_actions)
 
@@ -195,6 +238,7 @@ class MTICLEnv(gym.Env):
 
         self.state_dim = self.state_dim // self.dimensionality_reduction_factor_state_and_action
         self.action_dim = self.action_dim // self.dimensionality_reduction_factor_state_and_action
+        self.str2representation_valid_actions_k = []
 
         # Need to be defined here
         self.saturated_action_embedding = np.ones((self.action_dim,), dtype=np.float32) # not using np.zeros as it is the initialized observation
@@ -204,6 +248,17 @@ class MTICLEnv(gym.Env):
         if self.apply_l2_normalization:
             self.saturated_action_embedding_state = utils.l2_normalize(self.saturated_action_embedding_state)
 
+        if self.dimensionality_reduction_factor_state_and_action > 1:
+#            _dimensionality_reduction_factor_state_and_action = self.dimensionality_reduction_factor_state_and_action
+#
+#            if self.dimensionality_reduction_type == "iterative_nonoverlapping_average":
+#                _dimensionality_reduction_factor_state_and_action = int(np.log2(self.dimensionality_reduction_factor_state_and_action) + sys.float_info.epsilon)
+#
+#            self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d -> %d", self.dimensionality_reduction_factor_state_and_action, _dimensionality_reduction_factor_state_and_action)
+#
+#            self.dimensionality_reduction_factor_state_and_action = _dimensionality_reduction_factor_state_and_action
+            self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d", self.dimensionality_reduction_factor_state_and_action)
+
         # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
         self.logger_wrapper(gym.logger.info, "Model hidden size and EoS token (you may need to specify the correct values according to your LLM): %d %s", self.model_hidden_size, self.eos_token_str)
@@ -211,14 +266,35 @@ class MTICLEnv(gym.Env):
         # Define action and observation space (embeddings)
         #self.action_space = gym.spaces.Box(-sys.float_info.max, sys.float_info.max, shape=(self.model_hidden_size,))
         #self.observation_space = gym.spaces.Box(-sys.float_info.max, sys.float_info.max, shape=(self.model_hidden_size,))
-        self.action_space = gym.spaces.Box(-1., 1., shape=(self.action_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
+        #self.action_space = gym.spaces.Box(-1., 1., shape=(self.action_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
+
+        error_when_sampling = False
+
+        if initial_sample_list_actions is not None:
+            assert isinstance(initial_sample_list_actions, list), type(initial_sample_list_actions)
+            assert len(initial_sample_list_actions) > 0
+            assert isinstance(initial_sample_list_actions[0], np.ndarray), type(initial_sample_list_actions[0])
+            assert len(initial_sample_list_actions[0].shape) == 1, initial_sample_list_actions[0].shape
+            assert initial_sample_list_actions[0].shape[0] == self.action_dim, initial_sample_list_actions[0].shape
+
+            self.logger_wrapper(gym.logger.info, "Loading initial sample list actions with %d entries", len(initial_sample_list_actions))
+
+            _initial_sample_list_actions = [initial_sample_list_actions[i].astype(np.float32) for i in range(len(initial_sample_list_actions))]
+        else:
+            #self.logger_wrapper(gym.logger.warning, "Generating initial sample list actions with random normal values: this is not expected by the Wolpertinger policy and should only be used for non-main training environments")
+
+            #_initial_sample_list_actions = [np.random.normal(np.zeros(self.action_dim), 0.1 * np.ones(self.action_dim)).astype(np.float32) for _ in range(1000)] # TODO use parameter
+            _initial_sample_list_actions = None
+            error_when_sampling = True
+
+        self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, sample_list_actions=_initial_sample_list_actions, error_when_sampling=error_when_sampling)
         self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
 
     def preprocess_action(self, action):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1, add_saturated_action=self.prob_add_saturated_action > 0.0)
+        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1, add_saturated_action=self.prob_add_saturated_action > 0.0, max_distance_threshold=self.max_distance_threshold)
         valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
@@ -404,6 +480,37 @@ class MTICLEnv(gym.Env):
 
             self.str2representation[_str] = emb
 
+            self.str2representation_valid_actions_k.append(_str)
+
+        distances = []
+        abs_sum_values = []
+
+        for idx1 in range(len(representations_emb)):
+            idx2 = idx1 + 1
+
+            abs_sum_values.append(np.sum(np.abs(representations_emb[idx1])))
+
+            while idx2 < len(representations_emb):
+                distances.append(np.linalg.norm(representations_emb[idx1] - representations_emb[idx2]))
+
+                idx2 += 1
+
+        distances_max = max(distances)
+        distances_min = min(distances)
+        distances_avg = sum(distances) / len(distances) if len(distances) > 0 else 0.0
+        distances_mean = statistics.mean(distances) if len(distances) > 1 else 0.0
+        distances_stdev = statistics.stdev(distances) if len(distances) > 1 else 0.0
+        distances_var = statistics.variance(distances) if len(distances) > 1 else 0.0
+        abs_sum_values_max = max(abs_sum_values)
+        abs_sum_values_min = min(abs_sum_values)
+        abs_sum_values_avg = sum(abs_sum_values) / len(abs_sum_values) if len(abs_sum_values) > 0 else 0.0
+        abs_sum_values_mean = statistics.mean(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+        abs_sum_values_stdev = statistics.stdev(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+        abs_sum_values_var = statistics.variance(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+
+        self.logger_wrapper(gym.logger.info, "ICL examples pairwise distances: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", distances_min, distances_max, distances_avg, distances_mean, distances_stdev, distances_var)
+        self.logger_wrapper(gym.logger.info, "ICL examples abs sum values: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", abs_sum_values_min, abs_sum_values_max, abs_sum_values_avg, abs_sum_values_mean, abs_sum_values_stdev, abs_sum_values_var)
+
         time.sleep(self.initial_time_sleep) # wait so ICL examples and EoS token are not mixed due to parallel envs (i.e., num_envs > 1) and service-streamer, raising an error
 
         ## EoS token (early stopping action)
@@ -420,6 +527,8 @@ class MTICLEnv(gym.Env):
             assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
 
             self.str2representation[_str] = emb
+
+            self.str2representation_valid_actions_k.append(_str)
 
         time.sleep(self.initial_time_sleep)
 
@@ -464,27 +573,28 @@ class MTICLEnv(gym.Env):
         time.sleep(self.initial_time_sleep)
 
         ## Special token for detecting unexpected actions
-        self.logger_wrapper(gym.logger.info, "Inserting representation for unexpected actions")
+        if not self.is_eval_env:
+            self.logger_wrapper(gym.logger.info, "Inserting representation for unexpected actions")
 
-        assert len(self.saturated_action_embedding.shape) == 1
+            assert len(self.saturated_action_embedding.shape) == 1
 
-        str_key = ','.join(map(str, self.saturated_action_embedding.astype(np.int64).tolist()))
+            str_key = ','.join(map(str, self.saturated_action_embedding.astype(np.int64).tolist()))
 
-        self.add_saturated_action_storage.add(str_key)
+            self.add_saturated_action_storage.add(str_key)
 
-        representations_str = [self.saturated_action_embedding_name]
-        representations_emb = np.expand_dims(self.saturated_action_embedding, axis=0).astype(np.float32)
+            representations_str = [self.saturated_action_embedding_name]
+            representations_emb = np.expand_dims(self.saturated_action_embedding, axis=0).astype(np.float32)
 
-        assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+            assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-        self.insert_embeddings(representations_str, representations_emb, check_l2_norm=False)
+#            self.insert_embeddings(representations_str, representations_emb, check_l2_norm=False)
 
-        for _str, emb in zip(representations_str, representations_emb):
-            assert emb.shape[0] == self.action_dim, f"Expected representation shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+            for _str, emb in zip(representations_str, representations_emb):
+                assert emb.shape[0] == self.action_dim, f"Expected representation shape {self.action_dim}, got {emb.shape[0]} for {_str}"
 
-            self.str2representation[_str] = emb
+                self.str2representation[_str] = emb
 
-        self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
+            self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
 
     def _hard_reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -512,7 +622,7 @@ class MTICLEnv(gym.Env):
             for _ in range(self.state_window_length):
                 _current_state_window.append(np.zeros(self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action))
 
-            observation = self.state_window_type_callback(_current_state_window)
+            observation = self.state_window_type_callback(_current_state_window).copy()
 
         return observation, info
 
@@ -562,7 +672,7 @@ class MTICLEnv(gym.Env):
 
         self.current_state_window.append(observation)
 
-        observation = self.state_window_type_callback(self.current_state_window)
+        observation = self.state_window_type_callback(self.current_state_window).copy()
 
         return observation, info
 
@@ -836,7 +946,8 @@ class MTICLEnv(gym.Env):
             representations = representations.numpy()
 
         if self.dimensionality_reduction_factor_state_and_action > 1:
-            representations = utils.fixed_orthogonal_projection(representations, self.action_dim)
+            func = getattr(utils, self.dimensionality_reduction_type)
+            representations = func(representations, self.action_dim)
 
         if self.apply_l2_normalization:
             representations = utils.l2_normalize(representations)
@@ -882,7 +993,8 @@ class MTICLEnv(gym.Env):
             representations = representations.numpy()
 
         if self.dimensionality_reduction_factor_state_and_action > 1:
-            representations = utils.fixed_orthogonal_projection(representations, self.action_dim)
+            func = getattr(utils, self.dimensionality_reduction_type)
+            representations = func(representations, self.action_dim)
 
         if self.apply_l2_normalization:
             representations = utils.l2_normalize(representations)
@@ -966,7 +1078,8 @@ class MTICLEnv(gym.Env):
                 translations = translations.numpy()
 
             if self.dimensionality_reduction_factor_state_and_action > 1:
-                translations = utils.fixed_orthogonal_projection(translations, self.action_dim)
+                func = getattr(utils, self.dimensionality_reduction_type)
+                translations = func(translations, self.action_dim)
 
             if self.apply_l2_normalization:
                 translations = utils.l2_normalize(translations)
@@ -988,7 +1101,7 @@ class MTICLEnv(gym.Env):
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
                                    _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
-                                   remove_overlapping_actions=True, add_saturated_action=False, max_distance_threshold=np.inf, debug=False):
+                                   remove_overlapping_actions=True, add_saturated_action=False, max_distance_threshold="inf", debug=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -1095,8 +1208,10 @@ class MTICLEnv(gym.Env):
             payload = [
                 ("embedding", _action),
                 ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
-                ("k", str(k))
+                ("k", str(k)),
+                ("max_distance_threshold", str(max_distance_threshold)),
             ]
+
             response = requests.post(self.knn_api_retrieve, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
@@ -1120,6 +1235,7 @@ class MTICLEnv(gym.Env):
         results = []
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
+        max_distance_threshold = float(max_distance_threshold)
 
         assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
 
@@ -1144,7 +1260,7 @@ class MTICLEnv(gym.Env):
         assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
         assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
-        _fake_representation_str = self.saturated_action_embedding_name # Default representation if no hits are found
+        _fake_representation_str = self.saturated_action_embedding_name if not self.is_eval_env else self.eos_token_str # Default representation if no hits are found
         _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
 
         # Modify D
@@ -1187,7 +1303,7 @@ class MTICLEnv(gym.Env):
                 if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
                     self.logger_wrapper(gym.logger.debug, "Removing distant action: %s (distance: %s > %s)", url, value_distance, max_distance_threshold)
 
-                    d[idx2] = -400.0
+                    d[idx2] = -400.0 - value_distance
                     i[idx2] = -4
 
                     d_modified_idxs.append((idx1, idx2))
@@ -1258,12 +1374,20 @@ class MTICLEnv(gym.Env):
                 self.str2representation[_child_url] = _child_url_observation
 
             results = [torch.tensor(self.str2representation[url]) for url in all_urls]
-            results = torch.stack(results, dim=0).to(self.device)
+            results = torch.stack(results, dim=0)
 
             assert len(results.shape) == 2, results.shape
             assert results.shape == (proto_actions.shape[0] * (k - (1 if extra_k else 0)), proto_actions.shape[1])
 
-            results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1])).to(self.device)
+            results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1]))
+
+            if debug:
+                results2 = results[0,:5]
+                results3 = results[0,-5:]
+
+                self.logger_wrapper(gym.logger.error, "faiss.closest_embedding (first and last 5): %s ... %s", results2, results3)
+
+            results = results.to(self.device)
 
         return results, D, I
 
@@ -1361,6 +1485,10 @@ class MTICLEnv(gym.Env):
 #                observation = _str2representation[current_action]
                 observation = self.saturated_action_embedding_state
 
+            assert isinstance(observation, np.ndarray), type(observation)
+
+            observation = observation.copy() # This is relevant to avoid changing the initial representations in case the observations are modified
+
             if self.state_window_type == "concatenate" and self.state_representation == "sentence_and_icl_examples":
                 assert self.state_window_length == 1, self.state_window_length
                 assert self.current_state_window[-1].shape == (self.action_dim,), self.current_state_window[-1].shape
@@ -1384,6 +1512,10 @@ class MTICLEnv(gym.Env):
                 observation = self.str2representation[icl_example]
             else:
                 raise Exception(f"Unknown state representation: {self.state_representation}")
+
+        assert isinstance(observation, np.ndarray), type(observation)
+
+        observation = observation.copy()
 
         if self.apply_l2_normalization:
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"

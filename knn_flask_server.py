@@ -248,6 +248,19 @@ def retrieve():
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
+    # Optional parameters
+    try:
+        max_distance_threshold = utils.string2list(request_method.getlist("max_distance_threshold"))
+
+        if len(set(max_distance_threshold)) != 1:
+            logger.error("Different values: %s", set(max_distance_threshold))
+
+            return jsonify({"ok": "null", "err": f"Different values: {set(max_distance_threshold)}"})
+        else:
+            max_distance_threshold = float(max_distance_threshold[0])
+    except KeyError as e:
+        max_distance_threshold = float("inf")
+
     if len(embedding) != 1:
         logger.error("Different values: %s", len(embedding))
 
@@ -280,7 +293,7 @@ def retrieve():
     logger.debug("Got %d embeddings", len(embedding))
 
     # Apply
-    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings)
+    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings, max_distance_threshold=max_distance_threshold)
     results = {"results": results, "D": D, "I": I}
     results = pickle.dumps(results)
     results = base64.b64encode(results).decode() # base64 tensor
@@ -290,7 +303,7 @@ def retrieve():
         "err": "null",
     })
 
-def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False, translation_candidate=None):
+def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False, translation_candidate=None, max_distance_threshold="inf"):
     """
         observations: states from which proto_actions were generated
     """
@@ -306,9 +319,9 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     eos_token_str = global_conf["eos_token_str"]
     action_dim = global_conf["dim"]
     debug = global_conf["debug"]
-    max_distance_threshold = global_conf["max_distance_threshold"]
     proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with saturated vectors
     results = []
+    max_distance_threshold = float(max_distance_threshold)
 
     assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
     assert isinstance(k, int), k
@@ -371,9 +384,9 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
                     continue # do not add this entry
 
             if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
-                logger.debug("Removing distant action: %s (distance: %s > %s)", url, value_distance, max_distance_threshold)
+                logger.debug("Removing distant action: distance: %s > %s", value_distance, max_distance_threshold)
 
-                d[idx2] = -400.0
+                d[idx2] = -400.0 - value_distance
                 i[idx2] = -4
 
                 d_modified_idxs.append((idx1, idx2))
@@ -468,7 +481,6 @@ def main(args):
     global_conf["add_saturated_action_storage"] = set()
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
-    global_conf["max_distance_threshold"] = args.max_distance_threshold
 
     # Add saturated action embedding
     saturated_action_embedding = global_conf["saturated_action_embedding"]
@@ -486,7 +498,9 @@ def main(args):
 
     assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-    knn_insert_embedding(representations_str, representations_emb, check_l2_norm=False)
+    global_conf["str2representation"][saturated_action_embedding_name] = representations_emb[0]
+
+#    knn_insert_embedding(representations_str, representations_emb, check_l2_norm=False)
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
@@ -502,7 +516,6 @@ def initialization():
 
     parser.add_argument('--dim', type=int, required=True, help="Embedding dimensionality")
     parser.add_argument('--eos-token-str', type=str, default="</s>", help="EOS token")
-    parser.add_argument('--max-distance-threshold', type=float, default=np.inf, help="kNN maximum distance threshold. If the closest neighbor is further than this threshold, it will be ignored and the default representation will be returned instead")
     parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
     parser.add_argument('--debug', action="store_true", help="Debug mode")

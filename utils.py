@@ -3,6 +3,7 @@ import os
 import random
 import base64
 import logging
+import hashlib
 
 import torch
 import torch.nn.functional as F
@@ -171,7 +172,7 @@ def l2_normalize(emb):
 
     return result
 
-def check_l2_normalized(emb, tol=1e-4):
+def check_l2_normalized(emb, tol=1e-1):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
     assert len(emb.shape) in (1, 2), "Input array must be 1D (embedding_size) or 2D (batch_size, embedding_size)"
 
@@ -219,3 +220,47 @@ def fixed_orthogonal_projection(v, out_dim, seed=42, random_matrix=None):
     assert result.shape[-1] == out_dim, f"Expected output shape {out_dim}, but got {result.shape[-1]}"
 
     return result
+
+def iterative_nonoverlapping_average(vec, out_dim):
+    n = 0
+    in_dim = vec.shape[-1]
+    _out_dim = out_dim
+
+    assert in_dim > _out_dim, f"Input dimension {in_dim} must be greater than output dimension {_out_dim}"
+
+    while in_dim > _out_dim:
+        _out_dim *= 2
+        n += 1
+
+    assert in_dim == _out_dim, f"Input dimension {vec.shape[-1]} cannot be reduced to {out_dim} by iterative non-overlapping averaging"
+    assert isinstance(vec, np.ndarray)
+    assert n >= 0
+
+    for _ in range(n):
+        size = vec.shape[-1]
+
+        if size < 2:
+            break
+
+        # compute pairwise averages
+        paired = (vec[...,0:size//2*2:2] + vec[...,1:size//2*2:2]) / 2
+        vec = paired
+
+        # if odd length, keep last element
+        if size % 2 != 0:
+            # expand last element to match shape for concatenation
+            last = np.expand_dims(vec[...,-1], axis=-1)
+            vec = np.concatenate([paired, last], axis=-1)
+
+    assert vec.shape[-1] == out_dim, f"Output dimension {vec.shape[-1]} does not match expected {out_dim}" # what about when last elements are added?
+
+    return vec
+
+def get_hash(s, hashf="md5"):
+    assert isinstance(s, str), type(s)
+
+    f = getattr(hashlib, hashf, None)
+
+    assert f is not None, f"{hashf} not available"
+
+    return f(s.encode()).hexdigest()

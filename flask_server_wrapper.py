@@ -1,5 +1,5 @@
 
-def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False):
+def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False, num_beams=4):
     import os
     import sys
     import logging
@@ -29,7 +29,9 @@ def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/L
         "--pretrained-model", pretrained_model,
         "--do-not-run-flask-server", # Necessary for gunicorn in order to work properly
         "--verbose",
-        "--disable-streamer", # It should be enabled for crawls of multiple websites, but disabled for a few websites
+#        "--disable-streamer", # It should be enabled for crawls of multiple websites, but disabled for a few websites
+        "--num-beams", str(num_beams),
+        "--store-translations",
         "--debug",
     ])
 

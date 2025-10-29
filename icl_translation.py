@@ -69,7 +69,7 @@ class StopOnTokensSeq(StoppingCriteria):
 
         return False
 
-def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=None, normalize=True, lock=None):
+def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=None, normalize=True, lock=None, num_beams=4):
     all_outputs, all_original_outputs = [], []
 
     # Tokenize
@@ -87,7 +87,7 @@ def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=
         **inputs,
         #max_new_tokens=1024,
         max_new_tokens=max_new_tokens,
-        num_beams=4,
+        num_beams=num_beams,
         early_stopping=True,
         pad_token_id=tokenizer.eos_token_id,
         do_sample=False,

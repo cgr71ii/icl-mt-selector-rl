@@ -517,6 +517,11 @@ def translate_batch(data):
 
             prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
 
+            assert isinstance(prompts, list), type(prompts)
+
+            if len(prompts) > 0:
+                assert isinstance(prompts[0], str), type(prompts[0])
+
             if global_conf["debug"]:
                 logger.debug("Prompts: %s", str(prompts))
 
@@ -534,11 +539,77 @@ def translate_batch(data):
                 logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
                 logger.debug("max_new_tokens: %d", max_new_tokens)
 
-                all_outputs, all_original_outputs = mt_icl.translate(model, tokenizer, prompts, max_new_tokens=max_new_tokens, stopping_criteria=None, lock=global_conf["lock"])
+                new_prompts_map = {idx: s for idx, s in enumerate(prompts)}
+                new_prompts_none = 0
 
-                assert len(all_outputs) == len(all_original_outputs) == len(prompts) == len(src_sentences[:_bsz])
+                if global_conf["store_translations"]:
+                    for idx, new_prompt in new_prompts_map.items():
+                        assert new_prompts_map[idx] is not None
+
+                        if utils.get_hash(new_prompt) in global_conf["store_translations_buffer"]:
+                            new_prompts_map[idx] = None # Do not translate if the output it is stored
+                            new_prompts_none += 1
+
+                new_prompts = [prompts[idx] for idx in range(len(prompts)) if new_prompts_map[idx] is not None]
+                storage_hits1 = len(prompts) - len(new_prompts)
+                storage_hits2 = 0
+                aux_all_outputs = []
+
+                if len(new_prompts) > 0:
+                    aux_all_outputs, aux_all_original_outputs = mt_icl.translate(model, tokenizer, new_prompts, max_new_tokens=max_new_tokens, stopping_criteria=None, lock=global_conf["lock"], num_beams=global_conf["num_beams"])
+
+                    assert len(aux_all_outputs) + new_prompts_none == len(aux_all_original_outputs) + new_prompts_none == len(prompts) == len(src_sentences[:_bsz])
+
+                all_outputs = []
+                all_outputs_idx = 0
+
+                for idx in range(len(prompts)):
+                    new_prompt = new_prompts_map[idx]
+
+                    if new_prompt is not None:
+                        assert prompts[idx] == new_prompt
+
+                        output = aux_all_outputs[all_outputs_idx]
+
+                        all_outputs_idx += 1
+                    else:
+                        assert storage_hits1 > 0
+
+                        output = global_conf["store_translations_buffer"][utils.get_hash(prompts[idx])]
+                        storage_hits2 += 1
+
+                    all_outputs.append(output)
+
+                assert all_outputs_idx + new_prompts_none == len(prompts)
+                assert len(all_outputs) == len(prompts)
+                assert storage_hits1 == storage_hits2
 
                 results.extend(all_outputs)
+
+                if global_conf["store_translations"]:
+                    stored = 0
+
+                    assert isinstance(prompts, list), type(prompts)
+                    assert isinstance(all_outputs, list), type(all_outputs)
+
+                    for idx, (prompt, output) in enumerate(zip(prompts, all_outputs)):
+                        assert isinstance(prompt, str), type(prompt)
+                        assert isinstance(output, str), type(output)
+
+                        if utils.get_hash(prompt) in global_conf["store_translations_buffer"]:
+                            if global_conf["store_translations_buffer"][utils.get_hash(prompt)] != output:
+                                logger.warning("Different results (updating): %s: %s vs %s", prompt, global_conf["store_translations_buffer"][utils.get_hash(prompt)], output)
+
+                            assert new_prompts_map[idx] is None
+                        else:
+                            assert new_prompts_map[idx] is not None
+
+                            stored += 1
+
+                        global_conf["store_translations_buffer"][utils.get_hash(prompt)] = output
+
+                    logger.debug("Storage hits: %d out of %d", storage_hits1, len(prompts))
+                    logger.debug("Stored in storage: %d out of %d", stored, len(prompts))
 
             _device = device
             _bsz = batch_size
@@ -682,6 +753,7 @@ def main(args):
     streamer_max_latency = args.streamer_max_latency
     run_flask_server = not args.do_not_run_flask_server
     disable_streamer = args.disable_streamer
+    num_beams = args.num_beams
 
     if not disable_streamer:
         logger.warning("Since streamer is enabled, you might get slightly different results: not recommended for production")
@@ -711,6 +783,9 @@ def main(args):
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
+    global_conf["num_beams"] = num_beams
+    global_conf["store_translations"] = args.store_translations
+    global_conf["store_translations_buffer"] = {}
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
@@ -777,6 +852,8 @@ def initialization():
     parser.add_argument('--streamer-max-latency', type=float, default=0.1,
                         help="Streamer max latency. You will need to modify this parameter if you want to increase the GPU usage")
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
+    parser.add_argument('--num-beams', type=int, default=4, help="Number of beams for beam search")
+    parser.add_argument('--store-translations', action="store_true", help="Store in memory translations")
     parser.add_argument('--debug', action="store_true", help="Debug mode")
 
     parser.add_argument('-v', '--verbose', action="store_true", help="Verbose logging mode")

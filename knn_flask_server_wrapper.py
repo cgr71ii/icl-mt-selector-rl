@@ -1,7 +1,7 @@
 
 import numpy as np
 
-def init(dim, eos_token_str="</s>", max_distance_threshold=np.inf):
+def init(dim, eos_token_str="</s>"):
     import sys
 
     import knn_flask_server
@@ -16,9 +16,6 @@ def init(dim, eos_token_str="</s>", max_distance_threshold=np.inf):
         "--verbose",
         "--debug",
     ])
-
-    if max_distance_threshold != np.inf:
-        sys.argv.extend(["--max-distance-threshold", str(max_distance_threshold)])
 
     knn_flask_server.cli()
 
