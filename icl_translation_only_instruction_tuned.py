@@ -356,7 +356,7 @@ def main():
 
             prompts, src_sentence_n_tokens = build_prompt(_src_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz)
             #max_new_tokens = min(1024, src_sentence_n_tokens * 10)
-            max_new_tokens = 512
+            max_new_tokens = 256
 
             logging.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
             logging.debug("max_new_tokens: %d", max_new_tokens)

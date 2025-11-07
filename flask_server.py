@@ -534,7 +534,8 @@ def translate_batch(data):
                 results.append(all_outputs)
             else:
                 # Translate
-                max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
+                #max_new_tokens = min(_max_new_tokens, src_sentence_n_tokens * 10)
+                max_new_tokens = _max_new_tokens
 
                 logger.debug("src_sentence_n_tokens: %d", src_sentence_n_tokens)
                 logger.debug("max_new_tokens: %d", max_new_tokens)
@@ -777,9 +778,9 @@ def main(args):
     global_conf["device"] = device
     global_conf["batch_size"] = args.batch_size
     global_conf["max_new_tokens"] = args.max_new_tokens
-    global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=120)
-    global_conf["streamer_embedding"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=120)
-    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=120)
+    global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
+    global_conf["streamer_embedding"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
+    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
@@ -845,7 +846,7 @@ def initialization():
 
     parser.add_argument('--batch-size', type=int, default=16, help="Batch size")
     parser.add_argument('--pretrained-model', default="meta-llama/Llama-2-7b-chat-hf", help="Pretrained model")
-    parser.add_argument('--max-new-tokens', type=int, default=512, help="Max. length for the generated tokens")
+    parser.add_argument('--max-new-tokens', type=int, default=256, help="Max. length for the generated tokens")
     parser.add_argument('--force-cpu', action="store_true", help="Run on CPU (i.e. do not check if GPU is possible)")
     parser.add_argument('--disable-streamer', action="store_true", help="Do not use streamer (it might lead to slower inference and OOM errors)")
     parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")

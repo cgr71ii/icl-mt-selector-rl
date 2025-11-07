@@ -63,6 +63,9 @@ def main():
         l = l.rstrip("\r\n").split('\t')
 
         assert len(l) == 3
+        assert l[0].strip() != "", "Source sentence is empty"
+        assert l[1].strip() != "", "MT sentence is empty"
+        assert l[2].strip() != "", "Reference sentence is empty"
 
         src.append(l[0].strip())
         mt.append(l[1].strip())

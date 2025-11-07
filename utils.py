@@ -160,13 +160,13 @@ def softmax(x):
     else:
         raise Exception(f"Unsupported type for softmax: {type(x)}. Expected torch.Tensor, np.ndarray, or list")
 
-def l2_normalize(emb):
+def l2_normalize(emb, eps=1e-6):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
     assert len(emb.shape) in (1, 2), "Input array must be 2D (batch_size, embedding_size)"
 
     norms = np.linalg.norm(emb, axis=-1, keepdims=True)
-    norms[norms == 0.0] = 1.0
-    result = emb / norms
+    #norms[norms == 0.0] = 1.0
+    result = emb / (norms + eps)
 
     assert np.all((-1 <= result) & (result <= 1)), f"L2 normalization failed: {result}"
 

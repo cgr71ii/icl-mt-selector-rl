@@ -12,6 +12,7 @@ import gymnasium as gym
 from stable_baselines3 import DDPG, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor
 
 if __name__ == "__main__":
     # Evaluate
@@ -38,7 +39,7 @@ if __name__ == "__main__":
     parsed_kwargs["max_icl_examples"] = parsed_kwargs.get("max_icl_examples", 4)
     parsed_kwargs["max_data_entries"] = parsed_kwargs.get("max_data_entries", -1)
     parsed_kwargs["max_data_icl_examples_entries"] = parsed_kwargs.get("max_data_icl_examples_entries", -1)
-    parsed_kwargs["state_representation"] = parsed_kwargs.get("state_representation", "sentence_and_icl_examples")
+    parsed_kwargs["state_representation"] = parsed_kwargs.get("state_representation", "model_single_representation")
     parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "comet-22-da")
     parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256))
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
@@ -49,17 +50,18 @@ if __name__ == "__main__":
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
 
     # custom
-    k = 10
+    k = 20
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
-    max_data_icl_examples_entries = 100 # TODO remove
-    max_data_entries = 1 # TODO remove
-    parsed_kwargs["max_data_entries"] = max_data_entries
-    parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
-    data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
+    #max_data_icl_examples_entries = 100 # TODO remove
+    #max_data_entries = 1 # TODO remove
+    #parsed_kwargs["max_data_entries"] = max_data_entries
+    #parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
+    #data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
     max_distance_threshold = parsed_kwargs["max_distance_threshold"]
+    model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
 
-    assert parsed_kwargs["knn_api_retrieve"] is not None
-    assert parsed_kwargs["knn_api_insert"] is not None
+    #assert parsed_kwargs["knn_api_retrieve"] is not None
+    #assert parsed_kwargs["knn_api_insert"] is not None
 
     parsed_kwargs_training_dummy = {}
     # TODO use following code?
@@ -95,9 +97,58 @@ if __name__ == "__main__":
         "qf": [2000, 2000, 2000, 2000]
     }
     actor_learning_rate = 1e-4
+    actor_transformer_args_and_kwargs = {
+        "d_model": 512,
+        "nhead": 4,
+        "dim_feedforward": 2048,
+        "nlayers": 3,
+        "max_seq_len": 16,
+        "projection_in": model_hidden_size,
+        "l2_norm": False,
+        "str_id": "actor",
+    }
+    critic_transformer_args_and_kwargs = {
+        "d_model": 512,
+        "nhead": 4,
+        "dim_feedforward": 2048,
+        "nlayers": 3,
+        "max_seq_len": 16,
+        "projection_in": model_hidden_size,
+        "str_id": "critic",
+    }
+    actor_use_transformer = True
+    critic_use_transformer = True
+    policy_actor_kwargs = {
+        #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
+        "actor_lr_schedule": lambda foo: 100.0, # dummy callable
+        "actor_layer_norm_input": True,
+        "actor_layer_norm_before_activation": True,
+        "actor_last_layer_init_uniform_value": 0.001,
+        "actor_dropout": True,
+        "actor_dropout_p": 0.1,
+        "actor_transformer": actor_use_transformer,
+        "actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+    }
+    policy_critic_kwargs = {
+        #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
+        #"lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
+        "critic_layer_norm_input": True,
+        "critic_layer_norm_before_activation": True,
+        "critic_last_layer_init_uniform_value": 0.001,
+        "critic_dropout": True,
+        "critic_dropout_p": 0.1,
+        "critic_transformer": critic_use_transformer,
+        "critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
+    }
+
+    assert (actor_use_transformer and critic_use_transformer) or (not actor_use_transformer and not critic_use_transformer), "Supported: both enabled or disabled"
+
+    features_extractor_class = NoFlattenExtractor if actor_use_transformer or critic_use_transformer else FlattenExtractor
     model_class = TD3
     model = model_class.load(
         best_model_path,
+        learning_rate=lambda foo: 100.0, # dummy callable
+        lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_dev,
@@ -105,14 +156,10 @@ if __name__ == "__main__":
             "k": k,
             "add_all_knn_to_batch": True, # Faster
             "apply_rws_inference": False,
-            #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
-            "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=100, initial_lr=actor_learning_rate, logger=logger), # callable
-            "actor_layer_norm_input": True,
-            "actor_layer_norm_before_activation": True,
-            "actor_last_layer_init_uniform_value": None,
-            "actor_dropout": True,
-            "actor_dropout_p": 0.1,
+            **policy_actor_kwargs,
+            **policy_critic_kwargs,
             "squash_output": True,
+            "features_extractor_class": features_extractor_class,
         },
     )
 

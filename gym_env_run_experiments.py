@@ -20,13 +20,14 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
-import torch
+from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor
 import numpy as np
+import torch
 
 # TODO implement a replay buffer that samples from two different bins (given a probability p): actions with >= reward and < reward
 
 class InverseSqrtWithWarmUpLRSchedule:
-    def __init__(self, warmup_steps, initial_lr, logger):
+    def __init__(self, warmup_steps, initial_lr, logger, str_id="none"):
         assert warmup_steps >= 0, warmup_steps
 
         self.warmup_steps = warmup_steps + 1
@@ -34,8 +35,9 @@ class InverseSqrtWithWarmUpLRSchedule:
         self.old_current_progress_remaining = np.inf
         self.step = 1
         self.logger = logger
+        self.str_id = str_id
 
-        self.logger.debug("First LR and warmup steps: %f (initial: %f) %d", self.get_lr(), self.initial_lr, self.warmup_steps)
+        self.logger.debug("[%s] First LR and warmup steps: %f (initial: %f) %d", self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
 
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
         lr = self.get_lr()
@@ -50,7 +52,7 @@ class InverseSqrtWithWarmUpLRSchedule:
 
             self.old_current_progress_remaining = _current_progress_remaining
 
-        self.logger.debug("New LR (step %d): %f", self.step, lr)
+        self.logger.debug("[%s] New LR (step %d): %f", self.str_id, self.step, lr)
 
         self.step += 1
 
@@ -165,24 +167,25 @@ if __name__ == "__main__":
                 data_to_be_translated.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = parsed_kwargs.get("num_envs", 6)
+    num_envs = parsed_kwargs.get("num_envs", 4)
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 4)
     #max_icl_examples = 1 # TODO remove
     #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
-    state_representation = parsed_kwargs.get("state_representation", "sentence_and_icl_examples")
+    state_representation = parsed_kwargs.get("state_representation", "model_single_representation")
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
     dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256)
     repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
     max_distance_threshold = parsed_kwargs.get("max_distance_threshold", "inf")
     dimensionality_reduction_type = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
+    model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
 
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
-    max_data_icl_examples_entries = 100 # TODO remove
-    max_data_entries = 1 # TODO remove
+    #max_data_icl_examples_entries = 100 # TODO remove
+    #max_data_entries = 1 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
@@ -207,7 +210,8 @@ if __name__ == "__main__":
     # Some values
     #k = 0.01
     #k = 100
-    k = 10
+    k = 20
+    #k = 101 # TODO remove
 
     assert isinstance(k, int) # other parameters use k assuming integer instead of float
 
@@ -240,13 +244,15 @@ if __name__ == "__main__":
     save_freq = 1e1000 # TODO remove
     eval_freq = 50 # TODO remove
     #eval_freq = 10 # TODO remove
-    save_path = "./rl_models36/"
+    save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_model_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     max_episodes_epochs = 10 # repeat N times
     max_episodes_epochs = 10000 # TODO remove
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
+
+    logger.info("Save path: %s", save_path)
 
     # Environment
     env_class = MTICLEnv
@@ -268,7 +274,9 @@ if __name__ == "__main__":
     replay_buffer_size = 1000000
     #replay_buffer_size = 100000
     seed = 42
-    critic_learning_rate = 1e-3
+    #critic_learning_rate = 1e-3
+    #actor_learning_rate = 1e-4
+    critic_learning_rate = 1e-4
     actor_learning_rate = 1e-4
     #init_training_episodes = 1000
     #init_training_episodes = 500 # TODO remove
@@ -320,8 +328,58 @@ if __name__ == "__main__":
         #"target_noise_clip": 0.25,
         #"target_policy_noise": 0.01,
         #"target_noise_clip": 0.1,
-        "target_noise_clip": 0.0, # disable temporarily for debug purposes TODO enable with small values for better generalization and robustness
+        #"target_noise_clip": 0.0, # disable temporarily for debug purposes TODO enable with small values for better generalization and robustness
+        "target_policy_noise": 1e-3,
+        "target_noise_clip": 2e-3,
     } if model_class is TD3 else {}
+    actor_transformer_args_and_kwargs = {
+        "d_model": 512,
+        "nhead": 4,
+        "dim_feedforward": 2048,
+        "nlayers": 3,
+        "max_seq_len": 16,
+        "projection_in": model_hidden_size,
+        #"l2_norm": True, # disable and let l2 norm penalty handle it to improve stability through regularization
+        "str_id": "actor",
+    }
+    critic_transformer_args_and_kwargs = {
+        "d_model": 512,
+        "nhead": 4,
+        "dim_feedforward": 2048,
+        "nlayers": 3,
+        "max_seq_len": 16,
+        "projection_in": model_hidden_size,
+        "str_id": "critic",
+    }
+    actor_use_transformer = True
+    critic_use_transformer = True
+    warmup_steps = 200
+    policy_actor_kwargs = {
+        #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
+        "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
+        "actor_layer_norm_input": True,
+        "actor_layer_norm_before_activation": True,
+        "actor_last_layer_init_uniform_value": 0.001,
+        "actor_dropout": True,
+        "actor_dropout_p": 0.1,
+        "actor_transformer": actor_use_transformer,
+        "actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+    }
+    policy_critic_kwargs = {
+        #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
+        #"lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
+        "critic_layer_norm_input": True,
+        "critic_layer_norm_before_activation": True,
+        "critic_last_layer_init_uniform_value": 0.001,
+        "critic_dropout": True,
+        "critic_dropout_p": 0.1,
+        "critic_transformer": critic_use_transformer,
+        "critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
+    }
+
+    assert (actor_use_transformer and critic_use_transformer) or (not actor_use_transformer and not critic_use_transformer), "Supported: both enabled or disabled"
+
+    features_extractor_class = NoFlattenExtractor if actor_use_transformer or critic_use_transformer else FlattenExtractor
     model = model_class(
         "WolpertingerPolicy",
         env,
@@ -329,8 +387,16 @@ if __name__ == "__main__":
         seed=seed,
         batch_size=batch_size,
         learning_starts=init_training_steps,
-        learning_rate=critic_learning_rate,
+        #learning_rate=critic_learning_rate,
+        learning_rate=InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
         policy_kwargs={
+            # Optimizer
+            "optimizer_class": torch.optim.AdamW,
+            "optimizer_kwargs": {
+                "eps": 1e-5, # smaller value than default for Adam optimizer (found in common/policies.py), but I do not understand why
+                "weight_decay": 1e-2,
+            },
+            # Other
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_training,
             "callback_retrieve_knn_training": retrieve_embeddings_training_training,
@@ -338,14 +404,10 @@ if __name__ == "__main__":
             "add_all_knn_to_batch": True, # Faster
             #"add_all_knn_to_batch": False, # Better avoid due to removal of overlapping actions
             "apply_rws_inference": False,
-            #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
-            "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=100, initial_lr=actor_learning_rate, logger=logger), # callable
-            "actor_layer_norm_input": True,
-            "actor_layer_norm_before_activation": True,
-            "actor_last_layer_init_uniform_value": 0.001,
-            "actor_dropout": True,
-            "actor_dropout_p": 0.1,
+            **policy_actor_kwargs,
+            **policy_critic_kwargs,
             "squash_output": True,
+            "features_extractor_class": features_extractor_class,
         },
         gamma=gamma,
         device=device,
@@ -358,7 +420,9 @@ if __name__ == "__main__":
         buffer_size=replay_buffer_size,
         action_noise=action_noise,
         #lambda_penalty=1e-3,
-        lambda_penalty=1e-1,
+        #lambda_penalty=1e-1,
+        #lambda_penalty=1e-2,
+        lambda_penalty=0.0, # TODO does the actor saturate the representation when disabled?
         max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_target_policy_actor_noise=0.1,
@@ -370,7 +434,7 @@ if __name__ == "__main__":
     #assert init_training_episodes < max_episodes
 
     # Add callbacks
-    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=7, min_evals=0, verbose=1) # early stopping
+    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=6, min_evals=0, verbose=1) # early stopping
     # EvalCallback
     ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
     ## it does not evaluate the model performance when training finishes (we evaluate below)
@@ -412,8 +476,11 @@ if __name__ == "__main__":
     ## dev: load model
     logger.info("Loading best model (dev): %s", best_model_path)
 
+    policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
+        learning_rate=lambda foo: 100.0, # dummy callable
+        lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_dev,
@@ -421,14 +488,10 @@ if __name__ == "__main__":
             "k": k,
             "add_all_knn_to_batch": True, # Faster
             "apply_rws_inference": False,
-            #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
-            "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=100, initial_lr=actor_learning_rate, logger=logger), # callable
-            "actor_layer_norm_input": True,
-            "actor_layer_norm_before_activation": True,
-            "actor_last_layer_init_uniform_value": None,
-            "actor_dropout": True,
-            "actor_dropout_p": 0.1,
+            **policy_actor_kwargs,
+            **policy_critic_kwargs,
             "squash_output": True,
+            "features_extractor_class": features_extractor_class,
         },
     )
 
@@ -448,8 +511,11 @@ if __name__ == "__main__":
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
     retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
+    policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
+        learning_rate=lambda foo: 100.0, # dummy callable
+        lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_test,
@@ -457,14 +523,10 @@ if __name__ == "__main__":
             "k": k,
             "add_all_knn_to_batch": True, # Faster
             "apply_rws_inference": False,
-            #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
-            "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=100, initial_lr=actor_learning_rate, logger=logger), # callable
-            "actor_layer_norm_input": True,
-            "actor_layer_norm_before_activation": True,
-            "actor_last_layer_init_uniform_value": None,
-            "actor_dropout": True,
-            "actor_dropout_p": 0.1,
+            **policy_actor_kwargs,
+            **policy_critic_kwargs,
             "squash_output": True,
+            "features_extractor_class": features_extractor_class,
         },
     )
 

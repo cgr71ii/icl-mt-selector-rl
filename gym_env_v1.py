@@ -142,12 +142,12 @@ class MTICLEnv(gym.Env):
         self.max_icl_examples = utils.dict_or_default(kwargs, "max_icl_examples", 4)
         self.max_data_entries = utils.dict_or_default(kwargs, "max_data_entries", -1)
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
-        self.state_representation = utils.dict_or_default(kwargs, "state_representation", "sentence_and_icl_examples")
+        self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
 
-        assert self.state_representation in ("sentence_and_icl_examples", "sentence_and_actions"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions"), f"Unexpected state representation: {self.state_representation}"
 
         if self.state_window_type == "concatenate":
-            if self.state_representation == "sentence_and_icl_examples" and self.state_window_length > 1:
+            if self.state_representation == "model_single_representation" and self.state_window_length > 1:
                 self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
 
                 self.state_window_length = 1
@@ -155,6 +155,10 @@ class MTICLEnv(gym.Env):
                 self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 1 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 1)
 
                 self.state_window_length = self.max_icl_examples + 1
+            elif self.state_representation == "model_single_representation+sentence_and_actions" and self.state_window_length != self.max_icl_examples + 2:
+                self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
+
+                self.state_window_length = self.max_icl_examples + 2
             elif self.state_window_length < self.max_icl_examples:
                 self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d", self.state_window_length, self.max_icl_examples)
 
@@ -333,7 +337,7 @@ class MTICLEnv(gym.Env):
         info = {}
 
         if terminated or truncated:
-            observation = self.state_window_type_callback(self.current_state_window)
+            observation = self.state_window_type_callback(self.current_state_window).copy()
             reward = 0.0
 
             assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
@@ -369,7 +373,7 @@ class MTICLEnv(gym.Env):
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
-        observation = self.state_window_type_callback(self.current_state_window)
+        observation = self.state_window_type_callback(self.current_state_window).copy()
 
         assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
 
@@ -1489,7 +1493,7 @@ class MTICLEnv(gym.Env):
 
             observation = observation.copy() # This is relevant to avoid changing the initial representations in case the observations are modified
 
-            if self.state_window_type == "concatenate" and self.state_representation == "sentence_and_icl_examples":
+            if self.state_window_type == "concatenate" and self.state_representation == "model_single_representation":
                 assert self.state_window_length == 1, self.state_window_length
                 assert self.current_state_window[-1].shape == (self.action_dim,), self.current_state_window[-1].shape
                 assert observation.shape == self.current_state_window[-1].shape, observation.shape
@@ -1501,7 +1505,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation  == "sentence_and_icl_examples":
+            if self.state_representation  == "model_single_representation":
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
             elif self.state_representation == "sentence_and_actions":
@@ -1510,6 +1514,18 @@ class MTICLEnv(gym.Env):
                 assert icl_example in self.str2representation, icl_example
 
                 observation = self.str2representation[icl_example]
+            elif self.state_representation == "model_single_representation+sentence_and_actions":
+                assert len(self.current_state_window) > 0, "Current state window must have at least one element (initial sentence representation)"
+
+                src_sentence = self.data[self.translation_candidate][0]
+                model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+                icl_example = '\t'.join(self.current_icl_examples[-1])
+
+                assert icl_example in self.str2representation, icl_example
+
+                last_icl_example_representation = self.str2representation[icl_example]
+                observation = last_icl_example_representation # append last ICL example representation
+                self.current_state_window[1] = model_single_representation.copy() # 1 because 0 is the last position (deque moves towards left), which will be its position after append() below
             else:
                 raise Exception(f"Unknown state representation: {self.state_representation}")
 
