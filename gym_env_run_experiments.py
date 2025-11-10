@@ -279,8 +279,6 @@ if __name__ == "__main__":
 
     env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
 
-    #parsed_kwargs_training["knn_callback"] = env_training_dummy.get_closest_neighbors_urls # avoid non-stationary behaviour due to different fake actions among the different environments
-    #parsed_kwargs_training["knn_callback_data_icl_examples"] = env_training_dummy.data_icl_examples
     parsed_kwargs_training["initial_sample_list_actions"] = [env_training_dummy.str2representation[k] for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=42) for rank in range(num_envs)], **vec_env_kwargs)
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)

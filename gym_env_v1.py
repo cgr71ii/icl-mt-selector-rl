@@ -101,32 +101,12 @@ class MTICLEnv(gym.Env):
 
         # kNN
         self.data_icl_examples = []
-        self.knn_callback = utils.dict_or_default(kwargs, "knn_callback", self.get_closest_neighbors_urls)
-        self.knn_callback_data_icl_examples = utils.dict_or_default(kwargs, "knn_callback_data_icl_examples", self.data_icl_examples)
-        self.is_self_knn_callback = self.knn_callback.__func__ is self.__class__.get_closest_neighbors_urls and self.knn_callback.__self__ is self
         self.knn_api_retrieve = utils.dict_or_default(kwargs, "knn_api_retrieve", None)
         self.knn_api_insert = utils.dict_or_default(kwargs, "knn_api_insert", None)
-
-        assert isinstance(self.knn_callback_data_icl_examples, list), type(self.knn_callback_data_icl_examples)
-
-        #if self.knn_callback is not self.get_closest_neighbors_urls: # each time we call self, a dynamic object is created to wrap the instance, so id() changes each time
-        if not self.is_self_knn_callback:
-            assert "knn_callback_data_icl_examples" in kwargs
-            assert self.knn_callback_data_icl_examples is not self.data_icl_examples, "If knn_callback is not get_closest_neighbors_urls, knn_callback_data_icl_examples must not be the same as self.data_icl_examples"
-
-            self.knn_callback_data_icl_examples = list(self.knn_callback_data_icl_examples) # copy -> new obj
-
-            del kwargs["knn_callback_data_icl_examples"] # self.logger_wrapper message TOO long...
-
-            self.logger_wrapper(gym.logger.debug, "Different kNN callback provided")
-        else:
-            assert "knn_callback_data_icl_examples" not in kwargs
-            assert self.knn_callback_data_icl_examples is self.data_icl_examples, "If knn_callback is get_closest_neighbors_urls, knn_callback_data_icl_examples must be the same as data_icl_examples"
 
         if self.knn_api_retrieve is not None or self.knn_api_insert is not None:
             assert self.knn_api_retrieve is not None
             assert self.knn_api_insert is not None
-            assert self.is_self_knn_callback, "Two different kNN options selected: callback and API"
 
             self.logger_wrapper(gym.logger.info, "Embeddings retrieved from API kNN (%s) and added to a different kNN (%s)", self.knn_api_retrieve, self.knn_api_insert)
 
@@ -268,7 +248,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1)
+        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1)
         valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
@@ -290,7 +270,7 @@ class MTICLEnv(gym.Env):
 
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
 
-        if self.is_self_knn_callback and self.knn_api_insert is None and self.knn_api_retrieve is None:
+        if self.knn_api_insert is None and self.knn_api_retrieve is None:
             assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
             assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
 
@@ -407,7 +387,6 @@ class MTICLEnv(gym.Env):
 
         assert len(self.data) > 0, "Data must not be empty"
         assert len(self.data_icl_examples) > 0, "ICL examples must not be empty"
-        assert self.knn_callback_data_icl_examples is self.data_icl_examples or sorted(self.knn_callback_data_icl_examples) == sorted(self.data_icl_examples), "We assume that both instances share the same pool"
 
         l = gym.logger.warn if self.src_data_overlap_src_icl_examples > 0 else gym.logger.info
         pr = self.src_data_overlap_src_icl_examples * 100 / len(self.data_icl_examples)
