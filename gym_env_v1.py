@@ -394,10 +394,9 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(l, "Source data overlaps with ICL examples source sentences: %d out of %d (%.2f%%)", self.src_data_overlap_src_icl_examples, len(self.data_icl_examples), pr)
 
         if self.src_data_overlap_src_icl_examples > 0:
-            self.logger_wrapper(gym.logger.info, "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add an "
-                                                 "additional embedding for the ICL example source sentences to the embeddings. This is done to remove the ICL example source sentence from "
-                                                 "the knn search results, so that the model does not cheat in the translation. If the the translation is not among the retrieved entries in "
-                                                 "the knn search, the less similar entry will be removed")
+            self.logger_wrapper(gym.logger.info, "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add as "
+                                                 "many additional EoS embeddings as overlapping sentences found, after removing the embedding of the overlapping ICL example source sentences, so "
+                                                 "that the model does not cheat in the translation")
 
         # Shuffle data in order to avoid model memorization
         if options.get("shuffle_all_data", True):
@@ -1005,8 +1004,7 @@ class MTICLEnv(gym.Env):
         return terminated, truncated
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
-                                   _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
-                                   remove_overlapping_actions=True, debug=False):
+                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, debug=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -1059,11 +1057,6 @@ class MTICLEnv(gym.Env):
             # Create and reconstruct index to perform search using A(provided_state) set and not A(current_state) set (here, capital A is the set of actions)
             pass # Given that the set of actions do not change given a state, we do not need to reconstruct the index here
 
-        extra_k = remove_overlapping_actions and self.src_data_overlap_src_icl_examples > 0
-
-        if extra_k:
-            k += 1
-
         if index.ntotal == 0:
             # Faiss index is empty
             self.logger_wrapper(gym.logger.warn, "Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
@@ -1077,7 +1070,7 @@ class MTICLEnv(gym.Env):
         assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
         _fake_representation_str = self.eos_token_str # Default representation if no hits are found
-        _fake_representation = self.str2representation[_fake_representation_str] if _urls_representation_are_embeddings else _fake_representation_str
+        _fake_representation = _fake_representation_str
 
         # Modify D
         D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
@@ -1105,7 +1098,7 @@ class MTICLEnv(gym.Env):
                     # Check if we need to remove this hit
                     src_icl_example, trg_icl_example = url.split('\t')
 
-                    if extra_k and self.data[self.translation_candidate][0] == src_icl_example:
+                    if remove_overlapping_actions and self.data[self.translation_candidate][0] == src_icl_example:
                         self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
@@ -1121,26 +1114,14 @@ class MTICLEnv(gym.Env):
             assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
             assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
-            if extra_k and overlapping_hits == 0:
-                # Remove the less similar neighbor
-
-                assert d.shape == (k,), f"Expected d to have shape ({k},), got {d.shape}"
-                assert len(results[-1]) == k, f"Expected results[-1] to have length {k}, got {len(results[-1])}"
-
-                idx2 = np.argmax(d)
-                d[idx2] = -300.0
-                i[idx2] = -3
-
-                del results[-1][idx2]
-
-            if len(results[-1]) < (k - (1 if extra_k else 0)):
+            if len(results[-1]) < k:
                 # Add items to avoid tensor errors because dimensions don't match
                 self.logger_wrapper(gym.logger.debug, "Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
 
-            while len(results[-1]) < (k - (1 if extra_k else 0)):
+            while len(results[-1]) < k:
                 results[-1].append(_fake_representation)
 
-            assert len(results[-1]) == (k - (1 if extra_k else 0))
+            assert len(results[-1]) == k
 
         if distance_expected_zero:
             for idx1, d1 in enumerate(D):
@@ -1183,9 +1164,9 @@ class MTICLEnv(gym.Env):
             results = torch.stack(results, dim=0)
 
             assert len(results.shape) == 2, results.shape
-            assert results.shape == (proto_actions.shape[0] * (k - (1 if extra_k else 0)), proto_actions.shape[1])
+            assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1])
 
-            results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1]))
+            results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1]))
 
             if debug:
                 results2 = results[0,:5]

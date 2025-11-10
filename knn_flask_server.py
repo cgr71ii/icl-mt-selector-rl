@@ -278,14 +278,11 @@ def retrieve():
         "err": "null",
     })
 
-def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False,
+def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=True,
                                translation_candidate=None, check_l2_norm=False):
     """
         observations: states from which proto_actions were generated
     """
-
-    assert not remove_overlapping_actions, "Not currently supported, but when supported, change default value remove_overlapping_actions=True"
-
     if translation_candidate is not None:
         assert isinstance(translation_candidate, str), type(translation_candidate)
 
@@ -301,12 +298,6 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
     assert isinstance(k, int), k
     assert k > 0, "k must be greater than 0"
-
-    #extra_k = remove_overlapping_actions and src_data_overlap_src_icl_examples > 0
-    extra_k = False # TODO support
-
-    if extra_k:
-        k += 1
 
     if index.ntotal == 0:
         # Faiss index is empty
@@ -347,7 +338,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
                 # Check if we need to remove this hit
                 src_icl_example, trg_icl_example = url.split('\t')
 
-                if extra_k and translation_candidate == src_icl_example:
+                if remove_overlapping_actions and translation_candidate == src_icl_example:
                     logger.debug("Removing overlapping action: %s", src_icl_example)
 
                     overlapping_hits += 1
@@ -363,26 +354,14 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
         assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
-        if extra_k and overlapping_hits == 0:
-            # Remove the less similar neighbor
-
-            assert d.shape == (k,), f"Expected d to have shape ({k},), got {d.shape}"
-            assert len(results[-1]) == k, f"Expected results[-1] to have length {k}, got {len(results[-1])}"
-
-            idx2 = np.argmax(d)
-            d[idx2] = -300.0
-            i[idx2] = -3
-
-            del results[-1][idx2]
-
-        if len(results[-1]) < (k - (1 if extra_k else 0)):
+        if len(results[-1]) < k:
             # Add items to avoid tensor errors because dimensions don't match
             logger.debug("Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
 
-        while len(results[-1]) < (k - (1 if extra_k else 0)):
+        while len(results[-1]) < k:
             results[-1].append(_fake_representation)
 
-        assert len(results[-1]) == (k - (1 if extra_k else 0))
+        assert len(results[-1]) == k
 
     if debug:
         results2, results3 = [], []
@@ -417,9 +396,9 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         results = torch.stack(results, dim=0)
 
         assert len(results.shape) == 2, results.shape
-        assert results.shape == (proto_actions.shape[0] * (k - (1 if extra_k else 0)), proto_actions.shape[1])
+        assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1])
 
-        results = results.reshape((proto_actions.shape[0], k - (1 if extra_k else 0), proto_actions.shape[1]))
+        results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1]))
 
         if debug:
             results2 = results[0,:5]
