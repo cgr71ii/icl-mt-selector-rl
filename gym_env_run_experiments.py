@@ -179,6 +179,8 @@ if __name__ == "__main__":
     dimensionality_reduction_type = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
+    knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True) # TODO remove?
+    apply_rws_inference = parsed_kwargs.get("apply_rws_inference", True) # TODO remove?
 
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
@@ -199,9 +201,13 @@ if __name__ == "__main__":
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
+    parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
+    parsed_kwargs["apply_rws_inference"] = apply_rws_inference
 
-    assert parsed_kwargs["knn_api_retrieve"] is not None
-    assert parsed_kwargs["knn_api_insert"] is not None
+    #assert parsed_kwargs["knn_api_retrieve"] is not None
+    #assert parsed_kwargs["knn_api_insert"] is not None
+
+    del parsed_kwargs["apply_rws_inference"]
 
     # Some values
     #k = 0.01
@@ -250,8 +256,8 @@ if __name__ == "__main__":
     #vec_env_class = DummyVecEnv
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
-#    batch_size = 256
-    batch_size = 512
+    batch_size = 256
+#    batch_size = 512
     net_arch = {
         "pi": [400, 300],
 #        "pi": [1024, 512, 1024],
@@ -285,9 +291,9 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
     #normal_action_noise = None
@@ -389,7 +395,7 @@ if __name__ == "__main__":
             "k": k,
             "add_all_knn_to_batch": True, # Faster
             #"add_all_knn_to_batch": False, # Better avoid due to removal of overlapping actions
-            "apply_rws_inference": False,
+            "apply_rws_inference": apply_rws_inference,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "squash_output": True,
@@ -406,9 +412,9 @@ if __name__ == "__main__":
         buffer_size=replay_buffer_size,
         action_noise=action_noise,
         #lambda_penalty=1e-3,
-        #lambda_penalty=1e-1,
+        lambda_penalty=1e-1,
         #lambda_penalty=1e-2,
-        lambda_penalty=0.0, # TODO does the actor saturate the representation when disabled?
+        #lambda_penalty=0.0, # TODO does the actor saturate the representation when disabled? it seems so, but the results are better somehow
         max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_target_policy_actor_noise=0.1,
@@ -496,7 +502,7 @@ if __name__ == "__main__":
 
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
+    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,

@@ -103,6 +103,7 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples = []
         self.knn_api_retrieve = utils.dict_or_default(kwargs, "knn_api_retrieve", None)
         self.knn_api_insert = utils.dict_or_default(kwargs, "knn_api_insert", None)
+        self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
 
         if self.knn_api_retrieve is not None or self.knn_api_insert is not None:
             assert self.knn_api_retrieve is not None
@@ -248,7 +249,10 @@ class MTICLEnv(gym.Env):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1)
+        translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
+        translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
+        translation_candidate_observation[0, -1 * translation_candidate_actual_representation.shape[0]:] = translation_candidate_actual_representation # put actual representation at the end due to deque behavior (right append)
+        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation)
         valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
@@ -381,6 +385,7 @@ class MTICLEnv(gym.Env):
         self.src_data_overlap_src_icl_examples = 0
         #self.observation_hash_dict = {} # We do not remove this data in _soft_reset because the replay buffer is not reseted after an episode ends
         self.str2representation = {} # Needed for knn search and apply_step (sentences, icl_examples and EOS token)
+        self.src_sentences_index = faiss.IndexFlatL2(self.action_dim)
 
         # Load data
         self.load_data()
@@ -496,6 +501,11 @@ class MTICLEnv(gym.Env):
             assert observation.shape[0] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected source sentence shape {self.model_hidden_size}, got {observation.shape[0]} for {src_sentence}"
 
             self.str2representation[src_sentence] = observation
+
+        ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
+        representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization)
+
+        self.src_sentences_index.add(np.array(representations_emb).astype(np.float32)) # TODO does shuffle=True affect to the multiple environments running in parallel and doing retrieval in the dummy training environment?
 
         time.sleep(self.initial_time_sleep)
 
@@ -1004,13 +1014,13 @@ class MTICLEnv(gym.Env):
         return terminated, truncated
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
-                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, debug=False):
+                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False):
         """
             observations: states from which proto_actions were generated
         """
         #proto_actions = utils.l2_normalize(proto_actions) if self.apply_l2_normalization else proto_actions
         #proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
-        proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization)
+        proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
         assert isinstance(proto_actions, np.ndarray), f"Expected proto_actions to be a numpy array, got {type(proto_actions)}: {proto_actions}"
         assert len(proto_actions.shape) == 2, f"Expected proto_actions to be a 2D numpy array, got shape {proto_actions.shape}: {proto_actions}"
         assert proto_actions.shape[-1] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected proto_actions last dimension to be {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}, got {proto_actions.shape[-1]}"
@@ -1024,8 +1034,10 @@ class MTICLEnv(gym.Env):
                 ("embedding", _action),
                 ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
                 ("k", str(k)),
-                ("check_l2_norm", '1' if self.apply_l2_normalization else '0'),
+                ("check_l2_norm", '1' if check_l2_norm else '0'),
+                ("knn_always_add_eos_action", '1' if self.knn_always_add_eos_action else '0'),
             ]
+            # TODO add translation_candidate to knn api?
 
             response = requests.post(self.knn_api_retrieve, data=payload)
 
@@ -1050,12 +1062,59 @@ class MTICLEnv(gym.Env):
         results = []
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
+        _add_eos_action = self.knn_always_add_eos_action and k > 1
+        translation_candidate = None
 
-        assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
+        if _add_eos_action:
+            k -= 1
 
         if observations is not None:
-            # Create and reconstruct index to perform search using A(provided_state) set and not A(current_state) set (here, capital A is the set of actions)
-            pass # Given that the set of actions do not change given a state, we do not need to reconstruct the index here
+            # get translation_candidate from observations
+
+            if isinstance(observations, torch.Tensor):
+                observations = observations.detach().cpu().numpy()
+
+            assert isinstance(observations, np.ndarray), f"Expected observations to be a numpy array, got {type(observations)}: {observations}"
+            assert len(observations.shape) == 2, f"Expected observations to be a 2D numpy array, got shape {observations.shape}: {observations}"
+            assert observations.shape[0] == proto_actions.shape[0], f"Expected observations first dimension to be equal to proto_actions first dimension ({proto_actions.shape[0]}), got {observations.shape[0]}"
+            assert observations.shape[1] == self.state_dim, f"Expected observations second dimension to be {self.state_dim}, got {observations.shape[1]}"
+            assert observations.shape[1] % (self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action) == 0, f"Expected observations second dimension ({observations.shape[1]}) to be multiple of {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}"
+
+            translation_candidate = []
+
+            for idx, observation in enumerate(observations):
+                _observation = observation.reshape(-1, self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action) # (state_window_length, model_hidden_size // dimensionality_reduction_factor_state_and_action)
+                start_idx = 1 if self.state_representation == "model_single_representation+sentence_and_actions" else 0
+                found = False
+
+                for _observation2 in _observation[start_idx:]:
+                    if not np.allclose(_observation2, np.zeros_like(_observation2)):
+                        found = True
+
+                        break
+
+                assert found, f"Could not find non-zero observation in state window for idx {idx}: {_observation}"
+
+                D_overlap, I_overlap = self.src_sentences_index.search(np.expand_dims(_observation2, axis=0), 1)
+
+                assert len(D_overlap) == 1 and len(I_overlap) == 1, f"Expected single result from src_sentences_index search, got distances {D_overlap} and indices {I_overlap}"
+
+                d_overlap = D_overlap[0]
+                i_overlap = I_overlap[0]
+
+                assert len(d_overlap) == 1 and len(i_overlap) == 1, f"Expected single result from src_sentences_index search, got distances {d_overlap} and indices {i_overlap}"
+                assert d_overlap[0] < 1e-5 and i_overlap[0] >= 0, f"Expected to find overlapping source sentence in src_sentences_index, got distance {d_overlap[0]} and index {i_overlap[0]}: {_observation2} vs {_observation}"
+
+                src_sentence = self.data[i_overlap[0]][0]
+                translation_candidate.append(src_sentence)
+
+                #if d_overlap[0] < 1e-5 and i_overlap[0] >= 0:
+                #    src_sentence = self.data[i_overlap[0]][0]
+                #    translation_candidate.append(src_sentence)
+                #else:
+                #    translation_candidate.append(None)
+
+                self.logger_wrapper(gym.logger.info, "Translation candidate kNN #%d: %s", idx, translation_candidate[-1])
 
         if index.ntotal == 0:
             # Faiss index is empty
@@ -1064,6 +1123,35 @@ class MTICLEnv(gym.Env):
         #self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
 
         D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
+
+        if translation_candidate is not None:
+            assert len(translation_candidate) == proto_actions.shape[0] == D.shape[0], f"Expected translation_candidate length to be equal to proto_actions first dimension ({proto_actions.shape[0]} == {D.shape[0]}), got {len(translation_candidate)}"
+
+        if _add_eos_action:
+            # Add EOS action to the results
+            eos_representation = self.str2representation[self.eos_token_str].copy()
+
+            assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == self.action_dim, f"Expected EOS representation shape to be ({self.action_dim},), got {eos_representation.shape}"
+
+            eos_representation = np.tile(eos_representation, (proto_actions.shape[0], 1)) # (batch_size, action_dim)
+
+            assert eos_representation.shape == proto_actions.shape, f"Expected tiled EOS representation shape to be {proto_actions.shape}, got {eos_representation.shape}"
+
+            D_eos = np.linalg.norm(proto_actions - eos_representation, axis=1, keepdims=True) # we assume euclidean distance
+            expected_eos_index = len(urls_representation) - 1
+
+            assert D_eos.shape == (proto_actions.shape[0], 1), f"Expected D_eos.shape to be {(proto_actions.shape[0], 1)}, got {D_eos.shape}"
+            assert urls_representation[expected_eos_index] == self.eos_token_str, f"Expected last element in urls_representation to be EOS token string ({self.eos_token_str}), got {urls_representation[expected_eos_index]}"
+
+            I_eos = np.full((proto_actions.shape[0], 1), expected_eos_index) # Index for EOS action
+
+            # Add to D and I
+            D = np.hstack((D, D_eos))
+            I = np.hstack((I, I_eos))
+
+            # Restore k value
+            k += 1
+
         expected_shape = (proto_actions.shape[0], k)
 
         assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
@@ -1079,6 +1167,7 @@ class MTICLEnv(gym.Env):
         # Obtain representations (str) from kNN idxs
         for idx1, (i, d) in enumerate(zip(I, D)):
             overlapping_hits = 0
+            _translation_candidate = None if translation_candidate is None else translation_candidate[idx1]
 
             results.append([])
 
@@ -1098,7 +1187,7 @@ class MTICLEnv(gym.Env):
                     # Check if we need to remove this hit
                     src_icl_example, trg_icl_example = url.split('\t')
 
-                    if remove_overlapping_actions and self.data[self.translation_candidate][0] == src_icl_example:
+                    if remove_overlapping_actions and _translation_candidate == src_icl_example:
                         self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
@@ -1261,7 +1350,7 @@ class MTICLEnv(gym.Env):
                 assert self.current_state_window[-1].shape == (self.action_dim,), self.current_state_window[-1].shape
                 assert observation.shape == self.current_state_window[-1].shape, observation.shape
 
-                observation += self.current_state_window[-1]
+                observation += self.current_state_window[-1] # last inserted element (deque moves towards left)
 
                 if self.apply_l2_normalization:
                     observation = utils.l2_normalize(observation)
@@ -1271,24 +1360,12 @@ class MTICLEnv(gym.Env):
             if self.state_representation  == "model_single_representation":
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
-            elif self.state_representation == "sentence_and_actions":
+            elif self.state_representation == "sentence_and_actions" or self.state_representation == "model_single_representation+sentence_and_actions":
                 icl_example = '\t'.join(self.current_icl_examples[-1])
 
                 assert icl_example in self.str2representation, icl_example
 
                 observation = self.str2representation[icl_example]
-            elif self.state_representation == "model_single_representation+sentence_and_actions":
-                assert len(self.current_state_window) > 0, "Current state window must have at least one element (initial sentence representation)"
-
-                src_sentence = self.data[self.translation_candidate][0]
-                model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
-                icl_example = '\t'.join(self.current_icl_examples[-1])
-
-                assert icl_example in self.str2representation, icl_example
-
-                last_icl_example_representation = self.str2representation[icl_example]
-                observation = last_icl_example_representation # append last ICL example representation
-                self.current_state_window[1] = model_single_representation.copy() # 1 because 0 is the last position (deque moves towards left), which will be its position after append() below
             else:
                 raise Exception(f"Unknown state representation: {self.state_representation}")
 
@@ -1300,6 +1377,16 @@ class MTICLEnv(gym.Env):
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
         self.current_state_window.append(observation)
+
+        if self.state_representation == "model_single_representation+sentence_and_actions":
+            # We need to do it after append() above in order to avoid overwriting the position 1
+
+            src_sentence = self.data[self.translation_candidate][0]
+            model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+
+            assert np.allclose(self.current_state_window[0], np.zeros_like(self.current_state_window[0])), f"Expected position 0 in current_state_window to be zeroed before updating it with model_single_representation: {self.current_state_window[0]}"
+
+            self.current_state_window[0] = model_single_representation.copy() # 1 because 0 is the last position (deque moves towards left), which will be its position after append() below
 
         if terminated or truncated:
             # Compute reward

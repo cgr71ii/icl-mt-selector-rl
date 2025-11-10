@@ -232,8 +232,33 @@ def retrieve():
             return jsonify({"ok": "null", "err": f"Different values: {set(check_l2_norm)}"})
         else:
             check_l2_norm = bool(int(str(check_l2_norm[0])))
+
     except KeyError as e:
-        check_l2_norm = True
+        check_l2_norm = False
+
+    try:
+        knn_always_add_eos_action = utils.string2list(request_method.getlist("knn_always_add_eos_action"))
+
+        if len(set(knn_always_add_eos_action)) != 1:
+            logger.error("Different values: %s", set(knn_always_add_eos_action))
+
+            return jsonify({"ok": "null", "err": f"Different values: {set(knn_always_add_eos_action)}"})
+        else:
+            knn_always_add_eos_action = bool(int(str(knn_always_add_eos_action[0])))
+    except KeyError as e:
+        knn_always_add_eos_action = False
+
+    try:
+        translation_candidate = utils.string2list(request_method.getlist("translation_candidate"))
+
+        if len(translation_candidate) != 1:
+            logger.error("Different values: %s", len(translation_candidate))
+
+            return jsonify({"ok": "null", "err": f"Different values: {len(translation_candidate)}"})
+        else:
+            translation_candidate = translation_candidate[0]
+    except KeyError as e:
+        translation_candidate = None
 
     if len(embedding) != 1:
         logger.error("Different values: %s", len(embedding))
@@ -268,7 +293,7 @@ def retrieve():
 
     # Apply
     results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings,
-                                               check_l2_norm=check_l2_norm)
+                                               check_l2_norm=check_l2_norm, add_eos_action=knn_always_add_eos_action, translation_candidate=translation_candidate)
     results = {"results": results, "D": D, "I": I}
     results = pickle.dumps(results)
     results = base64.b64encode(results).decode() # base64 tensor
@@ -279,7 +304,7 @@ def retrieve():
     })
 
 def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=True,
-                               translation_candidate=None, check_l2_norm=False):
+                               translation_candidate=None, check_l2_norm=False, add_eos_action=False):
     """
         observations: states from which proto_actions were generated
     """
@@ -294,6 +319,10 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     debug = global_conf["debug"]
     proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=check_l2_norm)
     results = []
+    _add_eos_action = add_eos_action and k > 1
+
+    if _add_eos_action:
+        k -= 1
 
     assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
     assert isinstance(k, int), k
@@ -304,6 +333,32 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         logger.warn("Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
 
     D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
+
+    if _add_eos_action:
+        # Add EOS action to the results
+        eos_representation = str2representation[eos_token_str].copy()
+
+        assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == action_dim, f"Expected EOS representation shape to be ({action_dim},), got {eos_representation.shape}"
+
+        eos_representation = np.tile(eos_representation, (proto_actions.shape[0], 1)) # (batch_size, action_dim)
+
+        assert eos_representation.shape == proto_actions.shape, f"Expected tiled EOS representation shape to be {proto_actions.shape}, got {eos_representation.shape}"
+
+        D_eos = np.linalg.norm(proto_actions - eos_representation, axis=1, keepdims=True) # we assume euclidean distance
+        expected_eos_index = len(urls_representation) - 1
+
+        assert D_eos.shape == (proto_actions.shape[0], 1), f"Expected D_eos.shape to be {(proto_actions.shape[0], 1)}, got {D_eos.shape}"
+        assert urls_representation[expected_eos_index] == eos_token_str, f"Expected last element in urls_representation to be EOS token string ({eos_token_str}), got {urls_representation[expected_eos_index]}"
+
+        I_eos = np.full((proto_actions.shape[0], 1), expected_eos_index) # Index for EOS action
+
+        # Add to D and I
+        D = np.hstack((D, D_eos))
+        I = np.hstack((I, I_eos))
+
+        # Restore k value
+        k += 1
+
     expected_shape = (proto_actions.shape[0], k)
 
     assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
