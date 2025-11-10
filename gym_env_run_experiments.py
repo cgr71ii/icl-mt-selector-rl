@@ -216,14 +216,9 @@ if __name__ == "__main__":
     # Other kwargs
     parsed_kwargs_training = {}
     #parsed_kwargs_training["initial_time_sleep"] = num_envs * 2 # sleep to synchronize all environments
-    #parsed_kwargs_training["prob_add_saturated_action"] = 1.0 # vectorized environment, so it does not work
-    #parsed_kwargs_training["add_saturated_action_k"] = k
     parsed_kwargs_training["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
     parsed_kwargs_training_dummy = {}
-    #parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 100000
-    #parsed_kwargs_training_dummy["prob_add_saturated_action"] = 1.0 # vectorized environment, so it does not work
-    #parsed_kwargs_training_dummy["add_saturated_action_k"] = k
     parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
 
@@ -292,8 +287,8 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))

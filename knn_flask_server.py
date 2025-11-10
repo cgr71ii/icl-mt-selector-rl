@@ -134,15 +134,6 @@ def insert_embedding():
 
         return jsonify({"ok": "null", "err": f"Different sizes: {len(embedding)} vs {len(src_sentence)}"})
 
-    saturated_v = set()
-
-    for _str in src_sentence:
-        saturated_v.add(_str.startswith("random_saturated_") or _str.startswith("saturated_vector_env_"))
-
-    if len(saturated_v) != 1:
-        return jsonify({"ok": "null", "err": f"Unexpected saturated value: {len(saturated_v)}"})
-
-    saturated_v = list(saturated_v)[0]
     initial_n = len(embedding)
     str2representation = global_conf["str2representation"]
     skip_idxs = {idx for idx, _str in enumerate(src_sentence) if _str in str2representation}
@@ -156,23 +147,6 @@ def insert_embedding():
         if len(e) != global_conf["dim"]:
             return jsonify({"ok": "null", "err": f"Expected len(shape) to be {global_conf['dim']}, got {len(e)}"})
 
-    if saturated_v:
-        # we assume that all vectors have to be the same (due to add_saturated_action_k)
-        add_saturated_action_storage = global_conf["add_saturated_action_storage"]
-        str_key = [','.join(map(str, v.astype(np.int64).tolist())) for v in embedding]
-        str_key_seen = [s in add_saturated_action_storage for s in str_key] # pre-compute because different saturated vectors can be sent at once
-
-        #for idx, saturated_vector in enumerate(embedding[1:]):
-            #assert np.isclose(saturated_vector, embedding[0]).all() # Not always true anymore because several saturated vectors can be sent at once
-
-        for idx, saturated_vector in enumerate(embedding):
-            assert np.isclose(np.abs(saturated_vector).sum(), np.prod(saturated_vector.shape)), f"{np.abs(saturated_vector).sum()} vs {np.prod(saturated_vector.shape)}"
-
-            if str_key_seen[idx]:
-                skip_idxs.add(idx)
-
-            add_saturated_action_storage.add(str_key[idx])
-
     src_sentence = [_str for idx, _str in enumerate(src_sentence) if idx not in skip_idxs]
     embedding = [e for idx, e in enumerate(embedding) if idx not in skip_idxs]
 
@@ -181,7 +155,7 @@ def insert_embedding():
 
         str2representation[_str] = e
 
-    logger.debug("Got %d embeddings (saturated: %s): inserting %d", initial_n, saturated_v, len(embedding))
+    logger.debug("Got %d embeddings: inserting %d", initial_n, len(embedding))
 
     if len(embedding) > 0:
         embedding = np.array(embedding, dtype=np.float32)
@@ -248,6 +222,19 @@ def retrieve():
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
+    # Optional parameters
+    try:
+        check_l2_norm = utils.string2list(request_method.getlist("check_l2_norm"))
+
+        if len(set(check_l2_norm)) != 1:
+            logger.error("Different values: %s", set(check_l2_norm))
+
+            return jsonify({"ok": "null", "err": f"Different values: {set(check_l2_norm)}"})
+        else:
+            check_l2_norm = bool(int(str(check_l2_norm[0])))
+    except KeyError as e:
+        check_l2_norm = True
+
     if len(embedding) != 1:
         logger.error("Different values: %s", len(embedding))
 
@@ -280,7 +267,8 @@ def retrieve():
     logger.debug("Got %d embeddings", len(embedding))
 
     # Apply
-    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings)
+    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings,
+                                               check_l2_norm=check_l2_norm)
     results = {"results": results, "D": D, "I": I}
     results = pickle.dumps(results)
     results = base64.b64encode(results).decode() # base64 tensor
@@ -290,7 +278,8 @@ def retrieve():
         "err": "null",
     })
 
-def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False, translation_candidate=None):
+def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False,
+                               translation_candidate=None, check_l2_norm=False):
     """
         observations: states from which proto_actions were generated
     """
@@ -306,7 +295,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     eos_token_str = global_conf["eos_token_str"]
     action_dim = global_conf["dim"]
     debug = global_conf["debug"]
-    proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with saturated vectors
+    proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=check_l2_norm)
     results = []
 
     assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
@@ -329,7 +318,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
     assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
 
-    _fake_representation_str = global_conf["saturated_action_embedding_name"] # Default representation if no hits are found
+    _fake_representation_str = global_conf["eos_token_str"] # Default representation if no hits are found
     _fake_representation = _fake_representation_str
 
     # Modify D
@@ -354,7 +343,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
 
             assert isinstance(url, str), f"Expected url to be a string, got {type(url)}: {url}"
 
-            if url != eos_token_str and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
+            if url != eos_token_str:
                 # Check if we need to remove this hit
                 src_icl_example, trg_icl_example = url.split('\t')
 
@@ -448,33 +437,12 @@ def main(args):
     # Global variables
     global_conf["dim"] = args.dim
     global_conf["eos_token_str"] = args.eos_token_str
-    global_conf["saturated_action_embedding"] = np.ones((global_conf["dim"],), dtype=np.float32)
-    global_conf["saturated_action_embedding_name"] = f"saturated_vector_env_kNN_special"
     global_conf["embedding_index"] = faiss.IndexFlatL2(global_conf["dim"])
     global_conf["representation"] = {}
     global_conf["representation_item2idx"] = {}
     global_conf["str2representation"] = {}
-    global_conf["add_saturated_action_storage"] = set()
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
-
-    # Add saturated action embedding
-    saturated_action_embedding = global_conf["saturated_action_embedding"]
-    saturated_action_embedding_name = global_conf["saturated_action_embedding_name"]
-    add_saturated_action_storage = global_conf["add_saturated_action_storage"]
-
-    assert len(saturated_action_embedding.shape) == 1
-
-    str_key = ','.join(map(str, saturated_action_embedding.astype(np.int64).tolist()))
-
-    add_saturated_action_storage.add(str_key)
-
-    representations_str = [saturated_action_embedding_name]
-    representations_emb = np.expand_dims(saturated_action_embedding, axis=0).astype(np.float32)
-
-    assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
-
-    global_conf["str2representation"][saturated_action_embedding_name] = representations_emb[0]
 
 #    knn_insert_embedding(representations_str, representations_emb, check_l2_norm=False)
 
