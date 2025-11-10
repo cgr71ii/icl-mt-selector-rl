@@ -248,19 +248,6 @@ def retrieve():
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
-    # Optional parameters
-    try:
-        max_distance_threshold = utils.string2list(request_method.getlist("max_distance_threshold"))
-
-        if len(set(max_distance_threshold)) != 1:
-            logger.error("Different values: %s", set(max_distance_threshold))
-
-            return jsonify({"ok": "null", "err": f"Different values: {set(max_distance_threshold)}"})
-        else:
-            max_distance_threshold = float(max_distance_threshold[0])
-    except KeyError as e:
-        max_distance_threshold = float("inf")
-
     if len(embedding) != 1:
         logger.error("Different values: %s", len(embedding))
 
@@ -293,7 +280,7 @@ def retrieve():
     logger.debug("Got %d embeddings", len(embedding))
 
     # Apply
-    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings, max_distance_threshold=max_distance_threshold)
+    results, D, I = get_closest_neighbors_urls(embedding, k=k, get_representations_instead_of_embeddings=get_representations_instead_of_embeddings)
     results = {"results": results, "D": D, "I": I}
     results = pickle.dumps(results)
     results = base64.b64encode(results).decode() # base64 tensor
@@ -303,7 +290,7 @@ def retrieve():
         "err": "null",
     })
 
-def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False, translation_candidate=None, max_distance_threshold="inf"):
+def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_of_embeddings=True, remove_overlapping_actions=False, translation_candidate=None):
     """
         observations: states from which proto_actions were generated
     """
@@ -321,7 +308,6 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     debug = global_conf["debug"]
     proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=action_dim, check_l2_norm=False) # check_l2_norm=True -> conflict with saturated vectors
     results = []
-    max_distance_threshold = float(max_distance_threshold)
 
     assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
     assert isinstance(k, int), k
@@ -382,16 +368,6 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
                     d_modified_idxs.append((idx1, idx2))
 
                     continue # do not add this entry
-
-            if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
-                logger.debug("Removing distant action: distance: %s > %s", value_distance, max_distance_threshold)
-
-                d[idx2] = -400.0 - value_distance
-                i[idx2] = -4
-
-                d_modified_idxs.append((idx1, idx2))
-
-                continue # do not add this entry
 
             results[-1].append(url)
 

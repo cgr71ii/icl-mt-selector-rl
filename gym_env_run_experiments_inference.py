@@ -46,7 +46,6 @@ if __name__ == "__main__":
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["dimensionality_reduction_type"] = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
-    parsed_kwargs["max_distance_threshold"] = parsed_kwargs.get("max_distance_threshold", "inf")
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
 
     # custom
@@ -57,7 +56,6 @@ if __name__ == "__main__":
     #parsed_kwargs["max_data_entries"] = max_data_entries
     #parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     #data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
-    max_distance_threshold = parsed_kwargs["max_distance_threshold"]
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
 
     #assert parsed_kwargs["knn_api_retrieve"] is not None
@@ -67,11 +65,9 @@ if __name__ == "__main__":
     # TODO use following code?
     #parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     #parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
-    #parsed_kwargs_training_dummy["max_distance_threshold"] = parsed_kwargs["max_distance_threshold"]
 
     #del parsed_kwargs["knn_api_retrieve"]
     #del parsed_kwargs["knn_api_insert"]
-    #del parsed_kwargs["max_distance_threshold"]
 
     env_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
 
@@ -89,7 +85,7 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    #retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, max_distance_threshold=max_distance_threshold, debug=True)[0] # Get only the result, not I or D
+    #retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0]
     net_arch = {
         "pi": [400, 300],

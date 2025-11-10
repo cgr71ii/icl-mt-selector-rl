@@ -214,7 +214,6 @@ class MTICLEnv(gym.Env):
         self.prob_add_saturated_action = utils.dict_or_default(kwargs, "prob_add_saturated_action", 0.0)
         self.add_saturated_action_k = utils.dict_or_default(kwargs, "add_saturated_action_k", 1)
         self.add_saturated_action_storage = set()
-        self.max_distance_threshold = utils.dict_or_default(kwargs, "max_distance_threshold", "inf")
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
@@ -222,9 +221,6 @@ class MTICLEnv(gym.Env):
         assert self.state_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"State dimension {self.state_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.action_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"Action dimension {self.action_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
         assert self.dimensionality_reduction_type in ("fixed_orthogonal_projection", "iterative_nonoverlapping_average"), self.dimensionality_reduction_type
-
-        if self.is_eval_env and self.max_distance_threshold != "inf":
-            self.logger_wrapper(gym.logger.warning, "This is an evaluation environment, but max_distance_threshold is not 'inf': %s", self.max_distance_threshold)
 
         if self.prob_add_saturated_action > 0.0:
             assert self.prob_add_saturated_action <= 1.0, self.prob_add_saturated_action
@@ -298,7 +294,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1, add_saturated_action=self.prob_add_saturated_action > 0.0, max_distance_threshold=self.max_distance_threshold)
+        action_url, action_url_distance, action_url_idx = self.knn_callback(np.expand_dims(action, axis=0), k=1, add_saturated_action=self.prob_add_saturated_action > 0.0)
         valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
@@ -1105,7 +1101,7 @@ class MTICLEnv(gym.Env):
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
                                    _index=None, _urls_representation=None, _urls_representation_are_embeddings=False,
-                                   remove_overlapping_actions=True, add_saturated_action=False, max_distance_threshold="inf", debug=False):
+                                   remove_overlapping_actions=True, add_saturated_action=False, debug=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -1213,7 +1209,6 @@ class MTICLEnv(gym.Env):
                 ("embedding", _action),
                 ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
                 ("k", str(k)),
-                ("max_distance_threshold", str(max_distance_threshold)),
             ]
 
             response = requests.post(self.knn_api_retrieve, data=payload)
@@ -1239,7 +1234,6 @@ class MTICLEnv(gym.Env):
         results = []
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
-        max_distance_threshold = float(max_distance_threshold)
 
         assert observations is None, "You only need this argument if you want to reconstruct the index based on previous observations, which is not implemented yet"
 
@@ -1303,16 +1297,6 @@ class MTICLEnv(gym.Env):
                         d_modified_idxs.append((idx1, idx2))
 
                         continue # do not add this entry
-
-                if value_distance > max_distance_threshold and not url.startswith("random_saturated_") and not url.startswith("saturated_vector_env_"):
-                    self.logger_wrapper(gym.logger.debug, "Removing distant action: %s (distance: %s > %s)", url, value_distance, max_distance_threshold)
-
-                    d[idx2] = -400.0 - value_distance
-                    i[idx2] = -4
-
-                    d_modified_idxs.append((idx1, idx2))
-
-                    continue # do not add this entry
 
                 results[-1].append(url)
 

@@ -176,7 +176,6 @@ if __name__ == "__main__":
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
     dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256)
     repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
-    max_distance_threshold = parsed_kwargs.get("max_distance_threshold", "inf")
     dimensionality_reduction_type = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
@@ -200,9 +199,6 @@ if __name__ == "__main__":
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
-    #max_distance_threshold = 100.0 if "max_distance_threshold" not in parsed_kwargs else max_distance_threshold # TODO remove
-    #max_distance_threshold = 8.0 if "max_distance_threshold" not in parsed_kwargs else max_distance_threshold # TODO remove
-    parsed_kwargs["max_distance_threshold"] = max_distance_threshold
 
     assert parsed_kwargs["knn_api_retrieve"] is not None
     assert parsed_kwargs["knn_api_insert"] is not None
@@ -224,18 +220,15 @@ if __name__ == "__main__":
     #parsed_kwargs_training["add_saturated_action_k"] = k
     parsed_kwargs_training["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
-    parsed_kwargs_training["max_distance_threshold"] = parsed_kwargs["max_distance_threshold"]
     parsed_kwargs_training_dummy = {}
     #parsed_kwargs_training_dummy["add_n_random_saturated_actions"] = 100000
     #parsed_kwargs_training_dummy["prob_add_saturated_action"] = 1.0 # vectorized environment, so it does not work
     #parsed_kwargs_training_dummy["add_saturated_action_k"] = k
     parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
-    parsed_kwargs_training_dummy["max_distance_threshold"] = parsed_kwargs["max_distance_threshold"]
 
     del parsed_kwargs["knn_api_retrieve"]
     del parsed_kwargs["knn_api_insert"]
-    del parsed_kwargs["max_distance_threshold"]
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
@@ -299,8 +292,8 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, max_distance_threshold=max_distance_threshold)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, max_distance_threshold=max_distance_threshold, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, add_saturated_action=False, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
