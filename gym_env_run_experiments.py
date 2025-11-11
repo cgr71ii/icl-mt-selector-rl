@@ -180,7 +180,7 @@ if __name__ == "__main__":
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
     knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True) # TODO remove?
-    apply_rws_inference = parsed_kwargs.get("apply_rws_inference", True) # TODO remove?
+    apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
 
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
@@ -202,12 +202,9 @@ if __name__ == "__main__":
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
-    parsed_kwargs["apply_rws_inference"] = apply_rws_inference
 
     #assert parsed_kwargs["knn_api_retrieve"] is not None
     #assert parsed_kwargs["knn_api_insert"] is not None
-
-    del parsed_kwargs["apply_rws_inference"]
 
     # Some values
     #k = 0.01
@@ -411,8 +408,8 @@ if __name__ == "__main__":
         train_freq=1,
         buffer_size=replay_buffer_size,
         action_noise=action_noise,
-        #lambda_penalty=1e-3,
-        lambda_penalty=1e-1,
+        lambda_penalty=1e-3,
+        #lambda_penalty=1e-1,
         #lambda_penalty=1e-2,
         #lambda_penalty=0.0, # TODO does the actor saturate the representation when disabled? it seems so, but the results are better somehow
         max_grad_norm=1.0,
@@ -442,6 +439,9 @@ if __name__ == "__main__":
         deterministic=True,
         render=False,
         verbose=1,
+        predict_kwargs={
+            "knn_callback": retrieve_embeddings_dev,
+        }
     ))
     callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
         save_freq=save_freq,

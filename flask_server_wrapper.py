@@ -1,5 +1,5 @@
 
-def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False, num_beams=4):
+def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False, num_beams=4, max_new_tokens=256):
     import os
     import sys
     import logging
@@ -32,6 +32,7 @@ def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/L
 #        "--disable-streamer", # It should be enabled for crawls of multiple websites, but disabled for a few websites
         "--num-beams", str(num_beams),
         "--store-translations",
+        "--max-new-tokens", str(max_new_tokens),
         "--debug",
     ])
 

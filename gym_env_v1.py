@@ -253,24 +253,15 @@ class MTICLEnv(gym.Env):
         translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
         translation_candidate_observation[0, -1 * translation_candidate_actual_representation.shape[0]:] = translation_candidate_actual_representation # put actual representation at the end due to deque behavior (right append)
         action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation)
-        valid_idx = 0
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
-
-        if self.src_data_overlap_src_icl_examples > 0:
-            assert action_url_distance.shape == (1, 2), action_url_distance.shape
-            assert action_url_idx.shape == (1, 2), action_url_idx.shape
-
-            if (action_url_idx[0][0] in (-2, -3)) ^ (action_url_idx[0][1] in (-2, -3)):
-                valid_idx = 1 if action_url_idx[0][0] in (-2, -3) else 0
-        else:
-            assert action_url_distance.shape == (1, 1), action_url_distance.shape
-            assert action_url_idx.shape == (1, 1), action_url_idx.shape
+        assert action_url_distance.shape == (1, 1), action_url_distance.shape
+        assert action_url_idx.shape == (1, 1), action_url_idx.shape
 
         action_url = action_url[0][0]
-        action_url_distance = action_url_distance[0][valid_idx]
-        action_url_idx = np.array([[action_url_idx[0,valid_idx]]])
+        action_url_distance = action_url_distance[0][0]
+        action_url_idx = np.array([[action_url_idx[0,0]]])
 
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
 
@@ -1027,46 +1018,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(k, int), k
         assert k > 0, "k must be greater than 0"
 
-        if self.knn_api_retrieve is not None:
-            _action = pickle.dumps(proto_actions)
-            _action = base64.b64encode(_action).decode() # base64 tensor
-            payload = [
-                ("embedding", _action),
-                ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
-                ("k", str(k)),
-                ("check_l2_norm", '1' if check_l2_norm else '0'),
-                ("knn_always_add_eos_action", '1' if self.knn_always_add_eos_action else '0'),
-            ]
-            # TODO add translation_candidate to knn api?
-
-            response = requests.post(self.knn_api_retrieve, data=payload)
-
-            assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty"
-
-            response_text = json.loads(response.text)
-
-            assert response_text["err"] == "null", f"Response error: {response_text['err']}"
-
-            response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
-            response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
-            results = response_result["results"]
-            D = response_result["D"]
-            I = response_result["I"]
-
-            if not get_representations_instead_of_embeddings:
-                results = results.to(self.device)
-
-            return results, D, I
-
-        results = []
-        index = self.embeddings_index if _index is None else _index
-        urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
-        _add_eos_action = self.knn_always_add_eos_action and k > 1
         translation_candidate = None
-
-        if _add_eos_action:
-            k -= 1
 
         if observations is not None:
             # get translation_candidate from observations
@@ -1103,18 +1055,74 @@ class MTICLEnv(gym.Env):
                 i_overlap = I_overlap[0]
 
                 assert len(d_overlap) == 1 and len(i_overlap) == 1, f"Expected single result from src_sentences_index search, got distances {d_overlap} and indices {i_overlap}"
-                assert d_overlap[0] < 1e-5 and i_overlap[0] >= 0, f"Expected to find overlapping source sentence in src_sentences_index, got distance {d_overlap[0]} and index {i_overlap[0]}: {_observation2} vs {_observation}"
+                assert i_overlap[0] >= 0, f"Expected to find overlapping source sentence in src_sentences_index, got distance {d_overlap[0]} and index {i_overlap[0]}: {_observation2} vs {_observation}"
 
                 src_sentence = self.data[i_overlap[0]][0]
+                _observation3 = self.str2representation[src_sentence]
+                atol = 1e-3
+                rtol = 1e-3
+                check1 = np.allclose(_observation2, _observation3, atol=atol, rtol=rtol) # np.allclose is not symmetric!
+                check2 = np.allclose(_observation3, _observation2, atol=atol, rtol=rtol)
+
+                if not check1 and not check2:
+                    allclose_left_part = np.absolute(_observation2 - _observation3)
+                    allclose_right_part1 = atol + rtol * np.absolute(_observation2)
+                    allclose_right_part2 = atol + rtol * np.absolute(_observation3)
+                    allclose_non_assert_part1 = allclose_left_part > allclose_right_part1
+                    allclose_non_assert_part2 = allclose_left_part > allclose_right_part2
+
+                    self.logger_wrapper(gym.logger.error, "Found source sentence with non-matching representation (index distance: %s): representation from index %s " \
+                                                          "vs representation from str2representation %s for src_sentence %s", d_overlap[0], _observation2, _observation3, src_sentence)
+                    self.logger_wrapper(gym.logger.error, "_observation: %s", _observation)
+                    self.logger_wrapper(gym.logger.error, "Non-matching values (1): %s and %s", _observation2[allclose_non_assert_part1], _observation3[allclose_non_assert_part1])
+                    self.logger_wrapper(gym.logger.error, "Non-matching values (2): %s and %s", _observation2[allclose_non_assert_part2], _observation3[allclose_non_assert_part2])
+
+                    assert check1 or check2
+
                 translation_candidate.append(src_sentence)
 
-                #if d_overlap[0] < 1e-5 and i_overlap[0] >= 0:
-                #    src_sentence = self.data[i_overlap[0]][0]
-                #    translation_candidate.append(src_sentence)
-                #else:
-                #    translation_candidate.append(None)
+                #self.logger_wrapper(gym.logger.debug, "Translation candidate kNN #%d: %s", idx, translation_candidate[-1])
 
-                self.logger_wrapper(gym.logger.info, "Translation candidate kNN #%d: %s", idx, translation_candidate[-1])
+        if self.knn_api_retrieve is not None:
+            _action = pickle.dumps(proto_actions)
+            _action = base64.b64encode(_action).decode() # base64 tensor
+            payload = [
+                ("embedding", _action),
+                ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
+                ("k", str(k)),
+                ("check_l2_norm", '1' if check_l2_norm else '0'),
+                ("knn_always_add_eos_action", '1' if self.knn_always_add_eos_action else '0'),
+            ]
+
+            if translation_candidate is not None:
+                assert len(translation_candidate) == 1, translation_candidate # I'm not sure
+
+                payload.append(("translation_candidate", translation_candidate[0]))
+
+            response = requests.post(self.knn_api_retrieve, data=payload)
+
+            assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
+            assert len(response.text) > 0, f"Response text is empty"
+
+            response_text = json.loads(response.text)
+
+            assert response_text["err"] == "null", f"Response error: {response_text['err']}"
+
+            response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
+            response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+            results = response_result["results"]
+            D = response_result["D"]
+            I = response_result["I"]
+
+            if not get_representations_instead_of_embeddings:
+                results = results.to(self.device)
+
+            return results, D, I
+
+        results = []
+        index = self.embeddings_index if _index is None else _index
+        urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
+        _add_eos_action = self.knn_always_add_eos_action and k > 1
 
         if index.ntotal == 0:
             # Faiss index is empty
@@ -1127,47 +1135,26 @@ class MTICLEnv(gym.Env):
         if translation_candidate is not None:
             assert len(translation_candidate) == proto_actions.shape[0] == D.shape[0], f"Expected translation_candidate length to be equal to proto_actions first dimension ({proto_actions.shape[0]} == {D.shape[0]}), got {len(translation_candidate)}"
 
-        if _add_eos_action:
-            # Add EOS action to the results
-            eos_representation = self.str2representation[self.eos_token_str].copy()
+        eos_representation = self.str2representation[self.eos_token_str].copy()
+        expected_eos_index = len(urls_representation) - 1
 
-            assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == self.action_dim, f"Expected EOS representation shape to be ({self.action_dim},), got {eos_representation.shape}"
-
-            eos_representation = np.tile(eos_representation, (proto_actions.shape[0], 1)) # (batch_size, action_dim)
-
-            assert eos_representation.shape == proto_actions.shape, f"Expected tiled EOS representation shape to be {proto_actions.shape}, got {eos_representation.shape}"
-
-            D_eos = np.linalg.norm(proto_actions - eos_representation, axis=1, keepdims=True) # we assume euclidean distance
-            expected_eos_index = len(urls_representation) - 1
-
-            assert D_eos.shape == (proto_actions.shape[0], 1), f"Expected D_eos.shape to be {(proto_actions.shape[0], 1)}, got {D_eos.shape}"
-            assert urls_representation[expected_eos_index] == self.eos_token_str, f"Expected last element in urls_representation to be EOS token string ({self.eos_token_str}), got {urls_representation[expected_eos_index]}"
-
-            I_eos = np.full((proto_actions.shape[0], 1), expected_eos_index) # Index for EOS action
-
-            # Add to D and I
-            D = np.hstack((D, D_eos))
-            I = np.hstack((I, I_eos))
-
-            # Restore k value
-            k += 1
+        assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == self.action_dim, f"Expected EOS representation shape to be ({self.action_dim},), got {eos_representation.shape}"
+        assert eos_representation.shape == proto_actions.shape[1:], f"Expected tiled EOS representation shape to be {proto_actions[1:].shape}, got {eos_representation.shape}"
+        assert urls_representation[expected_eos_index] == self.eos_token_str, f"Expected last element in urls_representation to be EOS token string ({self.eos_token_str}), got {urls_representation[expected_eos_index]}"
 
         expected_shape = (proto_actions.shape[0], k)
 
         assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
         assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
+        assert (D[I == -1] == np.finfo(np.float32).max * np.ones_like(D[I == -1])).all()
 
-        _fake_representation_str = self.eos_token_str # Default representation if no hits are found
-        _fake_representation = _fake_representation_str
-
-        # Modify D
-        D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
         d_modified_idxs = [(_a, _b) for _a, _b in zip(*np.where(I == -1))] if np.any(I == -1) else []
 
         # Obtain representations (str) from kNN idxs
         for idx1, (i, d) in enumerate(zip(I, D)):
             overlapping_hits = 0
             _translation_candidate = None if translation_candidate is None else translation_candidate[idx1]
+            eos_found = False
 
             results.append([])
 
@@ -1175,7 +1162,7 @@ class MTICLEnv(gym.Env):
                 if len(results[-1]) >= k:
                     break
                 if value_idx < 0:
-                    assert i[idx2:] == -1 * np.ones_like(i[idx2:]), f"Expected all remaining indices to be -1, got {i[idx2:]}"
+                    assert (i[idx2:] == -1 * np.ones_like(i[idx2:])).all(), f"Expected all remaining indices to be -1, got {i[idx2:]}"
 
                     break # No more valid indices as -1 values are at the end of the list
 
@@ -1191,24 +1178,42 @@ class MTICLEnv(gym.Env):
                         self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
-                        d[idx2] = -200.0
+                        d[idx2] = np.finfo(np.float32).max
                         i[idx2] = -2
 
                         d_modified_idxs.append((idx1, idx2))
 
-                        continue # do not add this entry
+                        #continue # do not add this entry
+                        # add the entry since it is going to be modified
+                else:
+                    eos_found = True
 
                 results[-1].append(url)
 
             assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
             assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
-            if len(results[-1]) < k:
-                # Add items to avoid tensor errors because dimensions don't match
-                self.logger_wrapper(gym.logger.debug, "Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
+            if (_add_eos_action and not eos_found) or overlapping_hits == 1:
+                # Replace the value with longest distance with EoS
+                longest_dist_idx = d.argmax()
 
-            while len(results[-1]) < k:
-                results[-1].append(_fake_representation)
+                if overlapping_hits == 1:
+                    assert I[idx1][longest_dist_idx] == -2, I[idx1][longest_dist_idx]
+                    assert D[idx1][longest_dist_idx] == np.finfo(np.float32).max, D[idx1][longest_dist_idx]
+
+                D_eos = np.linalg.norm(proto_actions[idx1] - eos_representation, axis=0) # we assume euclidean distance
+                D[idx1][longest_dist_idx] = D_eos
+                I[idx1][longest_dist_idx] = expected_eos_index
+                results[-1][longest_dist_idx] = self.eos_token_str
+
+            if len(results[-1]) < k:
+                # Add items to avoid tensor errors because dimensions don't match (default representation is EoS)
+                assert index.ntotal < k, f"{index.ntotal} >= {k}"
+
+                self.logger_wrapper(gym.logger.debug, "Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), self.eos_token_str)
+
+                while len(results[-1]) < k:
+                    results[-1].append(self.eos_token_str) # Default representation if no hits are found
 
             assert len(results[-1]) == k
 

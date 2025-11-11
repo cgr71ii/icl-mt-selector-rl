@@ -83,7 +83,7 @@ echo "$(date) starting gunicorn server with template: $template_file and model: 
 echo "$(date) num_beams: $num_beams"
 
 # use '--bind "0.0.0.0:$gport"'' to bind to all interfaces and be able to access the server from a different machine (or just use a specific interface)
-gunicorn --bind "127.0.0.1:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(4, 0.2, '$pretrained_model', True, '$num_beams')" &
+gunicorn --bind "127.0.0.1:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(4, 0.2, '$pretrained_model', True, '$num_beams', 192)" &
 pid=$!
 
 echo "$(date) start server: pid $pid"

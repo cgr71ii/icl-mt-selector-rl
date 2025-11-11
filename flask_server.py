@@ -544,6 +544,8 @@ def translate_batch(data):
                 new_prompts_none = 0
 
                 if global_conf["store_translations"]:
+                    all_hits = [utils.get_hash(prompt) in global_conf["store_translations_buffer"] for prompt in prompts]
+
                     for idx, new_prompt in new_prompts_map.items():
                         assert new_prompts_map[idx] is not None
 
@@ -589,9 +591,13 @@ def translate_batch(data):
 
                 if global_conf["store_translations"]:
                     stored = 0
+                    all_hits2 = [utils.get_hash(prompt) in global_conf["store_translations_buffer"] for prompt in prompts]
 
+                    assert all_hits == all_hits2, f"{all_hits} vs {all_hits2}"
                     assert isinstance(prompts, list), type(prompts)
                     assert isinstance(all_outputs, list), type(all_outputs)
+
+                    update_values = {} # we store values to update after checking in order to avoid that a prompt is twice or more, then affecting the conditions below
 
                     for idx, (prompt, output) in enumerate(zip(prompts, all_outputs)):
                         assert isinstance(prompt, str), type(prompt)
@@ -601,13 +607,16 @@ def translate_batch(data):
                             if global_conf["store_translations_buffer"][utils.get_hash(prompt)] != output:
                                 logger.warning("Different results (updating): %s: %s vs %s", prompt, global_conf["store_translations_buffer"][utils.get_hash(prompt)], output)
 
-                            assert new_prompts_map[idx] is None
+                            assert new_prompts_map[idx] is None, f"{idx}: {all_hits2}: {new_prompts_map}: {new_prompts_map[idx]}"
                         else:
                             assert new_prompts_map[idx] is not None
 
                             stored += 1
 
-                        global_conf["store_translations_buffer"][utils.get_hash(prompt)] = output
+                        update_values[utils.get_hash(prompt)] = prompt
+
+                    for k, v in update_values.items():
+                        global_conf["store_translations_buffer"][k] = v
 
                     logger.debug("Storage hits: %d out of %d", storage_hits1, len(prompts))
                     logger.debug("Stored in storage: %d out of %d", stored, len(prompts))

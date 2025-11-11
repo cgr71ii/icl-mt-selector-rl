@@ -321,10 +321,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     results = []
     _add_eos_action = add_eos_action and k > 1
 
-    if _add_eos_action:
-        k -= 1
-
-    assert proto_actions.shape[-1] == action_dim, f"Expected proto_actions last dimension to be {action_dim}, got {proto_actions.shape[-1]}"
+    assert proto_actions == (1, action_dim), f"Expected proto_actions last dimension to be (1, {action_dim}), got {proto_actions}"
     assert isinstance(k, int), k
     assert k > 0, "k must be greater than 0"
 
@@ -333,39 +330,17 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
         logger.warn("Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
 
     D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
+    eos_representation = str2representation[eos_token_str].copy()
+    expected_eos_index = len(urls_representation) - 1
 
-    if _add_eos_action:
-        # Add EOS action to the results
-        eos_representation = str2representation[eos_token_str].copy()
-
-        assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == action_dim, f"Expected EOS representation shape to be ({action_dim},), got {eos_representation.shape}"
-
-        eos_representation = np.tile(eos_representation, (proto_actions.shape[0], 1)) # (batch_size, action_dim)
-
-        assert eos_representation.shape == proto_actions.shape, f"Expected tiled EOS representation shape to be {proto_actions.shape}, got {eos_representation.shape}"
-
-        D_eos = np.linalg.norm(proto_actions - eos_representation, axis=1, keepdims=True) # we assume euclidean distance
-        expected_eos_index = len(urls_representation) - 1
-
-        assert D_eos.shape == (proto_actions.shape[0], 1), f"Expected D_eos.shape to be {(proto_actions.shape[0], 1)}, got {D_eos.shape}"
-        assert urls_representation[expected_eos_index] == eos_token_str, f"Expected last element in urls_representation to be EOS token string ({eos_token_str}), got {urls_representation[expected_eos_index]}"
-
-        I_eos = np.full((proto_actions.shape[0], 1), expected_eos_index) # Index for EOS action
-
-        # Add to D and I
-        D = np.hstack((D, D_eos))
-        I = np.hstack((I, I_eos))
-
-        # Restore k value
-        k += 1
+    assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == action_dim, f"Expected EOS representation shape to be ({action_dim},), got {eos_representation.shape}"
+    assert eos_representation.shape == proto_actions.shape[1:], f"Expected tiled EOS representation shape to be {proto_actions[1:].shape}, got {eos_representation.shape}"
+    assert urls_representation[expected_eos_index] == eos_token_str, f"Expected last element in urls_representation to be EOS token string ({eos_token_str}), got {urls_representation[expected_eos_index]}"
 
     expected_shape = (proto_actions.shape[0], k)
 
     assert D.shape == expected_shape, f"Expected D.shape to be {expected_shape}, got {D.shape}"
     assert I.shape == expected_shape, f"Expected I.shape to be {expected_shape}, got {I.shape}"
-
-    _fake_representation_str = global_conf["eos_token_str"] # Default representation if no hits are found
-    _fake_representation = _fake_representation_str
 
     # Modify D
     D[I == -1] = -100.0 # Set distance to a negative value for invalid indices
@@ -374,6 +349,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
     # Obtain representations (str) from kNN idxs
     for idx1, (i, d) in enumerate(zip(I, D)):
         overlapping_hits = 0
+        eos_found = False
 
         results.append([])
 
@@ -381,7 +357,7 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
             if len(results[-1]) >= k:
                 break
             if value_idx < 0:
-                assert i[idx2:] == -1 * np.ones_like(i[idx2:]), f"Expected all remaining indices to be -1, got {i[idx2:]}"
+                assert (i[idx2:] == -1 * np.ones_like(i[idx2:])).all(), f"Expected all remaining indices to be -1, got {i[idx2:]}"
 
                 break # No more valid indices as -1 values are at the end of the list
 
@@ -397,24 +373,42 @@ def get_closest_neighbors_urls(proto_actions, k=1, get_representations_instead_o
                     logger.debug("Removing overlapping action: %s", src_icl_example)
 
                     overlapping_hits += 1
-                    d[idx2] = -200.0
+                    d[idx2] = np.finfo(np.float32).max
                     i[idx2] = -2
 
                     d_modified_idxs.append((idx1, idx2))
 
-                    continue # do not add this entry
+                    #continue # do not add this entry
+                    # add the entry since it is going to be modified
+                else:
+                    eos_found = True
 
             results[-1].append(url)
 
         assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
         assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
+        if (_add_eos_action and not eos_found) or overlapping_hits == 1:
+            # Replace the value with longest distance with EoS
+            longest_dist_idx = d.argmax()
+
+            if overlapping_hits == 1:
+                assert I[idx1][longest_dist_idx] == -2, I[idx1][longest_dist_idx]
+                assert D[idx1][longest_dist_idx] == np.finfo(np.float32).max, D[idx1][longest_dist_idx]
+
+            D_eos = np.linalg.norm(proto_actions[idx1] - eos_representation, axis=0) # we assume euclidean distance
+            D[idx1][longest_dist_idx] = D_eos
+            I[idx1][longest_dist_idx] = expected_eos_index
+            results[-1][longest_dist_idx] = eos_token_str
+
         if len(results[-1]) < k:
             # Add items to avoid tensor errors because dimensions don't match
-            logger.debug("Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), _fake_representation_str)
+            assert index.ntotal < k, f"{index.ntotal} >= {k}"
 
-        while len(results[-1]) < k:
-            results[-1].append(_fake_representation)
+            logger.debug("Not enough entries close for entry %d/%d (found: %d): returning %d default representation(s) (%s)", idx1 + 1, len(I), len(results[-1]), k - len(results[-1]), eos_token_str)
+
+            while len(results[-1]) < k:
+                results[-1].append(eos_token_str) # Default representation if no hits are found
 
         assert len(results[-1]) == k
 
