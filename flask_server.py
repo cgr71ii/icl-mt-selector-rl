@@ -7,6 +7,7 @@ import logging
 import inspect
 import argparse
 from threading import Lock
+import shelve
 
 import utils
 import icl_translation as mt_icl
@@ -38,6 +39,48 @@ template_kwargs["zswr_chat_user_template"] = os.environ["MT_ICL_ZSWR_CHAT_USER_T
 template_kwargs["zswr_chat_response_prefix_template"] = os.environ["MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE"] if "MT_ICL_ZSWR_CHAT_RESPONSE_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["zswr_chat_response_prefix_template"].default
 template_kwargs["chat_system_prompt_template"] = os.environ["MT_ICL_CHAT_SYSTEM_PROMPT_TEMPLATE"] if "MT_ICL_CHAT_SYSTEM_PROMPT_TEMPLATE" in os.environ else sig_build_prompt.parameters["chat_system_prompt_template"].default
 template_kwargs["user_prefix_template"] = os.environ["MT_ICL_USER_PREFIX_TEMPLATE"] if "MT_ICL_USER_PREFIX_TEMPLATE" in os.environ else sig_build_prompt.parameters["user_prefix_template"].default
+
+class TranslationCache:
+    def __init__(self, path):
+        self.path = path
+        self.lock = Lock()
+
+        with self.lock:
+            with shelve.open(self.path, 'c') as db:
+                pass # create db if it does not exist
+
+    def __contains__(self, item):
+        with self.lock:
+            with shelve.open(self.path, 'r') as db:
+                return item in db
+
+    def __delitem__(self, key):
+        with self.lock:
+            with shelve.open(self.path, 'c') as db:
+                del db[key]
+
+    def __setitem__(self, key, item):
+        with self.lock:
+            with shelve.open(self.path, 'c') as db:
+                db[key] = item
+
+    def __getitem__(self, key):
+        with self.lock:
+            with shelve.open(self.path, 'r') as db:
+                return db.get(key)
+
+    def __repr__(self):
+        with self.lock:
+            with shelve.open(self.path, 'r') as db:
+                return list(db.keys())
+
+    def __len__(self):
+        with self.lock:
+            with shelve.open(self.path, 'r') as db:
+                return len(db.keys())
+
+    def __iter__(self):
+        raise Exception()
 
 @app.route('/', methods=['GET'])
 def info():
@@ -613,7 +656,7 @@ def translate_batch(data):
 
                             stored += 1
 
-                        update_values[utils.get_hash(prompt)] = prompt
+                        update_values[utils.get_hash(prompt)] = output
 
                     for k, v in update_values.items():
                         global_conf["store_translations_buffer"][k] = v
@@ -795,7 +838,16 @@ def main(args):
     global_conf["lock"] = Lock()
     global_conf["num_beams"] = num_beams
     global_conf["store_translations"] = args.store_translations
+    global_conf["store_translations_shelve_path"] = f"{os.path.dirname(os.path.realpath(__file__)).rstrip('/')}/flask_server.{pretrained_model.replace('/', '_')}.num_beams_{num_beams}.max_new_tokens_{args.max_new_tokens}.shelve_storage"
     global_conf["store_translations_buffer"] = {}
+
+    if global_conf["store_translations"]:
+        if "SHELVE_FILE" in os.environ:
+            global_conf["store_translations_shelve_path"] = os.environ["SHELVE_FILE"]
+
+        logger.info("Translations are being stored/loaded (you can set SHELVE_FILE envvar): %s", global_conf["store_translations_shelve_path"])
+
+        global_conf["store_translations_buffer"] = TranslationCache(global_conf["store_translations_shelve_path"])
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)

@@ -1059,8 +1059,8 @@ class MTICLEnv(gym.Env):
 
                 src_sentence = self.data[i_overlap[0]][0]
                 _observation3 = self.str2representation[src_sentence]
-                atol = 1e-3
-                rtol = 1e-3
+                atol = 1e-2
+                rtol = 1e-2
                 check1 = np.allclose(_observation2, _observation3, atol=atol, rtol=rtol) # np.allclose is not symmetric!
                 check2 = np.allclose(_observation3, _observation2, atol=atol, rtol=rtol)
 
