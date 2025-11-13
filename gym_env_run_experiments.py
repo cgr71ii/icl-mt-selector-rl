@@ -1,6 +1,7 @@
 
 import os
 import sys
+import random
 import logging
 from datetime import datetime
 
@@ -125,10 +126,10 @@ class DelayedEvalCallback(sb3_cb.EvalCallback):
 
         return super()._on_step()
 
-def make_env(rank, env_cls, env_args, env_kwargs, seed=0):
+def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False):
     def _init():
         sys.stderr.flush()
-        env = env_cls(*env_args, **{"_seed": seed + rank, **env_kwargs})
+        env = env_cls(*env_args, **{"_seed": seed + (rank if seed_add_rank else 0) if seed is not None else rank, **env_kwargs})
 
         #env.reset(seed=seed + rank, options={"soft_reset_after_hard_reset": False})
 
@@ -160,33 +161,63 @@ if __name__ == "__main__":
 
     # read data
     data_to_be_translated_training, data_to_be_translated_dev, data_to_be_translated_test = [], [], []
+    data_icl_examples_training, data_icl_examples_dev, data_icl_examples_test = [], [], []
 
     for _file_data, data_to_be_translated in ((file_data_training, data_to_be_translated_training), (file_data_dev, data_to_be_translated_dev), (file_data_test, data_to_be_translated_test)):
         with open(_file_data, "rt") as fd:
             for line in fd:
                 data_to_be_translated.append(line.rstrip("\r\n"))
 
+    for _file_data, data_icl_examples in ((file_data_icl_examples_training, data_icl_examples_training), (file_data_icl_examples_dev, data_icl_examples_dev), (file_data_icl_examples_test, data_icl_examples_test)):
+        with open(_file_data, "rt") as fd:
+            for line in fd:
+                data_icl_examples.append(line.rstrip("\r\n"))
+
     # default values
-    num_envs = parsed_kwargs.get("num_envs", 4)
+    num_envs = max(1, parsed_kwargs.pop("num_envs", 4))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 4)
     #max_icl_examples = 1 # TODO remove
     #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
     state_representation = parsed_kwargs.get("state_representation", "model_single_representation")
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
-    dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256)
+    dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 1)
     repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
     dimensionality_reduction_type = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
-    knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True) # TODO remove?
+    knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
+
+    if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
+        seed = parsed_kwargs.pop("_seed", None)
+
+        if seed is None:
+            seed = parsed_kwargs.pop("seed")
+
+        seed = int(seed)
+    else:
+        seed = 42
+
+    utils.set_random_seed(seed)
+
+    randint_values = (1, 1000)
+    env_seeds = [random.randint(*randint_values) for _ in range(num_envs)]
+
+    for rank in range(1, num_envs):
+        while env_seeds[rank] in env_seeds[:rank]:
+            env_seeds[rank] = random.randint(*randint_values)
+
+    logger.info("Seed: %s (env_seeds: %s)", seed, env_seeds)
+
+    assert len(env_seeds) == len(set(env_seeds)) == num_envs
+    assert not apply_rws_inference, "Biased learning"
 
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
-    #max_data_icl_examples_entries = 100 # TODO remove
     #max_data_entries = 1 # TODO remove
+    #max_data_icl_examples_entries = 100 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
@@ -201,20 +232,24 @@ if __name__ == "__main__":
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
+    data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
+    data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
+    data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
 
     #assert parsed_kwargs["knn_api_retrieve"] is not None
     #assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
-    #k = 0.01
-    #k = 100
-    k = 20
-    #k = 101 # TODO remove
+    k_training = max(1, int(0.1 * len(data_icl_examples_training)))
+    k_dev = max(1, int(0.1 * len(data_icl_examples_dev)))
+    k_test = max(1, int(0.1 * len(data_icl_examples_test)))
 
-    assert isinstance(k, int) # other parameters use k assuming integer instead of float
+    assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
+    assert isinstance(k_dev, int)
+    assert isinstance(k_test, int)
 
-    logger.info("k=%s", k)
+    logger.info("k=(%d, %d, %d)", k_training, k_dev, k_test)
 
     # Other kwargs
     parsed_kwargs_training = {}
@@ -225,56 +260,51 @@ if __name__ == "__main__":
     parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
     parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
 
+    logger.info("parsed_kwargs: %s", parsed_kwargs)
+
     del parsed_kwargs["knn_api_retrieve"]
     del parsed_kwargs["knn_api_insert"]
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
-    save_freq = len(data_to_be_translated_training) * max_icl_examples // num_envs # steps (save model approx. once per epoch)
-    eval_freq = len(data_to_be_translated_training) // 2 * max_icl_examples // num_envs # steps
-    save_freq = 1e1000 # TODO remove
-    eval_freq = 50 # TODO remove
-    #eval_freq = 10 # TODO remove
+    #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
+    save_freq = 1e1000 # disabled
+    eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
     save_path = f"./rl_models_{filename_time}/"
-    name_prefix = f"rl_model_{filename_time}"
+    name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
-    max_episodes_epochs = 10 # repeat N times
-    max_episodes_epochs = 10000 # TODO remove
+    max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
 
     logger.info("Save path: %s", save_path)
+    logger.info("Evaluation frequency (steps): %d", eval_freq)
 
     # Environment
     env_class = MTICLEnv
-    #env_eval_class = MTICLEvalSingleEpisodeEnv
     env_eval_dev_class = MTICLEvalEnv
     env_eval_test_class = MTICLEvalEnv
-    #vec_env_class = DummyVecEnv
+    #vec_env_class = DummyVecEnv # debug
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     batch_size = 256
-#    batch_size = 512
     net_arch = {
         "pi": [400, 300],
 #        "pi": [1024, 512, 1024],
         "qf": [400, 300]
-    } # paper architecture ("pi" is actor and "qf" the critic)
+    } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
     replay_buffer_size = 1000000
-    #replay_buffer_size = 100000
-    seed = 42
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
     critic_learning_rate = 1e-4
     actor_learning_rate = 1e-4
-    #init_training_episodes = 1000
-    #init_training_episodes = 500 # TODO remove
-    init_training_episodes = 100 # TODO remove
-    #max_steps = max_episodes * max_icl_examples
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
-    init_training_steps = init_training_episodes * max_icl_examples
+    init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
+
+    logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
+
     #env = env_class(src_lang, trg_lang, file_data_training, file_data_icl_examples_training, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
@@ -283,43 +313,24 @@ if __name__ == "__main__":
     env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
 
     parsed_kwargs_training["initial_sample_list_actions"] = [env_training_dummy.str2representation[k] for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
-    env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=42) for rank in range(num_envs)], **vec_env_kwargs)
+    env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0]
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
-    #normal_action_noise = None
-    #pool_action_noise = VectorFromPoolActionNoise(np.array(env_training_dummy.random_vectors, copy=True)) # force bad actions with small probability
-
-    #del env_training_dummy.random_vectors
-
-    #action_noise = SelectActionNoiseFromList([normal_action_noise, pool_action_noise], p=[0.95, 0.05])
     action_noise = normal_action_noise
-
-    #assert action_noise is None, "Action noise should not be used for Wolpertinger policy due to the discretization of the action space (target action noise during TD3 algorithm is different)"
-    # I modified the code to add the action_noise before kNN
-
     callbacks = []
     #model_class = DDPG
     model_class = TD3
-    #model = DDPG(
     td3_args = {
         "policy_delay": 2,
-        #"target_policy_noise": 0.2, # default value in TD3 -> it diverges due to too much noise for our setting of discrete actions
-        #"target_noise_clip": 0.5, # default value in TD3
-        #"target_policy_noise": 0.0, # TODO remove noise? target policy noise may not make sense with Wolpertinger policy (but then generalization may be worse to different data...)
-        #"target_policy_noise": 0.1,
-        #"target_noise_clip": 0.25,
-        #"target_policy_noise": 0.01,
-        #"target_noise_clip": 0.1,
-        #"target_noise_clip": 0.0, # disable temporarily for debug purposes TODO enable with small values for better generalization and robustness
-        "target_policy_noise": 1e-3,
-        "target_noise_clip": 2e-3,
+        "target_policy_noise": 1e-3, # small values for better generalization and robustness
+        "target_noise_clip": 2e-3, # small values for better generalization and robustness
     } if model_class is TD3 else {}
     actor_transformer_args_and_kwargs = {
         "d_model": 512,
@@ -328,7 +339,7 @@ if __name__ == "__main__":
         "nlayers": 3,
         "max_seq_len": 16,
         "projection_in": model_hidden_size,
-        #"l2_norm": True, # disable and let l2 norm penalty handle it to improve stability through regularization
+        #"l2_norm": True, # disable to let the model learn how the representation should be
         "str_id": "actor",
     }
     critic_transformer_args_and_kwargs = {
@@ -389,7 +400,7 @@ if __name__ == "__main__":
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_training,
             "callback_retrieve_knn_training": retrieve_embeddings_training_training,
-            "k": k,
+            "k": k_training,
             "add_all_knn_to_batch": True, # Faster
             #"add_all_knn_to_batch": False, # Better avoid due to removal of overlapping actions
             "apply_rws_inference": apply_rws_inference,
@@ -401,17 +412,10 @@ if __name__ == "__main__":
         gamma=gamma,
         device=device,
         gradient_steps=-1 if num_envs > 1 else 1, # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
-        #gradient_steps=1,
-        #train_freq=(1, "step"),
-        #train_freq=(batch_size, "step"),
-        #train_freq=(1, "episode"), # config in the wolpertinger policy paper
-        train_freq=1,
+        train_freq=(1, "step"),
         buffer_size=replay_buffer_size,
         action_noise=action_noise,
-        lambda_penalty=1e-3,
-        #lambda_penalty=1e-1,
-        #lambda_penalty=1e-2,
-        #lambda_penalty=0.0, # TODO does the actor saturate the representation when disabled? it seems so, but the results are better somehow
+        lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_target_policy_actor_noise=0.1,
@@ -447,8 +451,9 @@ if __name__ == "__main__":
         save_freq=save_freq,
         save_path=save_path,
         name_prefix=name_prefix,
-        save_replay_buffer=True,
-        verbose=1,
+        save_replay_buffer=False, # too much disk...
+        save_vecnormalize=True,
+        verbose=2,
     ))
     callbacks.append(sb3_cb.StopTrainingOnMaxEpisodes(
         max_episodes=max_episodes,
@@ -459,6 +464,12 @@ if __name__ == "__main__":
 
     # Train
     model.learn(max_steps, log_interval=1, callback=callback)
+
+    # Store last version (adapted from CheckpointCallback)
+    model.save(os.path.join(save_path, f"{name_prefix}_last-step_model.zip"))
+    #model.save_replay_buffer(os.path.join(save_path, f"{name_prefix}_last-step_replay-buffer.pkl")) # too much disk...
+    if model.get_vec_normalize_env() is not None:
+        model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_last-step_vecnormalize.pkl"))
 
     # Evaluate
     best_model_path = os.path.join(save_path, "best_model.zip")
@@ -477,7 +488,7 @@ if __name__ == "__main__":
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_dev,
             "callback_retrieve_knn_training": None,
-            "k": k,
+            "k": k_dev,
             "add_all_knn_to_batch": True, # Faster
             "apply_rws_inference": False,
             **policy_actor_kwargs,
@@ -502,7 +513,7 @@ if __name__ == "__main__":
 
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, observations=observations)[0]
+    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
@@ -512,7 +523,7 @@ if __name__ == "__main__":
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_test,
             "callback_retrieve_knn_training": None,
-            "k": k,
+            "k": k_test,
             "add_all_knn_to_batch": True, # Faster
             "apply_rws_inference": False,
             **policy_actor_kwargs,
