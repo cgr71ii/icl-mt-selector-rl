@@ -8,7 +8,9 @@ import requests
 def encode_base64(s):
     return base64.b64encode(s.encode('utf-8')).decode('utf-8')
 
-def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, icl_example_equal_to_src=True):
+def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, avoid_icl_example_equal_to_src=True):
+    assert len(icl_examples_pool) > icl_num_examples, f"icl_examples_pool must contain more examples than icl_num_examples (at least, one more) to guarantee that is possible to sample a different src sentence: {len(icl_examples_pool)} vs {icl_num_examples}"
+
     for i in range(0, len(lst), batch_size):
         icl_examples = []
         bsz = len(lst[i:i+batch_size])
@@ -17,14 +19,12 @@ def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, icl_ex
             while True:
                 _icl_examples = random.sample(icl_examples_pool, icl_num_examples) if icl_examples_pool is not None and icl_num_examples > 0 else []
 
-                if icl_example_equal_to_src and len(_icl_examples) > 0:
+                if avoid_icl_example_equal_to_src and len(_icl_examples) > 0:
                     src_sentence = lst[i + j].strip()
                     src_icl_examples = {icl_src_example.strip() for icl_src_example, _ in _icl_examples}
 
                     if src_sentence not in src_icl_examples:
                         break
-                    else:
-                        assert len(icl_examples_pool) > icl_num_examples, f"icl_examples_pool must contain more examples than icl_num_examples (at least, one more) to guarantee that is possible to sample a different src sentence: {len(icl_examples_pool)} vs {icl_num_examples}"
                 else:
                     break
 
@@ -43,7 +43,16 @@ def main():
     seed = sys.argv[6] if len(sys.argv) > 6 else None # default random seed
     server_port = sys.argv[7] if len(sys.argv) > 7 else "8000"
 
+    assert icl_num_examples >= 0, f"icl_num_examples must be non-negative, got: {icl_num_examples}"
+
     random.seed(seed)
+
+    msg = f"Using {icl_num_examples} ICL examples per sentence"
+
+    if icl_num_examples == 0:
+        msg += ": zero-shot setting"
+
+    print(msg, file=sys.stderr)
 
     # Read from stdin, stripping empty lines
     sentences = [line.replace("\t", " ").replace("\n", " ").replace("\r", " ").strip() for line in sys.stdin]
