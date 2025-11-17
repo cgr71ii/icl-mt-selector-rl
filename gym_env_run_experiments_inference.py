@@ -3,10 +3,10 @@ import sys
 import logging
 
 import utils
-from gym_env_v1 import MTICLEnv
 from gym_env_v1_eval import MTICLEvalEnv
 
 from gym_env_run_experiments import InverseSqrtWithWarmUpLRSchedule
+import numpy as np
 
 import gymnasium as gym
 from stable_baselines3 import DDPG, TD3
@@ -28,28 +28,46 @@ if __name__ == "__main__":
 
     # read data
     data_to_be_translated = []
+    _data_icl_examples = []
 
     for _file_data, data_to_be_translated in ((file_data, data_to_be_translated),):
         with open(_file_data, "rt") as fd:
             for line in fd:
                 data_to_be_translated.append(line.rstrip("\r\n"))
 
+    for _file_data, data_icl_examples in ((file_data_icl_examples, _data_icl_examples),):
+        with open(_file_data, "rt") as fd:
+            for line in fd:
+                data_icl_examples.append(line.rstrip("\r\n"))
+
     # parse args
     parsed_kwargs["device"] = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
-    parsed_kwargs["max_icl_examples"] = parsed_kwargs.get("max_icl_examples", 4)
+    parsed_kwargs["max_icl_examples"] = parsed_kwargs.get("max_icl_examples", 5)
     parsed_kwargs["max_data_entries"] = parsed_kwargs.get("max_data_entries", -1)
     parsed_kwargs["max_data_icl_examples_entries"] = parsed_kwargs.get("max_data_icl_examples_entries", -1)
     parsed_kwargs["state_representation"] = parsed_kwargs.get("state_representation", "model_single_representation")
     parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "comet-22-da")
-    parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 256))
-    parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
+    parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 1))
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["dimensionality_reduction_type"] = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
+    parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
+
+    if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
+        seed = parsed_kwargs.pop("_seed", None)
+
+        if seed is None:
+            seed = parsed_kwargs.pop("seed")
+
+        seed = int(seed)
+    else:
+        seed = 42
+
+    utils.set_random_seed(seed)
 
     # custom
-    k = 20
+    k = max(1, int(0.05 * len(_data_icl_examples)))
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
     #max_data_icl_examples_entries = 100 # TODO remove
     #max_data_entries = 1 # TODO remove
@@ -58,27 +76,13 @@ if __name__ == "__main__":
     #data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
 
-    #assert parsed_kwargs["knn_api_retrieve"] is not None
-    #assert parsed_kwargs["knn_api_insert"] is not None
-
-    parsed_kwargs_training_dummy = {}
-    # TODO use following code?
-    #parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
-    #parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
-
-    #del parsed_kwargs["knn_api_retrieve"]
-    #del parsed_kwargs["knn_api_insert"]
+    logger.info("Seed: %s", seed)
+    logger.info("k=%d", k)
 
     env_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
 
-    ## training environment
-    #env_class = MTICLEnv
-    #env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **parsed_kwargs_training_dummy, **parsed_kwargs}))
-
-    #env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
-
-    ## dev: load model
-    logger.info("Loading best model (dev): %s", best_model_path)
+    ## load model
+    logger.info("Loading model: %s", best_model_path)
 
     env_eval_dev_class = MTICLEvalEnv
     env_eval_dev = Monitor(env_eval_dev_class(*list(env_args), custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=None, override_existing=True)
@@ -86,11 +90,10 @@ if __name__ == "__main__":
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
     #retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0]
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     net_arch = {
         "pi": [400, 300],
-        #"qf": [400, 300]
-        "qf": [2000, 2000, 2000, 2000]
+        "qf": [400, 300]
     }
     actor_learning_rate = 1e-4
     actor_transformer_args_and_kwargs = {
@@ -163,6 +166,10 @@ if __name__ == "__main__":
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated))
-    mean_reward, std_reward = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated)) # TODO remove? use .unwrapped?
+    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated), return_episode_rewards=True)
+    mean_reward = np.mean(episode_rewards)
+    std_reward = np.std(episode_rewards)
+    mean_length = np.mean(episode_lengths)
+    std_length = np.std(episode_lengths)
 
-    print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
+    print(f"Mean reward dev: {mean_reward} +/- {std_reward} (length: {mean_length} +/- {std_length})")

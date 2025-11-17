@@ -185,7 +185,7 @@ class MTICLEnv(gym.Env):
         self.data_already_loaded = False
         self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
         self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
-        self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", True)
+        self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False)
         self.apply_l2_normalization = utils.dict_or_default(kwargs, "apply_l2_normalization", True)
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "chrf2")
         self.dimensionality_reduction_factor_state_and_action = utils.dict_or_default(kwargs, "dimensionality_reduction_factor_state_and_action", 1)
@@ -717,7 +717,7 @@ class MTICLEnv(gym.Env):
                 payload.append(('embedding', v_emb_str))
                 payload.append(('check_l2_norm', '1' if check_l2_norm else '0'))
 
-            response = requests.post(self.knn_api_insert, data=payload)
+            response = utils.requests_post(self.knn_api_insert, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty"
@@ -783,7 +783,7 @@ class MTICLEnv(gym.Env):
                 payload.append(('mt_sentence', sample["mt"]))
                 payload.append(('ref_sentence', sample["ref"]))
 
-            response = requests.post(url, data=payload)
+            response = utils.requests_post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
@@ -828,7 +828,7 @@ class MTICLEnv(gym.Env):
             payload.append(('pooling', self.embedding_pooling_model_method))
             payload.append(('layer', self.embedding_pooling_model_layer))
 
-            response = requests.post(url, data=payload)
+            response = utils.requests_post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
@@ -875,7 +875,7 @@ class MTICLEnv(gym.Env):
             for sample in batch:
                 payload.append(('token', sample))
 
-            response = requests.post(url, data=payload)
+            response = utils.requests_post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
@@ -956,7 +956,7 @@ class MTICLEnv(gym.Env):
                 payload.append(('pooling', self.embedding_pooling_model_method))
                 payload.append(('layer', self.embedding_pooling_model_layer))
 
-            response = requests.post(url, data=payload)
+            response = utils.requests_post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
@@ -1099,7 +1099,7 @@ class MTICLEnv(gym.Env):
 
                 payload.append(("translation_candidate", translation_candidate[0]))
 
-            response = requests.post(self.knn_api_retrieve, data=payload)
+            response = utils.requests_post(self.knn_api_retrieve, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
             assert len(response.text) > 0, f"Response text is empty"

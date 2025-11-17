@@ -176,7 +176,7 @@ if __name__ == "__main__":
     # default values
     num_envs = max(1, parsed_kwargs.pop("num_envs", 4))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
-    max_icl_examples = parsed_kwargs.get("max_icl_examples", 4)
+    max_icl_examples = parsed_kwargs.get("max_icl_examples", 5)
     #max_icl_examples = 1 # TODO remove
     #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
     state_representation = parsed_kwargs.get("state_representation", "model_single_representation")
@@ -229,21 +229,21 @@ if __name__ == "__main__":
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["dimensionality_reduction_type"] = dimensionality_reduction_type
+    parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
-    parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
 
     #assert parsed_kwargs["knn_api_retrieve"] is not None
     #assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
-    k_training = max(1, int(0.1 * len(data_icl_examples_training)))
-    k_dev = max(1, int(0.1 * len(data_icl_examples_dev)))
-    k_test = max(1, int(0.1 * len(data_icl_examples_test)))
+    k_training = max(1, int(0.05 * len(data_icl_examples_training)))
+    k_dev = max(1, int(0.05 * len(data_icl_examples_dev)))
+    k_test = max(1, int(0.05 * len(data_icl_examples_test)))
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -340,6 +340,7 @@ if __name__ == "__main__":
         "max_seq_len": 16,
         "projection_in": model_hidden_size,
         #"l2_norm": True, # disable to let the model learn how the representation should be
+        "l2_norm": False,
         "str_id": "actor",
     }
     critic_transformer_args_and_kwargs = {

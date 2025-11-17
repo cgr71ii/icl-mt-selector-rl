@@ -4,10 +4,13 @@ import random
 import base64
 import logging
 import hashlib
+from urllib3.util.retry import Retry
 
 import torch
 import torch.nn.functional as F
 import numpy as np
+import requests
+from requests.adapters import HTTPAdapter
 
 def use_cuda(force_cpu=False):
     use_cuda = torch.cuda.is_available()
@@ -264,3 +267,29 @@ def get_hash(s, hashf="md5"):
     assert f is not None, f"{hashf} not available"
 
     return f(s.encode()).hexdigest()
+
+def _requests(url, method, max_retries=5, backoff_factor=1.0, **kwargs):
+    assert method in ["post", "get"], f"Unsupported method: {method}"
+
+    retries = Retry(
+        total=max_retries,
+        backoff_factor=backoff_factor, # sleep: 1, 2, 4, 8, 16, ...
+        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+
+    with requests.Session() as session:
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        if method == "get":
+            response = session.get(url, **kwargs)
+        elif method == "post":
+            response = session.post(url, **kwargs)
+        else:
+            raise Exception(f"Unsupported method: {method}")
+
+    return response
+
+def requests_post(url, max_retries=5, backoff_factor=1.0, **kwargs):
+    return _requests(url, method="post", max_retries=max_retries, backoff_factor=backoff_factor, **kwargs)
