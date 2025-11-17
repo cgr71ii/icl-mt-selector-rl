@@ -41,10 +41,14 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # parse args
-    parsed_kwargs["device"] = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
+    max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
+    max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
+    #max_data_entries = 5 # TODO remove
+    #max_data_icl_examples_entries = 100 # TODO remove
     parsed_kwargs["max_icl_examples"] = parsed_kwargs.get("max_icl_examples", 5)
-    parsed_kwargs["max_data_entries"] = parsed_kwargs.get("max_data_entries", -1)
-    parsed_kwargs["max_data_icl_examples_entries"] = parsed_kwargs.get("max_data_icl_examples_entries", -1)
+    parsed_kwargs["max_data_entries"] = max_data_entries
+    parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
+    parsed_kwargs["device"] = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     parsed_kwargs["state_representation"] = parsed_kwargs.get("state_representation", "model_single_representation")
     parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "comet-22-da")
     parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 1))
@@ -65,6 +69,9 @@ if __name__ == "__main__":
         seed = 42
 
     utils.set_random_seed(seed)
+
+    data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
+    _data_icl_examples = _data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
 
     # custom
     k = max(1, int(0.05 * len(_data_icl_examples)))

@@ -216,7 +216,7 @@ if __name__ == "__main__":
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
-    #max_data_entries = 1 # TODO remove
+    #max_data_entries = 5 # TODO remove
     #max_data_icl_examples_entries = 100 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -270,6 +270,7 @@ if __name__ == "__main__":
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
+    #eval_freq = 1000 # steps
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -302,6 +303,7 @@ if __name__ == "__main__":
     actor_learning_rate = 1e-4
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
+    #init_training_steps = 1000
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
 
@@ -320,7 +322,7 @@ if __name__ == "__main__":
 
     retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations)[0] # Get only the result, not I or D
     retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations)[0]
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
     action_noise = normal_action_noise
@@ -514,7 +516,7 @@ if __name__ == "__main__":
 
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations)[0]
+    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
