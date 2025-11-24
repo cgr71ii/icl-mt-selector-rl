@@ -187,32 +187,13 @@ class MTICLEnv(gym.Env):
         self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
         self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False)
         self.apply_l2_normalization = utils.dict_or_default(kwargs, "apply_l2_normalization", True)
-        self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "chrf2")
-        self.dimensionality_reduction_factor_state_and_action = utils.dict_or_default(kwargs, "dimensionality_reduction_factor_state_and_action", 1)
-        self.dimensionality_reduction_type = utils.dict_or_default(kwargs, "dimensionality_reduction_type", "fixed_orthogonal_projection")
+        self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "comet-22-da")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
-        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
+        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
-        assert self.model_hidden_size % self.dimensionality_reduction_factor_state_and_action == 0, f"Model hidden size {self.model_hidden_size} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
-        assert self.state_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"State dimension {self.state_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
-        assert self.action_dim % self.dimensionality_reduction_factor_state_and_action == 0, f"Action dimension {self.action_dim} must be divisible by the dimensionality reduction factor {self.dimensionality_reduction_factor_state_and_action}"
-        assert self.dimensionality_reduction_type in ("fixed_orthogonal_projection", "iterative_nonoverlapping_average"), self.dimensionality_reduction_type
 
-        self.state_dim = self.state_dim // self.dimensionality_reduction_factor_state_and_action
-        self.action_dim = self.action_dim // self.dimensionality_reduction_factor_state_and_action
         self.str2representation_valid_actions_k = []
-
-        if self.dimensionality_reduction_factor_state_and_action > 1:
-#            _dimensionality_reduction_factor_state_and_action = self.dimensionality_reduction_factor_state_and_action
-#
-#            if self.dimensionality_reduction_type == "iterative_nonoverlapping_average":
-#                _dimensionality_reduction_factor_state_and_action = int(np.log2(self.dimensionality_reduction_factor_state_and_action) + sys.float_info.epsilon)
-#
-#            self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d -> %d", self.dimensionality_reduction_factor_state_and_action, _dimensionality_reduction_factor_state_and_action)
-#
-#            self.dimensionality_reduction_factor_state_and_action = _dimensionality_reduction_factor_state_and_action
-            self.logger_wrapper(gym.logger.debug, "Dimensionality reduction factor: %d", self.dimensionality_reduction_factor_state_and_action)
 
         # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
@@ -489,7 +470,7 @@ class MTICLEnv(gym.Env):
         assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
         for src_sentence, observation in zip(representations_str, representations_emb):
-            assert observation.shape[0] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected source sentence shape {self.model_hidden_size}, got {observation.shape[0]} for {src_sentence}"
+            assert observation.shape[0] == self.model_hidden_size, f"Expected source sentence shape {self.model_hidden_size}, got {observation.shape[0]} for {src_sentence}"
 
             self.str2representation[src_sentence] = observation
 
@@ -526,7 +507,7 @@ class MTICLEnv(gym.Env):
             _current_state_window = collections.deque(maxlen=self.state_window_length)
 
             for _ in range(self.state_window_length):
-                _current_state_window.append(np.zeros(self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action))
+                _current_state_window.append(np.zeros(self.model_hidden_size))
 
             observation = self.state_window_type_callback(_current_state_window).copy()
 
@@ -557,7 +538,7 @@ class MTICLEnv(gym.Env):
         self.current_datetime = datetime.datetime.now()
 
         for _ in range(self.state_window_length):
-            self.current_state_window.append(np.zeros(self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action))
+            self.current_state_window.append(np.zeros(self.model_hidden_size))
 
         # Select translation sentence for the episode
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
@@ -850,10 +831,6 @@ class MTICLEnv(gym.Env):
         if numpy:
             representations = representations.numpy()
 
-        if self.dimensionality_reduction_factor_state_and_action > 1:
-            func = getattr(utils, self.dimensionality_reduction_type)
-            representations = func(representations, self.action_dim)
-
         if self.apply_l2_normalization:
             representations = utils.l2_normalize(representations)
 
@@ -896,10 +873,6 @@ class MTICLEnv(gym.Env):
 
         if numpy:
             representations = representations.numpy()
-
-        if self.dimensionality_reduction_factor_state_and_action > 1:
-            func = getattr(utils, self.dimensionality_reduction_type)
-            representations = func(representations, self.action_dim)
 
         if self.apply_l2_normalization:
             representations = utils.l2_normalize(representations)
@@ -982,10 +955,6 @@ class MTICLEnv(gym.Env):
             if numpy:
                 translations = translations.numpy()
 
-            if self.dimensionality_reduction_factor_state_and_action > 1:
-                func = getattr(utils, self.dimensionality_reduction_type)
-                translations = func(translations, self.action_dim)
-
             if self.apply_l2_normalization:
                 translations = utils.l2_normalize(translations)
 
@@ -1014,7 +983,7 @@ class MTICLEnv(gym.Env):
         proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
         assert isinstance(proto_actions, np.ndarray), f"Expected proto_actions to be a numpy array, got {type(proto_actions)}: {proto_actions}"
         assert len(proto_actions.shape) == 2, f"Expected proto_actions to be a 2D numpy array, got shape {proto_actions.shape}: {proto_actions}"
-        assert proto_actions.shape[-1] == self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action, f"Expected proto_actions last dimension to be {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}, got {proto_actions.shape[-1]}"
+        assert proto_actions.shape[-1] == self.model_hidden_size, f"Expected proto_actions last dimension to be {self.model_hidden_size}, got {proto_actions.shape[-1]}"
         assert isinstance(k, int), k
         assert k > 0, "k must be greater than 0"
 
@@ -1030,12 +999,11 @@ class MTICLEnv(gym.Env):
             assert len(observations.shape) == 2, f"Expected observations to be a 2D numpy array, got shape {observations.shape}: {observations}"
             assert observations.shape[0] == proto_actions.shape[0], f"Expected observations first dimension to be equal to proto_actions first dimension ({proto_actions.shape[0]}), got {observations.shape[0]}"
             assert observations.shape[1] == self.state_dim, f"Expected observations second dimension to be {self.state_dim}, got {observations.shape[1]}"
-            assert observations.shape[1] % (self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action) == 0, f"Expected observations second dimension ({observations.shape[1]}) to be multiple of {self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action}"
 
             translation_candidate = []
 
             for idx, observation in enumerate(observations):
-                _observation = observation.reshape(-1, self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action) # (state_window_length, model_hidden_size // dimensionality_reduction_factor_state_and_action)
+                _observation = observation.reshape(-1, self.model_hidden_size) # (state_window_length, model_hidden_size)
                 start_idx = 1 if self.state_representation == "model_single_representation+sentence_and_actions" else 0
                 found = False
 

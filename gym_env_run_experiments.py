@@ -181,11 +181,8 @@ if __name__ == "__main__":
     #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
     state_representation = parsed_kwargs.get("state_representation", "model_single_representation")
     eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
-    dimensionality_reduction_factor_state_and_action = parsed_kwargs.get("dimensionality_reduction_factor_state_and_action", 1)
     repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
-    dimensionality_reduction_type = parsed_kwargs.get("dimensionality_reduction_type", "iterative_nonoverlapping_average")
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
-    #dimensionality_reduction_type = "fixed_orthogonal_projection" # TODO remove
     knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
 
@@ -224,11 +221,9 @@ if __name__ == "__main__":
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy"] = eval_strategy
-    parsed_kwargs["dimensionality_reduction_factor_state_and_action"] = int(dimensionality_reduction_factor_state_and_action)
     parsed_kwargs["repeat_translation_candidates"] = repeat_translation_candidates
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
-    parsed_kwargs["dimensionality_reduction_type"] = dimensionality_reduction_type
     parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
