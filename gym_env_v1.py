@@ -121,7 +121,6 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Provided arguments: %s", kwargs)
 
         self.state_window_length = utils.dict_or_default(kwargs, "state_window_length", 4)
-        self.state_window_type = utils.dict_or_default(kwargs, "state_window_type", "concatenate")
         self.max_icl_examples = utils.dict_or_default(kwargs, "max_icl_examples", 4)
         self.max_data_entries = utils.dict_or_default(kwargs, "max_data_entries", -1)
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
@@ -129,21 +128,22 @@ class MTICLEnv(gym.Env):
 
         assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions"), f"Unexpected state representation: {self.state_representation}"
 
-        if self.state_window_type == "concatenate":
-            if self.state_representation == "model_single_representation" and self.state_window_length > 1:
-                self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
+        if self.state_representation == "model_single_representation" and self.state_window_length > 1:
+            self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
 
-                self.state_window_length = 1
-            elif self.state_representation == "sentence_and_actions" and self.state_window_length != self.max_icl_examples + 1:
-                self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 1 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 1)
+            self.state_window_length = 1
+        elif self.state_representation == "sentence_and_actions" and self.state_window_length != self.max_icl_examples + 1:
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 1 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 1)
 
-                self.state_window_length = self.max_icl_examples + 1
-            elif self.state_representation == "model_single_representation+sentence_and_actions" and self.state_window_length != self.max_icl_examples + 2:
-                self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
+            self.state_window_length = self.max_icl_examples + 1
+        elif self.state_representation == "model_single_representation+sentence_and_actions" and self.state_window_length != self.max_icl_examples + 2:
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
-                self.state_window_length = self.max_icl_examples + 2
-            elif self.state_window_length < self.max_icl_examples:
-                self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d", self.state_window_length, self.max_icl_examples)
+            self.state_window_length = self.max_icl_examples + 2
+        elif self.state_window_length < self.max_icl_examples:
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
+
+            self.state_window_length = self.max_icl_examples
 
         # API URLs
         self.translate_model_api = utils.dict_or_default(kwargs, "translate_model_api", "http://127.0.0.1:8000/translate")
@@ -173,15 +173,9 @@ class MTICLEnv(gym.Env):
         self.action_dim = self.model_hidden_size
         self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
 
-        if self.state_window_type == "concatenate":
-            self.state_window_type_callback = lambda l: np.concatenate(l, axis=0, dtype=np.float32)
-            self.state_dim *= self.state_window_length
-        elif self.state_window_type == "average":
-            self.state_window_type_callback = lambda l: np.mean(l, axis=0, dtype=np.float32)
-        elif self.state_window_type == "maxpooling":
-            self.state_window_type_callback = lambda l: np.float32(np.max(l, axis=0))
-        else:
-            raise Exception(f"Given window type is not valid: {self.state_window_type} (valid: {self.valid_state_window_type})")
+        # Changes due to state concatenation
+        self.state_window_type_callback = lambda l: np.concatenate(l, axis=0, dtype=np.float32)
+        self.state_dim *= self.state_window_length
 
         # Other
         self.data_already_loaded = False
@@ -1359,7 +1353,7 @@ class MTICLEnv(gym.Env):
 
             observation = observation.copy() # This is relevant to avoid changing the initial representations in case the observations are modified
 
-            if self.state_window_type == "concatenate" and self.state_representation == "model_single_representation":
+            if self.state_representation == "model_single_representation":
                 assert self.state_window_length == 1, self.state_window_length
                 assert self.current_state_window[self.time_step - 1].shape == (self.action_dim,), self.current_state_window[self.time_step - 1].shape
                 assert observation.shape == self.current_state_window[self.time_step - 1].shape, observation.shape
