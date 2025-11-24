@@ -303,7 +303,7 @@ if __name__ == "__main__":
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
     env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy})) # WARN: each vectorized environments receives a copy of this environment
 
-    env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": True}) # env_training_dummy.get_closest_neighbors_urls() is available
+    env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_training_dummy.get_closest_neighbors_urls() is available
 
     parsed_kwargs_training["initial_sample_list_actions"] = [env_training_dummy.str2representation[k] for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)

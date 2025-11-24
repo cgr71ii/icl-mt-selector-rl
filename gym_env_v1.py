@@ -193,11 +193,13 @@ class MTICLEnv(gym.Env):
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
+        self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "sequential_shuffle_per_epoch")
 
         if not self.enable_eos_action:
             self.knn_always_add_eos_action = False
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
+        assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
 
@@ -343,6 +345,9 @@ class MTICLEnv(gym.Env):
 
         # Other
         self.translation_candidates_reward_mean_episode = []
+        self.translation_candidates_idx = list(range(len(self.data)))
+
+        assert len(self.data) > 0
 
     def _init_load_data_and_populate_knn_pool(self, options=None):
         assert self.reset_times == 0, f"Expected reset_times to be 0, got {self.reset_times}"
@@ -1259,6 +1264,10 @@ class MTICLEnv(gym.Env):
         n = len(self.data)
         repeat = False
 
+        if self.translation_candidate < 0 or self.episode <= 1:
+            assert self.translation_candidate == -1, self.translation_candidate
+            assert self.episode == 1, self.episode
+
         # Repeat current translation candidate?
         if self.repeat_translation_candidates and self.translation_candidate >= 0:
             idx = self.translation_candidate
@@ -1284,20 +1293,36 @@ class MTICLEnv(gym.Env):
 
         # Select translation candidate
         if translation_candidate is None:
-            # UCB exploration modification
-            weights = -1.0 * self.translation_candidates_reward_mean_exponential_decay_episode + \
-                        self.translation_candidates_exploration_rate * np.sqrt(np.log(self.episode) / (self.translation_candidates_selected_episode + 1))
+            if self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch"):
+                translation_candidate = (self.episode - 1) % len(self.data) # sequential sweep
 
-            if self.episode == 1:
-                assert np.all(weights == 0.0), f"Weights must be zero at the first episode, got {weights}"
+                if self.translation_candidate_strategy == "sequential_shuffle_per_epoch" and translation_candidate == 0:
+                    # shuffle once per epoch
+                    random.shuffle(self.translation_candidates_idx)
 
-                # utils.softmax will return uniform distribution when all values are the same, even if they are zero
+                    self.logger_wrapper(gym.logger.debug, "Shuffle idxs for translation candidate selection (first and last 5 idxs): %s ... %s", self.translation_candidates_idx[:5] self.translation_candidates_idx[-5:])
 
-            prob_dist = utils.softmax(weights)
-            translation_candidate = np.random.choice(n, p=prob_dist)
-            src_translation_candidate = self.data[translation_candidate][0]
+                translation_candidate = self.translation_candidates_idx[translation_candidate]
+                src_translation_candidate = self.data[translation_candidate][0]
 
-            self.logger_wrapper(gym.logger.info, "Translation candidate #%d (p: %.4f): %s", translation_candidate, prob_dist[translation_candidate], src_translation_candidate)
+                self.logger_wrapper(gym.logger.info, "Translation candidate #%d: %s", translation_candidate, src_translation_candidate)
+            elif self.translation_candidate_strategy == "UCB-like":
+                # UCB exploration modification
+                weights = -1.0 * self.translation_candidates_reward_mean_exponential_decay_episode + \
+                            self.translation_candidates_exploration_rate * np.sqrt(np.log(self.episode) / (self.translation_candidates_selected_episode + 1))
+
+                if self.episode == 1:
+                    assert np.all(weights == 0.0), f"Weights must be zero at the first episode, got {weights}"
+
+                    # utils.softmax will return uniform distribution when all values are the same, even if they are zero
+
+                prob_dist = utils.softmax(weights)
+                translation_candidate = np.random.choice(n, p=prob_dist)
+                src_translation_candidate = self.data[translation_candidate][0]
+
+                self.logger_wrapper(gym.logger.info, "Translation candidate #%d (p: %.4f): %s", translation_candidate, prob_dist[translation_candidate], src_translation_candidate)
+            else:
+                raise Exception(f"Unknown translation candidate selection strategy: {self.translation_candidate_strategy}")
 
         assert 0 <= translation_candidate < n, f"Translation candidate index must be in [0, {n}), got {translation_candidate}"
 
