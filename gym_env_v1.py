@@ -198,6 +198,8 @@ class MTICLEnv(gym.Env):
         if not self.enable_eos_action:
             self.knn_always_add_eos_action = False
 
+        self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
+
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
         assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like"), self.translation_candidate_strategy
 
@@ -271,6 +273,8 @@ class MTICLEnv(gym.Env):
         info = {}
 
         if terminated or truncated:
+            self.logger_wrapper(gym.logger.error, "Episode was finished but the reward is not being calculated again...")
+
             observation = self.state_window_type_callback(self.current_state_window).copy()
             reward = 0.0
 
@@ -559,7 +563,9 @@ class MTICLEnv(gym.Env):
         src_sentence = self.data[self.translation_candidate][0]
         observation = self.str2representation[src_sentence]
 
-        self.current_state_window.append(observation)
+        assert self.time_step == 0, self.time_step
+
+        self.current_state_window[self.time_step] = observation
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -1007,16 +1013,9 @@ class MTICLEnv(gym.Env):
 
             for idx, observation in enumerate(observations):
                 _observation = observation.reshape(-1, self.model_hidden_size) # (state_window_length, model_hidden_size)
-                start_idx = 1 if self.state_representation == "model_single_representation+sentence_and_actions" else 0
-                found = False
+                _observation2 = _observation[0]
 
-                for _observation2 in _observation[start_idx:]:
-                    if not np.allclose(_observation2, np.zeros_like(_observation2)):
-                        found = True
-
-                        break
-
-                assert found, f"Could not find non-zero observation in state window for idx {idx}: {_observation}"
+                assert not np.allclose(_observation2, np.zeros_like(_observation2)), f"Element was expected to be found in the first position: {idx}: {_observation}"
 
                 D_overlap, I_overlap = self.src_sentences_index.search(np.expand_dims(_observation2, axis=0), 1)
 
@@ -1333,6 +1332,7 @@ class MTICLEnv(gym.Env):
     def apply_step(self, current_action):
         assert isinstance(current_action, str), f"Expected current_action to be a string, got {type(current_action)}: {current_action}"
         assert len(self.current_icl_examples) < self.max_icl_examples, f"Current length of ICL examples ({self.current_icl_examples}) must be less than max ICL examples ({self.max_icl_examples})"
+        assert self.time_step > 0, self.time_step
 
         if self.enable_eos_action and current_action == self.eos_token_str:
             # Early stopping action
@@ -1361,10 +1361,10 @@ class MTICLEnv(gym.Env):
 
             if self.state_window_type == "concatenate" and self.state_representation == "model_single_representation":
                 assert self.state_window_length == 1, self.state_window_length
-                assert self.current_state_window[-1].shape == (self.action_dim,), self.current_state_window[-1].shape
-                assert observation.shape == self.current_state_window[-1].shape, observation.shape
+                assert self.current_state_window[self.time_step - 1].shape == (self.action_dim,), self.current_state_window[self.time_step - 1].shape
+                assert observation.shape == self.current_state_window[self.time_step - 1].shape, observation.shape
 
-                observation += self.current_state_window[-1] # last inserted element (deque moves towards left)
+                observation += self.current_state_window[self.time_step - 1]
 
                 if self.apply_l2_normalization:
                     observation = utils.l2_normalize(observation)
@@ -1374,7 +1374,7 @@ class MTICLEnv(gym.Env):
             if self.state_representation  == "model_single_representation":
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
-            elif self.state_representation == "sentence_and_actions" or self.state_representation == "model_single_representation+sentence_and_actions":
+            elif self.state_representation in ("sentence_and_actions", "model_single_representation+sentence_and_actions"):
                 icl_example = '\t'.join(self.current_icl_examples[-1])
 
                 assert icl_example in self.str2representation, icl_example
@@ -1390,7 +1390,13 @@ class MTICLEnv(gym.Env):
         if self.apply_l2_normalization:
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
-        self.current_state_window.append(observation)
+        if self.time_step == 1 and self.state_representation == "model_single_representation+sentence_and_actions":
+            f = lambda r: r
+        else:
+            f = lambda r: not r
+
+        assert f(np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step]))), self.time_step
+        assert np.allclose(self.current_state_window[self.time_step], np.zeros_like(self.current_state_window[self.time_step])), self.time_step
 
         if self.state_representation == "model_single_representation+sentence_and_actions":
             # We need to do it after append() above in order to avoid overwriting the position 1
@@ -1398,9 +1404,10 @@ class MTICLEnv(gym.Env):
             src_sentence = self.data[self.translation_candidate][0]
             model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
 
-            assert np.allclose(self.current_state_window[0], np.zeros_like(self.current_state_window[0])), f"Expected position 0 in current_state_window to be zeroed before updating it with model_single_representation: {self.current_state_window[0]}"
-
-            self.current_state_window[0] = model_single_representation.copy() # 1 because 0 is the last position (deque moves towards left), which will be its position after append() below
+            self.current_state_window[self.time_step + 1] = observation
+            self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
+        else:
+            self.current_state_window[self.time_step] = observation
 
         if terminated or truncated:
             # Compute reward
