@@ -105,6 +105,8 @@ class MTICLEnv(gym.Env):
         self.knn_api_insert = utils.dict_or_default(kwargs, "knn_api_insert", None)
         self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
 
+        assert self.knn_api_retrieve is None and self.knn_api_insert is None, "Many features in the kNN server have not been implemented: feature disabled"
+
         if self.knn_api_retrieve is not None or self.knn_api_insert is not None:
             assert self.knn_api_retrieve is not None
             assert self.knn_api_insert is not None
@@ -190,6 +192,10 @@ class MTICLEnv(gym.Env):
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "comet-22-da")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
+        self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
+
+        if not self.enable_eos_action:
+            self.knn_always_add_eos_action = False
 
         assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
 
@@ -197,7 +203,7 @@ class MTICLEnv(gym.Env):
 
         # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
-        self.logger_wrapper(gym.logger.info, "Model hidden size and EoS token (you may need to specify the correct values according to your LLM): %d %s", self.model_hidden_size, self.eos_token_str)
+        self.logger_wrapper(gym.logger.info, "Model hidden size and EoS (enabled: %s) token (you may need to specify the correct values according to your LLM): %d %s", self.enable_eos_action, self.model_hidden_size, self.eos_token_str)
 
         # Define action and observation space (embeddings)
         #self.action_space = gym.spaces.Box(-sys.float_info.max, sys.float_info.max, shape=(self.model_hidden_size,))
@@ -443,23 +449,24 @@ class MTICLEnv(gym.Env):
         time.sleep(self.initial_time_sleep) # wait so ICL examples and EoS token are not mixed due to parallel envs (i.e., num_envs > 1) and service-streamer, raising an error
 
         ## EoS token (early stopping action)
-        self.logger_wrapper(gym.logger.info, "Obtaining representations for EoS token")
+        if self.enable_eos_action:
+            self.logger_wrapper(gym.logger.info, "Obtaining representations for EoS token")
 
-        representations_str = [self.eos_token_str]
-        representations_emb = self.get_token_representation(representations_str)
+            representations_str = [self.eos_token_str]
+            representations_emb = self.get_token_representation(representations_str)
 
-        assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+            assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-        self.insert_embeddings(representations_str, representations_emb)
+            self.insert_embeddings(representations_str, representations_emb)
 
-        for _str, emb in zip(representations_str, representations_emb):
-            assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+            for _str, emb in zip(representations_str, representations_emb):
+                assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
 
-            self.str2representation[_str] = emb
+                self.str2representation[_str] = emb
 
-            self.str2representation_valid_actions_k.append(_str)
+                self.str2representation_valid_actions_k.append(_str)
 
-        time.sleep(self.initial_time_sleep)
+            time.sleep(self.initial_time_sleep)
 
         ## Source sentences (do not insert, but add the representation to self.str2representation)
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d sentences", len(self.data))
@@ -546,15 +553,6 @@ class MTICLEnv(gym.Env):
         # Get the observation for the first time step
         src_sentence = self.data[self.translation_candidate][0]
         observation = self.str2representation[src_sentence]
-
-        #if not self.skip_populate_knn:
-        #    observation = self.str2representation[src_sentence]
-        #else:
-        #    if src_sentence in self.str2representation.keys():
-        #        observation = self.str2representation[src_sentence]
-        #    else:
-        #        observation = self.get_translations([src_sentence], only_representation=True)[0]
-        #        self.str2representation[src_sentence] = observation
 
         self.current_state_window.append(observation)
 
@@ -1096,6 +1094,8 @@ class MTICLEnv(gym.Env):
             # Faiss index is empty
             self.logger_wrapper(gym.logger.warn, "Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
 
+        assert k >= index.ntotal, f"{k} < {index.ntotal}"
+
         #self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
 
         D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
@@ -1103,12 +1103,13 @@ class MTICLEnv(gym.Env):
         if translation_candidate is not None:
             assert len(translation_candidate) == proto_actions.shape[0] == D.shape[0], f"Expected translation_candidate length to be equal to proto_actions first dimension ({proto_actions.shape[0]} == {D.shape[0]}), got {len(translation_candidate)}"
 
-        eos_representation = self.str2representation[self.eos_token_str].copy()
-        expected_eos_index = len(urls_representation) - 1
+        if self.enable_eos_action:
+            eos_representation = self.str2representation[self.eos_token_str].copy()
+            expected_eos_index = len(urls_representation) - 1
 
-        assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == self.action_dim, f"Expected EOS representation shape to be ({self.action_dim},), got {eos_representation.shape}"
-        assert eos_representation.shape == proto_actions.shape[1:], f"Expected tiled EOS representation shape to be {proto_actions[1:].shape}, got {eos_representation.shape}"
-        assert urls_representation[expected_eos_index] == self.eos_token_str, f"Expected last element in urls_representation to be EOS token string ({self.eos_token_str}), got {urls_representation[expected_eos_index]}"
+            assert len(eos_representation.shape) == 1 and eos_representation.shape[0] == self.action_dim, f"Expected EOS representation shape to be ({self.action_dim},), got {eos_representation.shape}"
+            assert eos_representation.shape == proto_actions.shape[1:], f"Expected tiled EOS representation shape to be {proto_actions[1:].shape}, got {eos_representation.shape}"
+            assert urls_representation[expected_eos_index] == self.eos_token_str, f"Expected last element in urls_representation to be EOS token string ({self.eos_token_str}), got {urls_representation[expected_eos_index]}"
 
         expected_shape = (proto_actions.shape[0], k)
 
@@ -1120,6 +1121,9 @@ class MTICLEnv(gym.Env):
 
         # Obtain representations (str) from kNN idxs
         for idx1, (i, d) in enumerate(zip(I, D)):
+            assert len(i.shape) == 1, i.shape
+            assert len(d.shape) == 1, d.shape
+
             overlapping_hits = 0
             _translation_candidate = None if translation_candidate is None else translation_candidate[idx1]
             eos_found = False
@@ -1162,19 +1166,30 @@ class MTICLEnv(gym.Env):
             assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
             if (_add_eos_action and not eos_found) or overlapping_hits == 1:
-                # Replace the value with longest distance with EoS
-                longest_dist_idx = d.argmax()
+                # Replace the value with longest distance with EoS (or duplicate if EoS is disabled)
+                dist_idxs = np.flip(d.argsort())
+                longest_dist_idx = dist_idxs[0]
 
                 if overlapping_hits == 1:
                     assert I[idx1][longest_dist_idx] == -2, I[idx1][longest_dist_idx]
                     assert D[idx1][longest_dist_idx] == np.finfo(np.float32).max, D[idx1][longest_dist_idx]
 
-                D_eos = np.linalg.norm(proto_actions[idx1] - eos_representation, axis=0) # we assume euclidean distance
-                D[idx1][longest_dist_idx] = D_eos
-                I[idx1][longest_dist_idx] = expected_eos_index
-                results[-1][longest_dist_idx] = self.eos_token_str
+                if self.enable_eos_action:
+                    D_aux_repr = eos_representation
+                    I_aux = expected_eos_index
+                    results_aux = self.eos_token_str
+                else:
+                    I_aux = i[dist_idxs[1]] # duplicate item (next idx with longest distance)
+                    results_aux = urls_representation[I_aux]
+                    D_aux_repr = self.str2representation[results_aux].copy()
+
+                D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) # we assume euclidean distance
+                I[idx1][longest_dist_idx] = I_aux
+                results[-1][longest_dist_idx] = results_aux
 
             if len(results[-1]) < k:
+                raise Exception(f"This should never happen! {index.ntotal} {k}")
+
                 # Add items to avoid tensor errors because dimensions don't match (default representation is EoS)
                 assert index.ntotal < k, f"{index.ntotal} >= {k}"
 
@@ -1294,7 +1309,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(current_action, str), f"Expected current_action to be a string, got {type(current_action)}: {current_action}"
         assert len(self.current_icl_examples) < self.max_icl_examples, f"Current length of ICL examples ({self.current_icl_examples}) must be less than max ICL examples ({self.max_icl_examples})"
 
-        if current_action == self.eos_token_str:
+        if self.enable_eos_action and current_action == self.eos_token_str:
             # Early stopping action
             self.logger_wrapper(gym.logger.info, "Early stopping action (%s) received in time step #%d", current_action, self.time_step)
 
@@ -1311,6 +1326,7 @@ class MTICLEnv(gym.Env):
 
         if self.early_stopping:
             assert terminated or truncated, f"Early stopping action received but not terminated or truncated: {terminated}, {truncated}"
+            assert self.enable_eos_action
 
             observation = self.str2representation[self.eos_token_str]
 

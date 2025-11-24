@@ -178,12 +178,7 @@ if __name__ == "__main__":
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 5)
     #max_icl_examples = 1 # TODO remove
-    #state_representation = parsed_kwargs.get("state_representation", "sentence_and_actions")
-    state_representation = parsed_kwargs.get("state_representation", "model_single_representation")
-    eval_strategy = parsed_kwargs.get("eval_strategy", "comet-22-da")
-    repeat_translation_candidates = parsed_kwargs.get("repeat_translation_candidates", False)
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
-    knn_always_add_eos_action = parsed_kwargs.get("knn_always_add_eos_action", True)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
@@ -219,12 +214,13 @@ if __name__ == "__main__":
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
-    parsed_kwargs["state_representation"] = state_representation
-    parsed_kwargs["eval_strategy"] = eval_strategy
-    parsed_kwargs["repeat_translation_candidates"] = repeat_translation_candidates
+    parsed_kwargs["state_representation"] = parsed_kwargs.get("state_representation", "model_single_representation+sentence_and_actions")
+    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "comet-22-da")
+    parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
-    parsed_kwargs["knn_always_add_eos_action"] = knn_always_add_eos_action
+    parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
+    parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
