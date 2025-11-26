@@ -100,13 +100,23 @@ def insert_embeddings(urls, embeddings, index, urls_representation, urls_represe
             urls_representation[len(urls_representation)] = url
             urls_representation_url2idx[url] = len(urls_representation_url2idx)
 
-def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expected_dim=2, check_l2_norm=True):
+def embeddings_index_sanity_check(embeddings, last_dimmension_shape=-1, max_expected_dim=2, check_l2_norm=True, check_not_nan=True, check_not_inf=True):
     if isinstance(embeddings, torch.Tensor):
-        embeddings = embeddings.detach().cpu().numpy()
+        embeddings = embeddings.detach().cpu().numpy() # watch out!
     else:
         assert isinstance(embeddings, np.ndarray) or isinstance(embeddings, list), type(embeddings)
 
         embeddings = np.array(embeddings)
+
+    if check_not_nan:
+        count_nan = np.isnan(embeddings).any(axis=len(embeddings.shape) - 1).sum()
+
+        assert not np.isnan(embeddings).any(), f"Embeddings contain NaN values ({count_nan}): {embeddings.shape}: {embeddings}"
+
+    if check_not_inf:
+        count_inf = np.isinf(embeddings).any(axis=len(embeddings.shape) - 1).sum()
+
+        assert not np.isinf(embeddings).any(), f"Embeddings contain inf values ({count_inf}): {embeddings.shape}: {embeddings}"
 
     if check_l2_norm:
         c, v = check_l2_normalized(embeddings)

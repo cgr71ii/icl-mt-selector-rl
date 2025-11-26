@@ -49,7 +49,7 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
             self.reset_times += 1 # to avoid infinite loop
 
             for _ in range(self.state_window_length):
-                self.current_state_window.append(np.zeros(self.model_hidden_size // self.dimensionality_reduction_factor_state_and_action))
+                self.current_state_window.append(np.zeros(self.model_hidden_size))
 
             observation = self.state_window_type_callback(self.current_state_window)
             info = {}

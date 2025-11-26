@@ -162,7 +162,8 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
 
         ## Other API parameters
-        self.embedding_pooling_model_method = utils.dict_or_default(kwargs, "embedding_pooling_model_method", "mean")
+        self.embedding_pooling_model_method_state = utils.dict_or_default(kwargs, "embedding_pooling_model_method_state", "mean")
+        self.embedding_pooling_model_method_action = utils.dict_or_default(kwargs, "embedding_pooling_model_method_action", "mean")
         self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", -1)
 
         # Model conf
@@ -236,7 +237,7 @@ class MTICLEnv(gym.Env):
 
         translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
         translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
-        translation_candidate_observation[0, -1 * translation_candidate_actual_representation.shape[0]:] = translation_candidate_actual_representation # put actual representation at the end due to deque behavior (right append)
+        translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
         action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation)
 
         assert len(action_url) == 1, len(action_url)
@@ -471,11 +472,15 @@ class MTICLEnv(gym.Env):
 
             time.sleep(self.initial_time_sleep)
 
+        assert self.embeddings_index.ntotal >= self.max_icl_examples, f"{self.embeddings_index.ntotal} < {self.max_icl_examples}"
+
         ## Source sentences (do not insert, but add the representation to self.str2representation)
+        ### These representation are intenteded to be used as initial first state for the translation candidate in order to detect if some ICL example is selected and results to be the same source sentence as the translation candidate
+        #### TODO remove this representation from the state when processing with the transformer? This may be done passing an argument to the transformer implementation (something like skip_first_n_word_embeddings)
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d sentences", len(self.data))
 
         representations_str = [d[0] for d in self.data]
-        representations_emb = self.get_translations(representations_str, only_representation=True)
+        representations_emb = self.get_icl_example_representation(representations_str, trg_is_empty=True)
 
         assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
@@ -549,6 +554,11 @@ class MTICLEnv(gym.Env):
 
         for _ in range(self.state_window_length):
             self.current_state_window.append(np.zeros(self.model_hidden_size))
+
+        assert len(self.current_state_window) == self.current_state_window.maxlen
+
+        for v in self.current_state_window:
+            assert np.allclose(v, np.zeros_like(v))
 
         # Select translation sentence for the episode
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
@@ -784,21 +794,30 @@ class MTICLEnv(gym.Env):
 
         return avg, scores
 
-    def get_icl_example_representation(self, icl_examples, numpy=True):
+    def get_icl_example_representation(self, icl_examples, numpy=True, trg_is_empty=False):
         # format icl_examples: list of lists with two elements: [[src1, trg1], [src2, trg2], ...]
 
         assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
         assert len(icl_examples) > 0, "ICL examples must not be an empty list"
-        assert isinstance(icl_examples[0], list), f"Expected icl_examples to be a list of lists, got {type(icl_examples[0])}: {icl_examples[0]}"
-        assert len(icl_examples[0]) == 2, f"Expected each icl example to be a list of two elements, got {len(icl_examples[0])}: {icl_examples[0]}"
-        assert isinstance(icl_examples[0][0], str) and isinstance(icl_examples[0][1], str), f"Expected each icl example to be a list of two strings, got {type(icl_examples[0][0])} and {type(icl_examples[0][1])}: {icl_examples[0]}"
+
+        if trg_is_empty:
+            assert isinstance(icl_examples[0], str), f"Expected icl example to be a list of a single string, got {type(icl_examples[0])}"
+        else:
+            assert isinstance(icl_examples[0], list), f"Expected icl_examples to be a list of lists, got {type(icl_examples[0])}: {icl_examples[0]}"
+            assert len(icl_examples[0]) == 2, f"Expected each icl example to be a list of two elements, got {len(icl_examples[0])}: {icl_examples[0]}"
+            assert isinstance(icl_examples[0][0], str) and isinstance(icl_examples[0][1], str), f"Expected each icl example to be a list of two strings, got {type(icl_examples[0][0])} and {type(icl_examples[0][1])}: {icl_examples[0]}"
 
         url = self.embedding_pooling_model_api
         batch_size = self.batch_size
         representations = []
-        src_sentences = [icl_example[0] for icl_example in icl_examples]
-        trg_sentences = [icl_example[1] for icl_example in icl_examples]
-        data = [{"src": utils.encode_base64(s), "trg": utils.encode_base64(t)} for s, t in zip(src_sentences, trg_sentences)]
+
+        if trg_is_empty:
+            src_sentences = list(icl_examples)
+            data = [{"src": utils.encode_base64(s), "trg": None} for s in src_sentences]
+        else:
+            src_sentences = [icl_example[0] for icl_example in icl_examples]
+            trg_sentences = [icl_example[1] for icl_example in icl_examples]
+            data = [{"src": utils.encode_base64(s), "trg": utils.encode_base64(t)} for s, t in zip(src_sentences, trg_sentences)]
 
         for idx, batch in enumerate(utils.batchify(data, batch_size)):
             payload = []
@@ -807,9 +826,15 @@ class MTICLEnv(gym.Env):
                 payload.append(('src_lang', self.src_lang))
                 payload.append(('trg_lang', self.trg_lang))
                 payload.append(('src_sentence', sample["src"]))
-                payload.append(('trg_sentence', sample["trg"]))
 
-            payload.append(('pooling', self.embedding_pooling_model_method))
+                if trg_is_empty:
+                    assert sample["trg"] is None, sample["trg"]
+                else:
+                    assert isinstance(sample["trg"], str), type(sample["trg"])
+
+                    payload.append(('trg_sentence', sample["trg"]))
+
+            payload.append(('pooling', self.embedding_pooling_model_method_action))
             payload.append(('layer', self.embedding_pooling_model_layer))
 
             response = utils.requests_post(url, data=payload)
@@ -929,7 +954,7 @@ class MTICLEnv(gym.Env):
                     payload.append(('icl_idx_src_sentence', icl_idx))
 
             if only_representation:
-                payload.append(('pooling', self.embedding_pooling_model_method))
+                payload.append(('pooling', self.embedding_pooling_model_method_state))
                 payload.append(('layer', self.embedding_pooling_model_layer))
 
             response = utils.requests_post(url, data=payload)
@@ -1092,8 +1117,6 @@ class MTICLEnv(gym.Env):
             # Faiss index is empty
             self.logger_wrapper(gym.logger.warn, "Faiss index seems to be empty: %d (sentences in pool: %d)", index.ntotal, len(urls_representation))
 
-        assert k >= index.ntotal, f"{k} < {index.ntotal}"
-
         #self.logger_wrapper(gym.logger.debug, "Default representation is %s", self.eos_token_str)
 
         D, I = index.search(proto_actions, k) # [D]istance, [I]ndex
@@ -1134,6 +1157,8 @@ class MTICLEnv(gym.Env):
                 if value_idx < 0:
                     assert (i[idx2:] == -1 * np.ones_like(i[idx2:])).all(), f"Expected all remaining indices to be -1, got {i[idx2:]}"
 
+                    self.logger_wrapper(gym.logger.warn, "Not entries close (idx: %d): %s: %s ... %s", idx2, proto_actions.shape, proto_actions[0], proto_actions[-1])
+
                     break # No more valid indices as -1 values are at the end of the list
 
                 url = urls_representation[value_idx]
@@ -1168,6 +1193,8 @@ class MTICLEnv(gym.Env):
                 dist_idxs = np.flip(d.argsort())
                 longest_dist_idx = dist_idxs[0]
 
+                assert len(dist_idxs) == k, f"{len(dist_idxs)} vs {k}"
+
                 if overlapping_hits == 1:
                     assert I[idx1][longest_dist_idx] == -2, I[idx1][longest_dist_idx]
                     assert D[idx1][longest_dist_idx] == np.finfo(np.float32).max, D[idx1][longest_dist_idx]
@@ -1176,17 +1203,39 @@ class MTICLEnv(gym.Env):
                     D_aux_repr = eos_representation
                     I_aux = expected_eos_index
                     results_aux = self.eos_token_str
-                else:
+                elif len(dist_idxs) > 1:
                     I_aux = i[dist_idxs[1]] # duplicate item (next idx with longest distance)
                     results_aux = urls_representation[I_aux]
                     D_aux_repr = self.str2representation[results_aux].copy()
+                else:
+                    # k = 1, so we need to find any other representation
+                    assert k == 1
+                    assert index.ntotal > 1, "index is too small to find another entry"
 
-                D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) # we assume euclidean distance
+                    D_aux, I_aux = index.search(np.expand_dims(proto_actions[idx1], axis=0), 2)
+                    src_icl_example_aux = urls_representation[I_aux[0][0]].split('\t')[0] # closest example source part
+
+                    assert translation_candidate[idx1] == src_icl_example_aux, f"{translation_candidate[idx1]} vs {src_icl_example_aux}" # i[0] is -2, but this is equivalent to I_aux[0][0] == i[0]
+                    assert I_aux[0][1] >= 0, f"{I_aux[0][1]}"
+                    assert I_aux[0][1] != I_aux[0][0], f"{I_aux[0][1]} vs {I_aux[0][0]}"
+
+                    I_aux = I_aux[0][1] # take second closest
+                    results_aux = urls_representation[I_aux]
+                    D_aux_repr = self.str2representation[results_aux].copy()
+                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2# we assume euclidean distance
+
+                    assert np.isclose(dist, D_aux[0][1]), f"{dist} vs {D_aux[0][1]}" # should work as long as euclidean distance is used
+
+                assert I_aux >= 0, I_aux
+                assert isinstance(results_aux, str), f"Expected results_aux to be a string, got {type(results_aux)}: {results_aux}"
+                assert len(D_aux_repr.shape) == 1 and D_aux_repr.shape[0] == self.action_dim, f"Expected D_aux_repr shape to be ({self.action_dim},), got {D_aux_repr.shape}"
+
+                D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
                 I[idx1][longest_dist_idx] = I_aux
                 results[-1][longest_dist_idx] = results_aux
 
             if len(results[-1]) < k:
-                raise Exception(f"This should never happen! {index.ntotal} {k}")
+                raise Exception(f"This should never happen! {index.ntotal} {k} {len(results[-1])}")
 
                 # Add items to avoid tensor errors because dimensions don't match (default representation is EoS)
                 assert index.ntotal < k, f"{index.ntotal} >= {k}"
@@ -1293,7 +1342,7 @@ class MTICLEnv(gym.Env):
                     # shuffle once per epoch
                     random.shuffle(self.translation_candidates_idx)
 
-                    self.logger_wrapper(gym.logger.debug, "Shuffle idxs for translation candidate selection (first and last 5 idxs): %s ... %s", self.translation_candidates_idx[:5] self.translation_candidates_idx[-5:])
+                    self.logger_wrapper(gym.logger.debug, "Shuffle idxs for translation candidate selection (first and last 5 idxs): %s ... %s", self.translation_candidates_idx[:5], self.translation_candidates_idx[-5:])
 
                 translation_candidate = self.translation_candidates_idx[translation_candidate]
                 src_translation_candidate = self.data[translation_candidate][0]
@@ -1355,10 +1404,11 @@ class MTICLEnv(gym.Env):
 
             if self.state_representation == "model_single_representation":
                 assert self.state_window_length == 1, self.state_window_length
-                assert self.current_state_window[self.time_step - 1].shape == (self.action_dim,), self.current_state_window[self.time_step - 1].shape
-                assert observation.shape == self.current_state_window[self.time_step - 1].shape, observation.shape
+                assert len(self.current_state_window) == 1, len(self.current_state_window)
+                assert self.current_state_window[0].shape == (self.action_dim,), self.current_state_window[0].shape
+                assert observation.shape == self.current_state_window[0].shape, observation.shape
 
-                observation += self.current_state_window[self.time_step - 1]
+                observation += self.current_state_window[0]
 
                 if self.apply_l2_normalization:
                     observation = utils.l2_normalize(observation)
@@ -1384,17 +1434,15 @@ class MTICLEnv(gym.Env):
         if self.apply_l2_normalization:
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
-        if self.time_step == 1 and self.state_representation == "model_single_representation+sentence_and_actions":
-            f = lambda r: r
-        else:
-            f = lambda r: not r
+        offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
 
-        assert f(np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step]))), self.time_step
-        assert np.allclose(self.current_state_window[self.time_step], np.zeros_like(self.current_state_window[self.time_step])), self.time_step
+        assert not np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step])), self.time_step
+
+        for idx in range(self.time_step + offset, self.current_state_window.maxlen):
+            assert np.allclose(self.current_state_window[idx], np.zeros_like(self.current_state_window[idx])), f"{self.time_step} + {offset} ...  {self.current_state_window.maxlen}: {idx}"
 
         if self.state_representation == "model_single_representation+sentence_and_actions":
             # We need to do it after append() above in order to avoid overwriting the position 1
-
             src_sentence = self.data[self.translation_candidate][0]
             model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
 

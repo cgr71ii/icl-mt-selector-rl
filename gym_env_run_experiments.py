@@ -180,6 +180,8 @@ if __name__ == "__main__":
     #max_icl_examples = 1 # TODO remove
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
+    pre_k = parsed_kwargs.pop("k", "0.05")
+    pre_k_is_float = '.' in pre_k
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
@@ -209,7 +211,7 @@ if __name__ == "__main__":
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
     #max_data_entries = 5 # TODO remove
-    #max_data_icl_examples_entries = 100 # TODO remove
+    #max_data_icl_examples_entries = 8 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
@@ -232,9 +234,9 @@ if __name__ == "__main__":
     #assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
-    k_training = max(1, int(0.05 * len(data_icl_examples_training)))
-    k_dev = max(1, int(0.05 * len(data_icl_examples_dev)))
-    k_test = max(1, int(0.05 * len(data_icl_examples_test)))
+    k_training = max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k))
+    k_dev = max(1, int(float(pre_k) * len(data_icl_examples_dev)) if pre_k_is_float else int(pre_k))
+    k_test = max(1, int(float(pre_k) * len(data_icl_examples_test)) if pre_k_is_float else int(pre_k))
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -260,14 +262,16 @@ if __name__ == "__main__":
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
-    eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    #eval_freq = 1000 # steps
+    #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
+    eval_freq = 500 # steps
+    #eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
+    patience = 6 # early stopping patience (number of evals with no improvement)
 
     logger.info("Save path: %s", save_path)
     logger.info("Evaluation frequency (steps): %d", eval_freq)
@@ -280,6 +284,7 @@ if __name__ == "__main__":
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     batch_size = 256
+    #batch_size = 2 # TODO remove
     net_arch = {
         "pi": [400, 300],
 #        "pi": [1024, 512, 1024],
@@ -293,8 +298,10 @@ if __name__ == "__main__":
     critic_learning_rate = 1e-4
     actor_learning_rate = 1e-4
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
-    init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    #init_training_steps = 1000
+    #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
+    #init_training_steps = 5000
+    #init_training_steps = 5 # TODO remove
+    init_training_steps = 100 # TODO remove
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
 
@@ -369,6 +376,7 @@ if __name__ == "__main__":
         "critic_dropout_p": 0.1,
         "critic_transformer": critic_use_transformer,
         "critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
+        "critic_first_actions_then_features": True if critic_use_transformer else False,
     }
 
     assert (actor_use_transformer and critic_use_transformer) or (not actor_use_transformer and not critic_use_transformer), "Supported: both enabled or disabled"
@@ -421,7 +429,7 @@ if __name__ == "__main__":
     #assert init_training_episodes < max_episodes
 
     # Add callbacks
-    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=6, min_evals=0, verbose=1) # early stopping
+    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=patience, min_evals=0, verbose=1) # early stopping
     # EvalCallback
     ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
     ## it does not evaluate the model performance when training finishes (we evaluate below)

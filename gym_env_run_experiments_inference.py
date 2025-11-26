@@ -145,6 +145,7 @@ if __name__ == "__main__":
         "critic_dropout_p": 0.1,
         "critic_transformer": critic_use_transformer,
         "critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
+        "critic_first_actions_then_features": True if critic_use_transformer else False,
     }
 
     assert (actor_use_transformer and critic_use_transformer) or (not actor_use_transformer and not critic_use_transformer), "Supported: both enabled or disabled"
