@@ -132,6 +132,11 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
     input_ids = inputs["input_ids"].to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device)
 
+    for idx in range(attention_mask.shape[0]):
+        assert attention_mask[idx].sum().item() > 0, f"All tokens are padding for input idx {idx}: input_ids: {input_ids[idx]}, attention_mask: {attention_mask[idx]}"
+        assert torch.all((attention_mask[idx] == 0) | (attention_mask[idx] == 1)).item(), f"Attention mask must be binary (0 or 1) for input idx {idx}: attention_mask: {attention_mask[idx]}"
+        assert torch.all(attention_mask[idx][:-1] <= attention_mask[idx][1:]).item(), f"Attention mask must be left-to-right (non-decreasing; LLMs padding) for input idx {idx}: attention_mask: {attention_mask[idx]}"
+
     # Forward pass with hidden states
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
@@ -164,6 +169,20 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         attention_mask_expanded_int = torch.round(attention_mask_expanded).int()
         last_token_indices = utils.last_one_indices(attention_mask_expanded_int)
         pooled_embeddings = hidden_states[torch.arange(hidden_states.shape[0]), last_token_indices, :]
+    elif pooling == "none":
+        # No pooling, return all token embeddings (after removing padding with attention mask)
+        pooled_embeddings = hidden_states * attention_mask_expanded
+
+        for idx in range(attention_mask.shape[0]):
+            n_non_padded_tokens = attention_mask[idx].sum().item()
+            n_padded_tokens = attention_mask.shape[1] - n_non_padded_tokens
+
+            assert torch.all(attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+            assert torch.all(attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+
+            tmp = torch.zeros(hidden_states.shape[1:], device=pooled_embeddings.device)
+            tmp[:n_non_padded_tokens, :] = pooled_embeddings[idx, n_padded_tokens:, :] # shift left to remove padding
+            pooled_embeddings[idx] = tmp
     else:
         raise ValueError(f"Unknown pooling method: {pooling}")
 

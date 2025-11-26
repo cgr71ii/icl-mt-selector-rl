@@ -126,7 +126,7 @@ class MTICLEnv(gym.Env):
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
         self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
 
-        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token"), f"Unexpected state representation: {self.state_representation}"
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
             self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
@@ -140,6 +140,10 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
             self.state_window_length = self.max_icl_examples + 2
+        elif self.state_representation == "representation_per_token" and self.state_window_length < 512:
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512)
+
+            self.state_window_length = 512
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -162,9 +166,12 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
 
         ## Other API parameters
-        self.embedding_pooling_model_method_state = utils.dict_or_default(kwargs, "embedding_pooling_model_method_state", "mean")
-        self.embedding_pooling_model_method_action = utils.dict_or_default(kwargs, "embedding_pooling_model_method_action", "mean")
+        self.embedding_pooling_model_method_state = "mean"
+        self.embedding_pooling_model_method_action = "mean"
         self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", -1)
+
+        if self.state_representation == "representation_per_token":
+            self.embedding_pooling_model_method_state = "none"
 
         # Model conf
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
@@ -978,13 +985,28 @@ class MTICLEnv(gym.Env):
         if only_representation:
             translations = torch.cat(translations, dim=0)
 
-            assert translations.shape == (len(src_sentences), self.model_hidden_size), f"Translations shape mismatch: {translations.shape} vs {(len(src_sentences), self.model_hidden_size)}"
+            if self.state_representation == "representation_per_token":
+                assert len(translations.shape) == 3, f"Translations shape mismatch for representation_per_token: {translations.shape}"
+            else:
+                assert len(translations.shape) == 2, f"Translations shape mismatch for representation: {translations.shape}"
+
+            assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token first dimension: {translations.shape} vs {len(src_sentences)}"
+            assert translations.shape[-1] == self.model_hidden_size, f"Translations shape mismatch for representation_per_token last dimension: {translations.shape} vs {self.model_hidden_size}"
 
             if numpy:
                 translations = translations.numpy()
 
             if self.apply_l2_normalization:
                 translations = utils.l2_normalize(translations)
+
+            if self.state_representation == "representation_per_token":
+                translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
+                new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
+                max_dim = min(translations.shape[-1], self.state_dim)
+                new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal
+                translations = new_translations
+
+                assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
@@ -1415,7 +1437,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation  == "model_single_representation":
+            if self.state_representation in ("model_single_representation", "representation_per_token"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
             elif self.state_representation in ("sentence_and_actions", "model_single_representation+sentence_and_actions"):
@@ -1428,26 +1450,43 @@ class MTICLEnv(gym.Env):
                 raise Exception(f"Unknown state representation: {self.state_representation}")
 
         assert isinstance(observation, np.ndarray), type(observation)
+        assert len(observation.shape) == 1, f"Expected observation to be a 1D numpy array, got shape {observation.shape}: {observation}"
+        assert observation.shape[0] % self.model_hidden_size == 0, f"Observation shape mismatch: {observation.shape[0]} vs model_hidden_size {self.model_hidden_size}"
 
         observation = observation.copy()
+
+        if self.state_representation == "representation_per_token":
+            observation = observation.reshape(-1, self.model_hidden_size) # (seq_len, model_hidden_size)
+        else:
+            offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
+
+            assert not np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step])), self.time_step
+
+            for idx in range(self.time_step + offset, self.current_state_window.maxlen):
+                assert np.allclose(self.current_state_window[idx], np.zeros_like(self.current_state_window[idx])), f"{self.time_step} + {offset} ...  {self.current_state_window.maxlen}: {idx}"
 
         if self.apply_l2_normalization:
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
-        offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
-
-        assert not np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step])), self.time_step
-
-        for idx in range(self.time_step + offset, self.current_state_window.maxlen):
-            assert np.allclose(self.current_state_window[idx], np.zeros_like(self.current_state_window[idx])), f"{self.time_step} + {offset} ...  {self.current_state_window.maxlen}: {idx}"
-
-        if self.state_representation == "model_single_representation+sentence_and_actions":
+        if self.state_representation == "model_single_representation":
+            self.current_state_window[0] = observation
+        elif self.state_representation == "model_single_representation+sentence_and_actions":
             # We need to do it after append() above in order to avoid overwriting the position 1
             src_sentence = self.data[self.translation_candidate][0]
             model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
 
             self.current_state_window[self.time_step + 1] = observation
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
+        elif self.state_representation == "representation_per_token":
+            max_idx = min(self.state_window_length - 1, observation.shape[0])
+
+            # Clean (do not remove the first position, which is reserved for the source sentence representation)
+            for idx in range(1, self.state_window_length):
+                self.current_state_window[idx] = np.zeros(self.model_hidden_size)
+
+            # Update
+            for idx in range(max_idx):
+                self.current_state_window[idx + 1] = observation[idx]
         else:
             self.current_state_window[self.time_step] = observation
 

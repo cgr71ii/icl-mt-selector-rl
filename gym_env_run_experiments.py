@@ -210,8 +210,8 @@ if __name__ == "__main__":
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
-    #max_data_entries = 5 # TODO remove
-    #max_data_icl_examples_entries = 8 # TODO remove
+    max_data_entries = 5 # TODO remove
+    max_data_icl_examples_entries = 8 # TODO remove
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
@@ -263,8 +263,8 @@ if __name__ == "__main__":
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    eval_freq = 500 # steps
-    #eval_freq = 5 # TODO remove
+    #eval_freq = 500 # steps
+    eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -283,8 +283,8 @@ if __name__ == "__main__":
     #vec_env_class = DummyVecEnv # debug
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
-    batch_size = 256
-    #batch_size = 2 # TODO remove
+    #batch_size = 256
+    batch_size = 2 # TODO remove
     net_arch = {
         "pi": [400, 300],
 #        "pi": [1024, 512, 1024],
@@ -292,7 +292,8 @@ if __name__ == "__main__":
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
-    replay_buffer_size = 1000000
+    #replay_buffer_size = 1000000
+    replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
     critic_learning_rate = 1e-4
@@ -300,8 +301,8 @@ if __name__ == "__main__":
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     #init_training_steps = 5000
-    #init_training_steps = 5 # TODO remove
-    init_training_steps = 100 # TODO remove
+    init_training_steps = 5 # TODO remove
+    #init_training_steps = 100 # TODO remove
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
 
@@ -332,12 +333,13 @@ if __name__ == "__main__":
         "target_policy_noise": 1e-3, # small values for better generalization and robustness
         "target_noise_clip": 2e-3, # small values for better generalization and robustness
     } if model_class is TD3 else {}
+    max_seq_len = 512
     actor_transformer_args_and_kwargs = {
         "d_model": 512,
         "nhead": 4,
         "dim_feedforward": 2048,
         "nlayers": 3,
-        "max_seq_len": 16,
+        "max_seq_len": max_seq_len,
         "projection_in": model_hidden_size,
         #"l2_norm": True, # disable to let the model learn how the representation should be
         "l2_norm": False,
@@ -348,7 +350,7 @@ if __name__ == "__main__":
         "nhead": 4,
         "dim_feedforward": 2048,
         "nlayers": 3,
-        "max_seq_len": 16,
+        "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
         "projection_in": model_hidden_size,
         "str_id": "critic",
     }

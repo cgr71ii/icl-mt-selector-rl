@@ -175,7 +175,6 @@ def softmax(x):
 
 def l2_normalize(emb, eps=1e-6):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
-    assert len(emb.shape) in (1, 2), "Input array must be 2D (batch_size, embedding_size)"
 
     norms = np.linalg.norm(emb, axis=-1, keepdims=True)
     #norms[norms == 0.0] = 1.0
@@ -187,7 +186,6 @@ def l2_normalize(emb, eps=1e-6):
 
 def check_l2_normalized(emb, tol=1e-1):
     assert isinstance(emb, np.ndarray), "Input must be a numpy array"
-    assert len(emb.shape) in (1, 2), "Input array must be 1D (embedding_size) or 2D (batch_size, embedding_size)"
 
     norms = np.linalg.norm(emb, axis=-1)
     v = np.abs(norms - 1)

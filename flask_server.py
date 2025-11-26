@@ -191,7 +191,7 @@ def translate():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last"):
+        if p not in ("mean", "max", "last", "none"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -385,7 +385,7 @@ def get_embedding_pooling():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last"):
+        if p not in ("mean", "max", "last", "none"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -479,7 +479,11 @@ def get_embedding_pooling():
             results = torch.stack(results, dim=0)
 
         assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}: {results}"
-        assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
+
+        if pooling[0] == "none":
+            assert len(results.shape) == 3, f"Expected results shape: (batch_size, seq_len, hidden_dim), got: {results.shape}"
+        else:
+            assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
 
     # Return results
     if len(results) != len(src_sentences):
@@ -688,6 +692,9 @@ def translate_batch(data):
             break
 
     if get_representation:
+        for idx in range(len(results) - 1):
+            assert results[idx].shape == results[idx + 1].shape, f"Results shape mismatch at idx {idx}: {results[idx].shape} vs {results[idx + 1].shape}"
+
         results = torch.cat(results, dim=0)
 
     #return results[target_task] # TODO do we need a list if the streamer is used (it seems so)?
