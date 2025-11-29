@@ -193,7 +193,7 @@ def translate():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none"):
+        if p not in ("mean", "max", "last", "none", "features"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -387,7 +387,7 @@ def get_embedding_pooling():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none"):
+        if p not in ("mean", "max", "last", "none", "features"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -482,8 +482,8 @@ def get_embedding_pooling():
 
         assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}: {results}"
 
-        if pooling[0] == "none":
-            assert len(results.shape) == 3, f"Expected results shape: (batch_size, seq_len, hidden_dim), got: {results.shape}"
+        if pooling[0] in ("none", "features"):
+            assert len(results.shape) == 3, f"Expected results shape: (batch_size, seq_len, dim), got: {results.shape}"
         else:
             assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
 
@@ -664,7 +664,7 @@ def translate_batch(data):
 
                             stored += 1
 
-                        update_values[utils.get_hash(prompt)] = output
+                        uppoolingdate_values[utils.get_hash(prompt)] = output
 
                     for k, v in update_values.items():
                         global_conf["store_translations_buffer"][k] = v
@@ -921,6 +921,8 @@ def embedding_from_given_model_batch(data):
 
 def lazy_load_llm():
     if "model_llm" not in global_conf:
+        # quantization with fp16
+        # examples of quantization: https://github.com/jogonba2/llmixtic/blob/main/src/quantization.py
         global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"])
         device = global_conf["model_llm"].device # data loading
         global_conf["device_map"] = device
@@ -1029,7 +1031,7 @@ def main(args):
                 '"', flask_port)
     logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_from_given_model -X POST -d \"" + \
                  r'name=SONAR&' + \
-                 r'lang=eng_Latn&' + \
+                 r'lang=English&' + \
                  r'sentence=SW4gSnVuZSwgdGhlIENvbW1pc3Npb24gcHVibGlzaGVkIHRoZSByZXN1bHRzIG9mIGEgcHVibGljIGNvbnN1bHRhdGlvbiBvbiB0aGUgcHJvcG9zYWxzIHdoaWNoIGZvdW5kIGJyb2FkIHN1cHBvcnQgZm9yIGNhbGxpbmcgdGhlIGFzc2VtYmx5IGEgV2Vsc2ggUGFybGlhbWVudC4K&' + \
                  r'sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
                 '"', flask_port)

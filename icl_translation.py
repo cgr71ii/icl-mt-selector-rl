@@ -173,22 +173,121 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         # No pooling, return all token embeddings (after removing padding with attention mask)
         pooled_embeddings = hidden_states * attention_mask_expanded
 
-        for idx in range(attention_mask.shape[0]):
-            n_non_padded_tokens = attention_mask[idx].sum().item()
-            n_padded_tokens = attention_mask.shape[1] - n_non_padded_tokens
+        assert pooled_embeddings.shape == hidden_states.shape, f"pooled_embeddings and hidden_states shape mismatch: {pooled_embeddings.shape} vs {hidden_states.shape}"
+    elif pooling == "features":
+        logits = outputs.logits
+        target_ids = input_ids.clone()
+        attention_mask = attention_mask.clone()
 
-            assert torch.all(attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
-            assert torch.all(attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+        # Shift logits, targets, mask and hidden states (code adapted from https://github.com/jogonba2/llmixtic/blob/911bd990e84060ea25d18a783436b621bbb6e954/src/vectorizer.py#L197)
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_targets = target_ids[..., 1:].contiguous()
+        mask = attention_mask[..., 1:].contiguous()
 
-            tmp = torch.zeros(hidden_states.shape[1:], device=pooled_embeddings.device)
+        # Get probabilities
+        probs = shift_logits.softmax(dim=-1)
+        smallest_normal = torch.finfo(
+            type=probs.dtype
+        ).smallest_normal
+        probs[probs == 0] = smallest_normal
+
+        # Compute features
+        features = ["constant", "observed", "most_likely", "entropy"]
+        model_features = {feature: torch.tensor([]) for feature in features}
+        batch_features = compute_features(
+                            probs,
+                            shift_targets,
+                            mask,
+                            eps=smallest_normal,
+                        )
+        for feature_name, feature in batch_features.items():
+            idx = features.index(feature_name)
+
+            assert idx != -1, f"Unknown feature name: {feature_name}"
+
+            del features[idx]
+
+            model_features[feature_name] = torch.cat(
+                (
+                    model_features[feature_name],
+                    feature.cpu(),
+                ),
+                dim=0,
+            )
+
+        assert len(features) == 0, f"Some features were not computed: {features}"
+
+        pooled_embeddings = torch.cat(list(model_features.values()), dim=-1)
+
+        assert pooled_embeddings.shape == (hidden_states.shape[0], hidden_states.shape[1] - 1, 4), f"pooled_embeddings shape mismatch: {pooled_embeddings.shape} vs {(hidden_states.shape[0], hidden_states.shape[1] - 1, 4)}"
+    else:
+        raise ValueError(f"Unknown pooling method: {pooling}")
+
+    if pooling in ("none", "features"):
+        assert len(pooled_embeddings.shape) == 3, f"pooled_embeddings expected shape: (batch_size, seq_len, dim); got: {pooled_embeddings.shape}"
+
+        if pooling == "none":
+            _attention_mask = attention_mask
+            expected_shape = hidden_states.shape[1:]
+        else:
+            _attention_mask = attention_mask[..., 1:]
+            expected_shape = (hidden_states.shape[1] - 1, 4)
+
+        assert pooled_embeddings.shape == (hidden_states.shape[0], *expected_shape), f"pooled_embeddings expected shape (except batch_size): {(hidden_states.shape[0], *expected_shape)}; got: {pooled_embeddings.shape}"
+
+        # Remove padding tokens with attention mask
+        for idx in range(hidden_states.shape[0]):
+            n_non_padded_tokens = _attention_mask[idx].sum().item()
+            n_padded_tokens = _attention_mask.shape[1] - n_non_padded_tokens
+
+            assert torch.all(_attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+            assert torch.all(_attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+
+            tmp = torch.zeros(expected_shape, device=pooled_embeddings.device)
             tmp[:n_non_padded_tokens, :] = pooled_embeddings[idx, n_padded_tokens:, :] # shift left to remove padding
             pooled_embeddings[idx] = tmp
     else:
-        raise ValueError(f"Unknown pooling method: {pooling}")
+        assert len(pooled_embeddings.shape) == 2, f"pooled_embeddings expected shape: (batch_size, dim); got: {pooled_embeddings.shape}"
 
     pooled_embeddings = pooled_embeddings.cpu()
 
     return pooled_embeddings
+
+def compute_features(
+    probs,
+    shift_targets,
+    mask,
+    eps=1e-14,
+    ):
+    # Feature 0: Constant feature (all zeros)
+    constant = torch.zeros_like(shift_targets).float()
+    constant = constant * mask
+
+    # Feature 1: Log probability of the observed token
+    observed = torch.log(
+            torch.gather(
+                probs, dim=-1, index=shift_targets.unsqueeze(dim=-1)
+            ).squeeze(dim=-1)
+            + eps
+        )
+    observed = observed * mask
+
+    # Feature 2: Log probability of the most likely token (according to the model)
+    most_likely = torch.log(torch.max(probs, dim=-1).values + eps)
+    most_likely = most_likely * mask
+
+    # Feature 3: Entropy of the distribution at each position
+    entropy = -torch.sum(probs * torch.log2(probs + eps), dim=-1)
+    entropy = entropy * mask
+
+    features = {
+        "constant": constant.unsqueeze(dim=-1),
+        "observed": observed.unsqueeze(dim=-1),
+        "most_likely": most_likely.unsqueeze(dim=-1),
+        "entropy": entropy.unsqueeze(dim=-1),
+    }
+
+    return features
 
 def get_token_embedding(token: str, tokenizer, model):
     token_id = tokenizer.convert_tokens_to_ids(token)
