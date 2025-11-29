@@ -212,13 +212,13 @@ if __name__ == "__main__":
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
     max_data_entries = 5 # TODO remove
     max_data_icl_examples_entries = 8 # TODO remove
-    state_representation = parsed_kwargs.get("state_representation", "representation_per_token")
+    state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
-    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "comet-22-da")
+    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "api-eval")
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
@@ -345,7 +345,8 @@ if __name__ == "__main__":
         #"l2_norm": True, # disable to let the model learn how the representation should be
         "l2_norm": False,
         "str_id": "actor",
-        "skip_n_word_embeddings_from_observation": "0:1" if state_representation == "representation_per_token" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
+        # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
+        "skip_n_word_embeddings_from_observation": "0:1" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
     }
     critic_transformer_args_and_kwargs = {
         "d_model": 512,
@@ -355,7 +356,8 @@ if __name__ == "__main__":
         "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
         "projection_in": model_hidden_size,
         "str_id": "critic",
-        "skip_n_word_embeddings_from_observation": "1:2" if state_representation == "representation_per_token" else "0:0", # "1:2" instead of "0:1" due to critic_first_actions_then_features == True
+        # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
+        "skip_n_word_embeddings_from_observation": "1:2" if state_representation == "representation_per_token_with_features" else "0:0", # "1:2" instead of "0:1" due to critic_first_actions_then_features == True
     }
     actor_use_transformer = True
     critic_use_transformer = True

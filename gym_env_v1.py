@@ -125,8 +125,9 @@ class MTICLEnv(gym.Env):
         self.max_data_entries = utils.dict_or_default(kwargs, "max_data_entries", -1)
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
         self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
+        self.action_representation = utils.dict_or_default(kwargs, "action_representation", "llm")
 
-        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features"), f"Unexpected state representation: {self.state_representation}"
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
             self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
@@ -140,7 +141,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
             self.state_window_length = self.max_icl_examples + 2
-        elif self.state_representation == "representation_per_token" and self.state_window_length < 512:
+        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512)
 
             self.state_window_length = 512
@@ -154,6 +155,7 @@ class MTICLEnv(gym.Env):
         self.embedding_single_token_model_api = utils.dict_or_default(kwargs, "embedding_single_token_model_api", "http://127.0.0.1:8000/get_embedding_from_model_embedding_matrix")
         self.embedding_pooling_model_api = utils.dict_or_default(kwargs, "embedding_pooling_model_api", "http://127.0.0.1:8000/get_embedding_pooling")
         self.eval_model_api = utils.dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
+        self.embedding_external_system = utils.dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model")
 
         assert isinstance(self.translate_model_api, str), f"translate_model_api: {type(self.translate_model_api)}: {self.translate_model_api}"
         assert isinstance(self.embedding_single_token_model_api, str), f"embedding_single_token_model_api: {type(self.embedding_single_token_model_api)}: {self.embedding_single_token_model_api}"
@@ -170,20 +172,74 @@ class MTICLEnv(gym.Env):
         self.embedding_pooling_model_method_action = "mean"
         self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", -1)
 
-        if self.state_representation == "representation_per_token":
-            self.embedding_pooling_model_method_state = "none"
+        #if self.state_representation == "representation_per_token":
+        if self.state_representation == "representation_per_token_with_features":
+            #self.embedding_pooling_model_method_state = "none"
+            self.embedding_pooling_model_method_state = "features"
 
         # Model conf
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
         self.device = torch.device(utils.dict_or_default(kwargs, "device", "cuda"))
         self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 4096) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
-        self.state_dim = self.model_hidden_size
-        self.action_dim = self.model_hidden_size
+        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size)
+        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size)
         self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
+
+        if self.state_representation == "representation_per_token_with_features":
+            self.state_dim = 4 # 4 features per token: constant, observed, most_likely, entropy
+        else:
+            self.state_dim = self.model_hidden_size
+
+        if self.action_representation != "llm":
+            self.logger_wrapper(gym.logger.info,
+                                "Remember to set the correct model_hidden_size_action_{src,trg}_sentence according to the appropriate embedding sizes: %d and %d",
+                                self.model_hidden_size_action_src_sentence, self.model_hidden_size_action_trg_sentence)
+
+        if self.action_representation == "llm":
+            self.action_dim = self.model_hidden_size
+            self.action_representation_src_sentence = "llm"
+            self.action_representation_trg_sentence = "llm"
+
+            assert self.model_hidden_size_action_src_sentence == self.model_hidden_size, self.model_hidden_size_action_src_sentence
+            assert self.model_hidden_size_action_trg_sentence == self.model_hidden_size, self.model_hidden_size_action_trg_sentence
+        elif self.action_representation.startswith("src_embedding:") and ";trg_embedding:" in self.action_representation: # "src_embedding:llm;trg_embedding:llm" is valid but different from "llm"
+            self.action_dim = self.model_hidden_size_action_src_sentence + self.model_hidden_size_action_trg_sentence
+            self.action_representation_src_sentence = self.action_representation[14:].split(";trg_embedding:")[0]
+            self.action_representation_trg_sentence = self.action_representation.split(";trg_embedding:")[1]
+
+            assert self.model_hidden_size_action_src_sentence > 0, self.model_hidden_size_action_src_sentence
+            assert self.model_hidden_size_action_trg_sentence > 0, self.model_hidden_size_action_trg_sentence
+        elif self.action_representation.startswith("src_embedding:"):
+            self.action_dim = self.model_hidden_size_action_src_sentence
+            self.model_hidden_size_action_trg_sentence = 0
+            self.action_representation_src_sentence = self.action_representation[14:]
+            self.action_representation_trg_sentence = None
+
+            assert self.model_hidden_size_action_src_sentence > 0, self.model_hidden_size_action_src_sentence
+            assert self.model_hidden_size_action_trg_sentence == 0, self.model_hidden_size_action_trg_sentence
+        #elif self.action_representation.startswith("trg_embedding:"): # we always need a method to represent the source sentence
+        #    self.action_dim = self.model_hidden_size_action_trg_sentence
+        #    self.model_hidden_size_action_src_sentence = 0
+        #    self.action_representation_src_sentence = None
+        #    self.action_representation_trg_sentence = self.action_representation[14:]
+        #
+        #    assert self.model_hidden_size_action_src_sentence == 0, self.model_hidden_size_action_src_sentence
+        #    assert self.model_hidden_size_action_trg_sentence > 0, self.model_hidden_size_action_trg_sentence
+        else:
+            raise Exception(f"Action representation not supported: {self.action_representation}")
 
         # Changes due to state concatenation
         self.state_window_type_callback = lambda l: np.concatenate(l, axis=0, dtype=np.float32)
+
+        if self.state_representation == "representation_per_token_with_features":
+            assert self.action_dim % self.state_dim == 0, f"{self.action_dim} % {self.state_dim} != 0" # we need to be sure that action can be split into tokens of state_dim size
+
+            self.logger_wrapper(gym.logger.debug, "Adding %d to state_window_length=%d to allocate action tokens", self.action_dim // self.state_dim, self.state_window_length)
+
+            self.state_window_length += self.action_dim // self.state_dim
+
         self.state_dim *= self.state_window_length
+        self.state_dim_per_token = self.state_dim // self.state_window_length
 
         # Other
         self.data_already_loaded = False
@@ -191,7 +247,7 @@ class MTICLEnv(gym.Env):
         self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
         self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False)
         self.apply_l2_normalization = utils.dict_or_default(kwargs, "apply_l2_normalization", True)
-        self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "comet-22-da")
+        self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "api-eval")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
@@ -202,14 +258,16 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
-        assert self.eval_strategy in ("comet-22-da", "chrf2"), self.eval_strategy
+        assert self.eval_strategy in ("api-eval", "chrf2"), self.eval_strategy
         assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
 
         # Env configuration
         self.logger_wrapper(gym.logger.debug, "State and action embedding size: %d %d", self.state_dim, self.action_dim)
-        self.logger_wrapper(gym.logger.info, "Model hidden size and EoS (enabled: %s) token (you may need to specify the correct values according to your LLM): %d %s", self.enable_eos_action, self.model_hidden_size, self.eos_token_str)
+        self.logger_wrapper(gym.logger.info,
+                            "Model hidden size and EoS (enabled: %s) token/sentence (you may need to specify the correct values according to your LLM or arbitrary sentence if external embedding model is used): %d %s",
+                            self.enable_eos_action, self.model_hidden_size, self.eos_token_str)
 
         # Define action and observation space (embeddings)
         #self.action_space = gym.spaces.Box(-sys.float_info.max, sys.float_info.max, shape=(self.model_hidden_size,))
@@ -308,7 +366,8 @@ class MTICLEnv(gym.Env):
         #self.last_representation_emb.append(action_url)
 
         #self.rewards.append(reward)
-        self.logger_wrapper(gym.logger.info, "Action in time step #%d (reward: %s; distance: %s): %s",
+        self.logger_wrapper(gym.logger.info,
+                            "Action in time step #%d (reward: %s; distance: %s): %s",
                             self.time_step, reward, action_url_distance, action_url)
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
@@ -388,9 +447,10 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(l, "Source data overlaps with ICL examples source sentences: %d out of %d (%.2f%%)", self.src_data_overlap_src_icl_examples, len(self.data_icl_examples), pr)
 
         if self.src_data_overlap_src_icl_examples > 0:
-            self.logger_wrapper(gym.logger.info, "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add as "
-                                                 "many additional EoS embeddings as overlapping sentences found, after removing the embedding of the overlapping ICL example source sentences, so "
-                                                 "that the model does not cheat in the translation")
+            self.logger_wrapper(gym.logger.info,
+                                "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add as "
+                                "many additional EoS embeddings as overlapping sentences found, after removing the embedding of the overlapping ICL example source sentences, so "
+                                "that the model does not cheat in the translation")
 
         # Shuffle data in order to avoid model memorization
         if options.get("shuffle_all_data", True):
@@ -412,7 +472,7 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d ICL examples", len(self.data_icl_examples))
 
         representations_str = [f"{src_icl}\t{trg_icl}" for src_icl, trg_icl in self.data_icl_examples]
-        representations_emb = self.get_icl_example_representation(self.data_icl_examples)
+        representations_emb = self.get_action_representation(self.data_icl_examples)
 
         assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
@@ -464,7 +524,10 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.info, "Obtaining representations for EoS token")
 
             representations_str = [self.eos_token_str]
-            representations_emb = self.get_token_representation(representations_str)
+            if self.action_representation in ("llm", "src_embedding:llm"): # dimensionality should match
+                representations_emb = self.get_token_representation(representations_str)
+            else:
+                representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
 
             assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
@@ -487,12 +550,12 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d sentences", len(self.data))
 
         representations_str = [d[0] for d in self.data]
-        representations_emb = self.get_icl_example_representation(representations_str, trg_is_empty=True)
+        representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
 
         assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
         for src_sentence, observation in zip(representations_str, representations_emb):
-            assert observation.shape[0] == self.model_hidden_size, f"Expected source sentence shape {self.model_hidden_size}, got {observation.shape[0]} for {src_sentence}"
+            assert observation.shape[0] == self.action_dim, f"Expected source sentence shape {self.action_dim}, got {observation.shape[0]} for {src_sentence}"
 
             self.str2representation[src_sentence] = observation
 
@@ -547,11 +610,19 @@ class MTICLEnv(gym.Env):
         #self.last_representation_str = [] # former self.last_downloaded_url_representation_url
         #self.last_representation_emb = [] # former self.last_downloaded_url_representation
         self.current_datetime = datetime.datetime.now()
+        sum_dim = 0
 
-        for _ in range(self.state_window_length):
-            self.current_state_window.append(np.zeros(self.model_hidden_size))
+        for idx in range(self.state_window_length):
+            if idx == 0:
+                self.current_state_window.append(np.zeros(self.action_dim))
+            else:
+                self.current_state_window.append(np.zeros(self.state_dim_per_token))
+
+            sum_dim += self.current_state_window[-1].shape[0]
 
         assert len(self.current_state_window) == self.current_state_window.maxlen
+        assert self.current_state_window[0].shape[0] == self.action_dim, f"{self.current_state_window[0].shape[0]} vs {self.action_dim}"
+        assert sum_dim == self.state_dim, f"{sum_dim} vs {self.state_dim}"
 
         for v in self.current_state_window:
             assert np.allclose(v, np.zeros_like(v))
@@ -563,27 +634,29 @@ class MTICLEnv(gym.Env):
         src_sentence = self.data[self.translation_candidate][0]
         action_representation = self.str2representation[src_sentence]
 
-        assert len(action_representation) == self.model_hidden_size
+        assert len(action_representation) == self.action_dim
 
         self.current_state_window[0] = action_representation
 
-        if self.state_representation == "representation_per_token":
+        if self.state_representation == "representation_per_token_with_features":
             # Fill the rest of the state window with the token representations of the source sentence
-            token_representations = self.get_translations([src_sentence], only_representation=True)[0]
+            token_representations = self.get_state_representation([src_sentence])[0]
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
             assert len(token_representations.shape) == 1, f"Expected token_representations to be a 1D numpy array, got shape {token_representations.shape}: {token_representations}"
-            assert token_representations.shape[0] % self.model_hidden_size == 0, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.model_hidden_size}"
+            assert token_representations.shape[0] % self.state_dim_per_token == 0, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
 
-            token_representations = token_representations.reshape(-1, self.model_hidden_size) # (seq_len, model_hidden_size)
+            token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
             num_tokens = min(token_representations.shape[0], self.state_window_length - 1)
+            is_zero_vector = (token_representations == 0).all(axis=1)
+            used_tokens = token_representations.shape[0] - is_zero_vector.sum(axis=0)
 
             for i in range(num_tokens):
-                assert len(token_representations[i]) == self.model_hidden_size
+                assert len(token_representations[i]) == self.state_dim_per_token
 
                 self.current_state_window[i + 1] = token_representations[i]
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token: %d tokens (used: %d)", token_representations.shape[0], num_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: %d)", token_representations.shape, used_tokens)
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -759,8 +832,8 @@ class MTICLEnv(gym.Env):
         if translation is None:
             reward = 0.0
         else:
-            if self.eval_strategy == "comet-22-da":
-                avg_eval_values, single_eval_values = self.comet_eval(src_sentence, translation, reference)
+            if self.eval_strategy == "api-eval":
+                avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
                 reward = avg_eval_values
             elif self.eval_strategy == "chrf2":
                 score = CHRF().corpus_score(translation, reference)
@@ -772,7 +845,7 @@ class MTICLEnv(gym.Env):
 
         return reward
 
-    def comet_eval(self, src, mt, ref):
+    def api_eval(self, src, mt, ref):
         assert isinstance(src, list), "Source should be a list"
         assert isinstance(mt, list), "MT should be a list"
         assert isinstance(ref, list), "Reference should be a list"
@@ -808,7 +881,83 @@ class MTICLEnv(gym.Env):
 
         return avg, scores
 
-    def get_icl_example_representation(self, icl_examples, numpy=True, trg_is_empty=False):
+    def _get_action_representation_llm(self, idx, batch, src_is_empty=False, trg_is_empty=False):
+        assert not (src_is_empty and trg_is_empty), "At least one of src_is_empty or trg_is_empty must be False"
+
+        payload = []
+        url = self.embedding_pooling_model_api
+
+        for sample in batch:
+            if src_is_empty:
+                # source sentence cannot be empty, so let's hack the trg sentence as src sentence (and swap src and trg languages)
+                assert sample["src"] is None, sample["src"]
+                assert sample["trg"] is not None, sample["trg"]
+
+                payload.append(('src_lang', self.trg_lang))
+                payload.append(('trg_lang', self.src_lang))
+                payload.append(('src_sentence', sample["trg"]))
+            else:
+                assert isinstance(sample["src"], str), type(sample["src"])
+
+                payload.append(('src_lang', self.src_lang))
+                payload.append(('trg_lang', self.trg_lang))
+                payload.append(('src_sentence', sample["src"]))
+
+            if trg_is_empty:
+                assert sample["trg"] is None, sample["trg"]
+            elif not src_is_empty: # if src_is_empty, trg sentence is used as src sentence
+                assert isinstance(sample["trg"], str), type(sample["trg"])
+
+                payload.append(('trg_sentence', sample["trg"]))
+
+        payload.append(('pooling', self.embedding_pooling_model_method_action))
+        payload.append(('layer', self.embedding_pooling_model_layer))
+
+        response = utils.requests_post(url, data=payload)
+
+        assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
+        assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+
+        response_text = json.loads(response.text)
+
+        assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
+
+        response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
+        response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+        response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+
+        return response_result
+
+    def _get_action_representation_external(self, idx, batch, lang, embedding_name, batch_side_key):
+        assert batch_side_key in ("src", "trg"), f"Invalid batch_side_key: {batch_side_key}"
+
+        if embedding_name == "llm":
+            return self._get_action_representation_llm(idx, batch, src_is_empty=False if batch_side_key == "src" else True, trg_is_empty=False if batch_side_key == "trg" else True)
+
+        payload = []
+        url = self.embedding_external_system
+
+        for sample in batch:
+            payload.append(('lang', lang))
+            payload.append(('name', embedding_name))
+            payload.append(('sentence', sample[batch_side_key]))
+
+        response = utils.requests_post(url, data=payload)
+
+        assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
+        assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+
+        response_text = json.loads(response.text)
+
+        assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
+
+        response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
+        response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+        response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+
+        return response_result
+
+    def get_action_representation(self, icl_examples, numpy=True, trg_is_empty=False):
         # format icl_examples: list of lists with two elements: [[src1, trg1], [src2, trg2], ...]
 
         assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
@@ -821,7 +970,8 @@ class MTICLEnv(gym.Env):
             assert len(icl_examples[0]) == 2, f"Expected each icl example to be a list of two elements, got {len(icl_examples[0])}: {icl_examples[0]}"
             assert isinstance(icl_examples[0][0], str) and isinstance(icl_examples[0][1], str), f"Expected each icl example to be a list of two strings, got {type(icl_examples[0][0])} and {type(icl_examples[0][1])}: {icl_examples[0]}"
 
-        url = self.embedding_pooling_model_api
+        src_embedding_model = self.action_representation_src_sentence
+        trg_embedding_model = self.action_representation_trg_sentence
         batch_size = self.batch_size
         representations = []
 
@@ -834,41 +984,31 @@ class MTICLEnv(gym.Env):
             data = [{"src": utils.encode_base64(s), "trg": utils.encode_base64(t)} for s, t in zip(src_sentences, trg_sentences)]
 
         for idx, batch in enumerate(utils.batchify(data, batch_size)):
-            payload = []
+            if src_embedding_model == "llm" and trg_embedding_model == "llm":
+                response_result = self._get_action_representation_llm(idx, batch, trg_is_empty=trg_is_empty)
 
-            for sample in batch:
-                payload.append(('src_lang', self.src_lang))
-                payload.append(('trg_lang', self.trg_lang))
-                payload.append(('src_sentence', sample["src"]))
+                representations.append(response_result)
+            else:
+                response_result_src = self._get_action_representation_external(self, idx, batch, self.src_lang, src_embedding_model, "src")
+
+                assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
+
+                if not trg_is_empty:
+                    response_result_trg = self._get_action_representation_external(self, idx, batch, self.trg_lang, trg_embedding_model, "trg")
+
+                    assert response_result_trg.shape[1] == self.model_hidden_size_action_trg_sentence, f"Target representation shape mismatch: {response_result_trg.shape} vs model_hidden_size_action_trg_sentence {self.model_hidden_size_action_trg_sentence}"
+                    assert response_result_trg.shape[0] == response_result_src.shape[0], f"Source and target representation batch size mismatch: {response_result_src.shape[0]} vs {response_result_trg.shape[0]}"
 
                 if trg_is_empty:
-                    assert sample["trg"] is None, sample["trg"]
+                    representations.append(response_result_src)
                 else:
-                    assert isinstance(sample["trg"], str), type(sample["trg"])
+                    combined_representation = torch.cat([response_result_src, response_result_trg], dim=1) # concatenate along the feature dimension
 
-                    payload.append(('trg_sentence', sample["trg"]))
-
-            payload.append(('pooling', self.embedding_pooling_model_method_action))
-            payload.append(('layer', self.embedding_pooling_model_layer))
-
-            response = utils.requests_post(url, data=payload)
-
-            assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
-
-            response_text = json.loads(response.text)
-
-            assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
-
-            response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
-            response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
-            response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
-
-            representations.append(response_result)
+                    representations.append(combined_representation)
 
         representations = torch.cat(representations, dim=0)
 
-        assert representations.shape == (len(icl_examples), self.model_hidden_size), f"Representations shape mismatch: {representations.shape} vs {(len(icl_examples), self.model_hidden_size)}"
+        assert representations.shape == (len(icl_examples), self.action_dim), f"Representations shape mismatch: {representations.shape} vs {(len(icl_examples), self.action_dim)}"
 
         if numpy:
             representations = representations.numpy()
@@ -920,6 +1060,11 @@ class MTICLEnv(gym.Env):
             representations = utils.l2_normalize(representations)
 
         return representations
+
+    def get_state_representation(self, *args, **kwargs):
+        assert "only_representation" not in kwargs, "get_state_representation does not accept only_representation argument"
+
+        return self.get_translations(*args, only_representation=True, **kwargs)
 
     def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
@@ -992,13 +1137,13 @@ class MTICLEnv(gym.Env):
         if only_representation:
             translations = torch.cat(translations, dim=0)
 
-            if self.state_representation == "representation_per_token":
-                assert len(translations.shape) == 3, f"Translations shape mismatch for representation_per_token: {translations.shape}"
+            if self.state_representation == "representation_per_token_with_features":
+                assert len(translations.shape) == 3, f"Translations shape mismatch for representation_per_token_with_features: {translations.shape}"
             else:
                 assert len(translations.shape) == 2, f"Translations shape mismatch for representation: {translations.shape}"
 
-            assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token first dimension: {translations.shape} vs {len(src_sentences)}"
-            assert translations.shape[-1] == self.model_hidden_size, f"Translations shape mismatch for representation_per_token last dimension: {translations.shape} vs {self.model_hidden_size}"
+            assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token_with_features first dimension: {translations.shape} vs {len(src_sentences)}"
+            assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch for representation_per_token_with_features last dimension: {translations.shape} vs {self.state_dim_per_token}"
 
             if numpy:
                 translations = translations.numpy()
@@ -1006,14 +1151,14 @@ class MTICLEnv(gym.Env):
             if self.apply_l2_normalization:
                 translations = utils.l2_normalize(translations)
 
-            if self.state_representation == "representation_per_token":
+            if self.state_representation == "representation_per_token_with_features":
                 translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
                 new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
                 max_dim = min(translations.shape[-1], self.state_dim)
                 new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal
                 translations = new_translations
 
-                assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+            assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
@@ -1040,7 +1185,7 @@ class MTICLEnv(gym.Env):
         proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
         assert isinstance(proto_actions, np.ndarray), f"Expected proto_actions to be a numpy array, got {type(proto_actions)}: {proto_actions}"
         assert len(proto_actions.shape) == 2, f"Expected proto_actions to be a 2D numpy array, got shape {proto_actions.shape}: {proto_actions}"
-        assert proto_actions.shape[-1] == self.model_hidden_size, f"Expected proto_actions last dimension to be {self.model_hidden_size}, got {proto_actions.shape[-1]}"
+        assert proto_actions.shape[-1] == self.action_dim, f"Expected proto_actions last dimension to be {self.action_dim}, got {proto_actions.shape[-1]}"
         assert isinstance(k, int), k
         assert k > 0, "k must be greater than 0"
 
@@ -1060,7 +1205,7 @@ class MTICLEnv(gym.Env):
             translation_candidate = []
 
             for idx, observation in enumerate(observations):
-                _observation = observation.reshape(-1, self.model_hidden_size) # (state_window_length, model_hidden_size)
+                _observation = observation.reshape(-1, self.state_dim_per_token) # (state_window_length, model_hidden_size)
                 _observation2 = _observation[0]
 
                 assert not np.allclose(_observation2, np.zeros_like(_observation2)), f"Element was expected to be found in the first position: {idx}: {_observation}"
@@ -1303,15 +1448,8 @@ class MTICLEnv(gym.Env):
                 #self.logger_wrapper(gym.logger.error, "faiss.D (min max mean stdev): %s %s %s %s", np.min(D, axis=1), np.max(D, axis=1), np.mean(D, axis=1), np.std(D, ddof=1, axis=1))
 
             _all_urls_subset = [url for url in all_urls if url not in self.str2representation]
-            _all_urls_representation = [] if len(_all_urls_subset) == 0 else self.get_icl_example_representation(_all_urls_subset)
 
-            assert len(_all_urls_subset) == len(_all_urls_representation)
             assert len(_all_urls_subset) == 0, f"This should not happen in this environment: {_all_urls_subset}"
-
-            for _child_url, _child_url_observation in zip(_all_urls_subset, _all_urls_representation):
-                assert _child_url_observation.shape == (self.action_dim,)
-
-                self.str2representation[_child_url] = _child_url_observation
 
             results = [torch.tensor(self.str2representation[url]) for url in all_urls]
             results = torch.stack(results, dim=0)
@@ -1444,9 +1582,9 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation in ("model_single_representation", "representation_per_token"):
+            if self.state_representation in ("model_single_representation", "representation_per_token_with_features"):
                 src_sentence = self.data[self.translation_candidate][0]
-                observation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+                observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
             elif self.state_representation in ("sentence_and_actions", "model_single_representation+sentence_and_actions"):
                 icl_example = '\t'.join(self.current_icl_examples[-1])
 
@@ -1458,12 +1596,12 @@ class MTICLEnv(gym.Env):
 
         assert isinstance(observation, np.ndarray), type(observation)
         assert len(observation.shape) == 1, f"Expected observation to be a 1D numpy array, got shape {observation.shape}: {observation}"
-        assert observation.shape[0] % self.model_hidden_size == 0, f"Observation shape mismatch: {observation.shape[0]} vs model_hidden_size {self.model_hidden_size}"
+        assert observation.shape[0] % self.state_dim_per_token == 0, f"Observation shape mismatch: {observation.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
 
         observation = observation.copy()
 
-        if self.state_representation == "representation_per_token":
-            observation = observation.reshape(-1, self.model_hidden_size) # (seq_len, model_hidden_size)
+        if self.state_representation == "representation_per_token_with_features":
+            observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
         else:
             offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
 
@@ -1480,22 +1618,25 @@ class MTICLEnv(gym.Env):
         elif self.state_representation == "model_single_representation+sentence_and_actions":
             # We need to do it after append() above in order to avoid overwriting the position 1
             src_sentence = self.data[self.translation_candidate][0]
-            model_single_representation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples], only_representation=True)[0]
+            model_single_representation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
+            # Set state
             self.current_state_window[self.time_step + 1] = observation
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
-        elif self.state_representation == "representation_per_token":
+        elif self.state_representation == "representation_per_token_with_features":
             num_tokens = min(observation.shape[0], self.state_window_length - 1)
+            is_zero_vector = (observation == 0).all(axis=1)
+            used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
 
             # Clean (do not remove the first position, which is reserved for the source sentence representation)
             for idx in range(1, self.state_window_length):
-                self.current_state_window[idx] = np.zeros(self.model_hidden_size)
+                self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
             for idx in range(num_tokens):
                 self.current_state_window[idx + 1] = observation[idx]
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token: %d tokens (used: %d)", observation.shape[0], num_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %d tokens (used: %d)", observation.shape, used_tokens)
         else:
             self.current_state_window[self.time_step] = observation
 
