@@ -11,6 +11,7 @@ import shelve
 
 import utils
 import icl_translation as mt_icl
+import embeddings as embeddings_import # "odd" name to avoid conflict with variables or functions named embeddings
 
 import torch
 from flask import (
@@ -90,6 +91,7 @@ def info():
             "/translate": ["GET", "POST"],
             "/get_embedding_from_model_embedding_matrix": ["GET", "POST"],
             "/get_embedding_pooling": ["GET", "POST"],
+            "/get_embedding_from_given_model": ["GET", "POST"],
             "/template_info": ["GET"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
@@ -276,7 +278,7 @@ def translate():
     # Inference
 
     disable_streamer = global_conf["disable_streamer"]
-    get_results = global_conf["streamer"].predict if not disable_streamer else translate_batch
+    get_results = global_conf["streamer_llm"].predict if not disable_streamer else translate_batch
     data = list(zip(src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences))
     results = get_results(data)
 
@@ -470,7 +472,7 @@ def get_embedding_pooling():
     # Inference
 
     disable_streamer = global_conf["disable_streamer"]
-    get_results = global_conf["streamer_embedding"].predict if not disable_streamer else translate_batch
+    get_results = global_conf["streamer_llm_embedding"].predict if not disable_streamer else translate_batch
     data = list(zip(src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences))
     results = get_results(data)
 
@@ -533,9 +535,11 @@ def translate_batch(data):
     logger.debug("Obtaining representation: %s", str(get_representation))
     logger.debug("Teacher forcing: %s", str(teacher_forcing))
 
-    model = global_conf["model"]
+    lazy_load_llm()
+
+    model = global_conf["model_llm"]
     tokenizer = global_conf["tokenizer"]
-    device = global_conf["device"]
+    device = global_conf["device_map"]
     batch_size = global_conf["batch_size"]
     _max_new_tokens = global_conf["max_new_tokens"]
 
@@ -742,7 +746,7 @@ def get_embedding_from_model_embedding_matrix():
     # Inference
 
     disable_streamer = global_conf["disable_streamer"]
-    get_results = global_conf["streamer_embedding_tokens"].predict if not disable_streamer else embedding_tokens_batch
+    get_results = global_conf["streamer_llm_embedding_tokens"].predict if not disable_streamer else embedding_tokens_batch
     _results = get_results(tokens)
     results = _results[0] if disable_streamer else _results
     results_token_id = _results[1] if disable_streamer else [-1 for _ in range(len(tokens))]
@@ -780,7 +784,9 @@ def embedding_tokens_batch(tokens):
 
     logger.debug("Data batch size (tokens): %d", len(tokens))
 
-    model = global_conf["model"]
+    lazy_load_llm()
+
+    model = global_conf["model_llm"]
     tokenizer = global_conf["tokenizer"]
 
     # Build prompts
@@ -804,10 +810,129 @@ def embedding_tokens_batch(tokens):
 
     return results, results_token_id
 
+@app.route('/get_embedding_from_given_model', methods=["GET", "POST"])
+def get_embedding_from_given_model():
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.error("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        name = utils.string2list(request_method.getlist("name"))
+        lang = utils.string2list(request_method.getlist("lang"))
+        sentences = utils.string2list(request_method.getlist("sentence"))
+    except KeyError as e:
+        logger.error("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    if len(name) != 1:
+        logger.error("Only one 'name' is allowed, got: %s", name)
+
+        return jsonify({"ok": "null", "err": "'name' should be a single value"})
+
+    if len(lang) != 1:
+        logger.error("Only one 'lang' is allowed, got: %s", lang)
+
+        return jsonify({"ok": "null", "err": "'lang' should be a single value"})
+
+    if len(sentences) == 0:
+        logger.error("No sentences: %s", sentences)
+
+        return jsonify({"ok": "null", "err": "'sentences' is a mandatory field that cannot be empty"})
+
+    name = [name[0]] * len(sentences)
+    lang = [lang[0]] * len(sentences)
+
+    logger.debug("Got %d sentences (embeddings)", len(sentences))
+
+    try:
+        sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in sentences]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    # Inference
+
+    disable_streamer = global_conf["disable_streamer"]
+    get_results = global_conf["streamer_embedding"].predict if not disable_streamer else embedding_from_given_model_batch
+    data = list(zip(name, lang, sentences))
+    results = get_results(data)
+
+    if not disable_streamer and isinstance(results, list):
+        results = torch.stack(results, dim=0)
+
+    assert len(results.shape) == 2, results.shape
+    assert results.shape[0] == len(sentences), f"{results.shape} | {len(sentences)}"
+
+    # Return results
+    if len(results) != len(sentences):
+        logger.error("Results length mismatch with the provided tokens: %s vs %d: %s vs %s",
+                     results.shape, len(sentences), results, sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided tokens: {results.shape} vs {len(sentences)}",
+        })
+
+    for idx, (n, l, s, r) in enumerate(zip(name, lang, sentences, results), 1):
+        logger.debug("Results embedding #%d: %s\t%s\t%s\t%s", idx, n, l, s, r.shape)
+
+    results = results.numpy()
+    results = pickle.dumps(results)
+    results = base64.b64encode(results).decode() # base64 tensor
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+def embedding_from_given_model_batch(data):
+    name, lang, sentences = zip(*data)
+    name = list(name)[0]
+    lang = list(lang)[0]
+    sentences = list(sentences)
+
+    logger.debug("Data batch size (embedding): %d", len(sentences))
+
+    device = global_conf["device"]
+    batch_size = global_conf["batch_size"]
+    model = global_conf["model_embedding"].get(name, None)
+    max_seq_len = global_conf["max_seq_len"]
+
+    # Get embeddings
+    embeddings, model = embeddings_import.get_embeddings(name, sentences, lang, max_seq_len=max_seq_len, device=device,
+                                                         batch_size=batch_size, model=model, return_model=True, numpy=False)
+
+    # Store model for future usage
+    global_conf["model_embedding"][name] = model
+
+    return embeddings
+
+def lazy_load_llm():
+    if "model_llm" not in global_conf:
+        global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"])
+        device = global_conf["model_llm"].device # data loading
+        global_conf["device_map"] = device
+    else:
+        # We apply this step in order to avoid loading the model multiple times due to flask debug mode
+        pass
+
 def main(args):
     force_cpu = args.force_cpu
     use_cuda = utils.use_cuda(force_cpu=force_cpu)
-    device = "auto" if use_cuda else torch.device("cpu") # auto allows to load a model using several GPUs
+    device_map = "auto" if use_cuda else torch.device("cpu") # auto allows to load a model using several GPUs
+    device = torch.device("cuda") if use_cuda else torch.device("cpu")
     pretrained_model = args.pretrained_model
     flask_port = args.flask_port
     streamer_max_latency = args.streamer_max_latency
@@ -819,14 +944,10 @@ def main(args):
         logger.warning("Since streamer is enabled, you might get slightly different results: not recommended for production")
         # Related to https://discuss.pytorch.org/t/slightly-different-results-in-same-machine-and-gpu-but-different-order/173581
 
-    logger.debug("Device: %s (CUDA_VISIBLE_DEVICES=%s)", device, os.environ.get("CUDA_VISIBLE_DEVICES", "NOT_DEFINED"))
+    logger.debug("Device: %s | %s (CUDA_VISIBLE_DEVICES=%s)", device, device_map, os.environ.get("CUDA_VISIBLE_DEVICES", "NOT_DEFINED"))
 
-    if "model" not in global_conf:
-        global_conf["model"] = AutoModelForCausalLM.from_pretrained(pretrained_model, torch_dtype=torch.float16, device_map=device)
-        device = global_conf["model"].device # data loading
-    else:
-        # We apply this step in order to avoid loading the model multiple times due to flask debug mode
-        pass
+    if "model_embedding" not in global_conf:
+        global_conf["model_embedding"] = {}
 
     global_conf["tokenizer"] = AutoTokenizer.from_pretrained(pretrained_model)
 
@@ -834,12 +955,17 @@ def main(args):
         # https://github.com/meta-llama/llama3/issues/114#issuecomment-2127131096
         global_conf["tokenizer"].pad_token = global_conf["tokenizer"].eos_token
 
+    worker_timeout = 300
+    global_conf["pretrained_model"] = pretrained_model
     global_conf["device"] = device
+    global_conf["device_map"] = device_map
     global_conf["batch_size"] = args.batch_size
     global_conf["max_new_tokens"] = args.max_new_tokens
-    global_conf["streamer"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
-    global_conf["streamer_embedding"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
-    global_conf["streamer_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=300)
+    global_conf["max_seq_len"] = args.max_seq_len
+    global_conf["streamer_llm"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
+    global_conf["streamer_llm_embedding"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
+    global_conf["streamer_llm_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
+    global_conf["streamer_embedding"] = ThreadedStreamer(embedding_from_given_model_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
@@ -901,6 +1027,12 @@ def main(args):
                  r'src_sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
                  r'trg_sentence=w4AgbCdpbnN0YXIgZCdhdXRyZXMgZXhwZXJ0cywgaWwgc2UgbW9udHJlIHNjZXB0aXF1ZSBxdWFudCDDoCBsYSBwb3NzaWJpbGl0w6kgZGUgZ3XDqXJpciBsZSBkaWFiw6h0ZSwgZmFpc2FudCByZW1hcnF1ZXIgcXVlIGNlcyByw6lzdWx0YXRzIG5lIHNvbnQgcGFzIGFwcGxpY2FibGVzIGF1eCBwZXJzb25uZXMgcXVpIHNvdWZmcmVudCBkw6lqw6AgZGUgZGlhYsOodGUgZGUgdHlwZSAxLgo=&' + \
                 '"', flask_port)
+    logger.debug("Example: curl http://127.0.0.1:%d/get_embedding_from_given_model -X POST -d \"" + \
+                 r'name=SONAR&' + \
+                 r'lang=eng_Latn&' + \
+                 r'sentence=SW4gSnVuZSwgdGhlIENvbW1pc3Npb24gcHVibGlzaGVkIHRoZSByZXN1bHRzIG9mIGEgcHVibGljIGNvbnN1bHRhdGlvbiBvbiB0aGUgcHJvcG9zYWxzIHdoaWNoIGZvdW5kIGJyb2FkIHN1cHBvcnQgZm9yIGNhbGxpbmcgdGhlIGFzc2VtYmx5IGEgV2Vsc2ggUGFybGlhbWVudC4K&' + \
+                 r'sentence=TGlrZSBzb21lIG90aGVyIGV4cGVydHMsIGhlIGlzIHNrZXB0aWNhbCBhYm91dCB3aGV0aGVyIGRpYWJldGVzIGNhbiBiZSBjdXJlZCwgbm90aW5nIHRoYXQgdGhlc2UgZmluZGluZ3MgaGF2ZSBubyByZWxldmFuY2UgdG8gcGVvcGxlIHdobyBhbHJlYWR5IGhhdmUgVHlwZSAxIGRpYWJldGVzLgo=&' + \
+                '"', flask_port)
     logger.info("Examples might not work if you are not using Flask (e.g., you are using gunicorn) and you may be necesasry to adapt them to the used configuration")
     logger.info("Sentences are expected to be provided in BASE64 format")
 
@@ -915,6 +1047,7 @@ def initialization():
     parser.add_argument('--batch-size', type=int, default=16, help="Batch size")
     parser.add_argument('--pretrained-model', default="meta-llama/Llama-2-7b-chat-hf", help="Pretrained model")
     parser.add_argument('--max-new-tokens', type=int, default=256, help="Max. length for the generated tokens")
+    parser.add_argument('--max-seq-len', type=int, default=512, help="Max. length for the input sequences (for embeddings from given model)")
     parser.add_argument('--force-cpu', action="store_true", help="Run on CPU (i.e. do not check if GPU is possible)")
     parser.add_argument('--disable-streamer', action="store_true", help="Do not use streamer (it might lead to slower inference and OOM errors)")
     parser.add_argument('--flask-port', type=int, default=5000, help="Flask port")

@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from sklearn.metrics import pairwise_distances
 
-def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_name="data", max_seq_len=512, device=None, batch_size=8, model=None, return_model=False):
+def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_name="data", max_seq_len=512, device=None, batch_size=8, model=None, return_model=False, numpy=True):
     # Code adapted from https://github.com/ArmelRandy/ICL-MT/blob/fbef2aeec4f04e2dd63f2f726f946c143874bcf4/miscellaneous/embedding.py
     # max_seq_len does make sense for computing the embeddings: https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L277
 
@@ -51,12 +51,19 @@ def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_n
             t2vec_model = TextToEmbeddingModelPipeline(encoder=model_name_or_path, tokenizer=model_name_or_path, device=device) if model is None else model
             model = t2vec_model
             embeddings = t2vec_model.predict(sentences, source_lang=lang, max_seq_len=max_seq_len, batch_size=batch_size) # https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L211
-            embeddings = embeddings.detach().cpu().numpy()
+            embeddings = embeddings.detach().cpu()
         else:
             raise Exception(f"Embeddings not supported: {name}")
 
     assert embeddings is not None, "Embeddings could not be computed"
-    assert isinstance(embeddings, np.ndarray), f"Embeddings must be a numpy array, got {type(embeddings)}: {embeddings}"
+
+    if numpy:
+        embeddings = embeddings.numpy()
+
+        assert isinstance(embeddings, np.ndarray), f"Embeddings must be a numpy array, got {type(embeddings)}: {embeddings}"
+    else:
+        assert isinstance(embeddings, torch.Tensor), f"Embeddings must be a torch Tensor, got {type(embeddings)}: {embeddings}"
+
     assert len(embeddings.shape) == 2, f"Embeddings must be a 2D numpy array, got {len(embeddings.shape)}D: {embeddings.shape}"
     assert embeddings.shape[0] == len(sentences), f"Embeddings first dimension must be equal to the number of sentences: {embeddings.shape[0]} vs {len(sentences)}"
 
