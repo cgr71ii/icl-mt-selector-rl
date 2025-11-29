@@ -3,10 +3,11 @@ import os
 
 import utils
 
+import torch
 import numpy as np
 from sklearn.metrics import pairwise_distances
 
-def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_name="data", max_seq_len=512, device=None, batch_size=8):
+def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_name="data", max_seq_len=512, device=None, batch_size=8, model=None, return_model=False):
     # Code adapted from https://github.com/ArmelRandy/ICL-MT/blob/fbef2aeec4f04e2dd63f2f726f946c143874bcf4/miscellaneous/embedding.py
     # max_seq_len does make sense for computing the embeddings: https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L277
 
@@ -18,6 +19,11 @@ def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_n
             device = "cuda"
         else:
             device = "cpu"
+
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    assert isinstance(device, torch.device), type(device)
 
     handle_files = data_dir is not None and filename is not None
     embeddings = None
@@ -42,9 +48,10 @@ def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_n
             from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
 
             model_name_or_path = "text_sonar_basic_encoder"
-            t2vec_model = TextToEmbeddingModelPipeline(encoder=model_name_or_path, tokenizer=model_name_or_path)
-            embeddings = t2vec_model.predict(sentences, source_lang=lang, max_seq_len=max_seq_len, device=device, batch_size=batch_size) # https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L211
-            embeddings = embeddings.detach().numpy()
+            t2vec_model = TextToEmbeddingModelPipeline(encoder=model_name_or_path, tokenizer=model_name_or_path, device=device) if model is None else model
+            model = t2vec_model
+            embeddings = t2vec_model.predict(sentences, source_lang=lang, max_seq_len=max_seq_len, batch_size=batch_size) # https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L211
+            embeddings = embeddings.detach().cpu().numpy()
         else:
             raise Exception(f"Embeddings not supported: {name}")
 
@@ -55,6 +62,9 @@ def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_n
 
     if handle_files and not embeddings_exist:
         embeddings.tofile(final_path)
+
+    if return_model:
+        return embeddings, model
 
     return embeddings
 

@@ -520,18 +520,7 @@ class MTICLEnv(gym.Env):
         self._init_translation_candidate_variables()
 
         # soft reset
-        if options.get("soft_reset_after_hard_reset", True):
-            observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
-        else:
-            self.logger_wrapper(gym.logger.info, "No soft reset after hard reset: returning fake observation")
-
-            info = {}
-            _current_state_window = collections.deque(maxlen=self.state_window_length)
-
-            for _ in range(self.state_window_length):
-                _current_state_window.append(np.zeros(self.model_hidden_size))
-
-            observation = self.state_window_type_callback(_current_state_window).copy()
+        observation, info = self._soft_reset(seed, {**(options if isinstance(options, dict) else {}), **{"reset_from_hard_reset": True}})
 
         return observation, info
 
@@ -570,13 +559,31 @@ class MTICLEnv(gym.Env):
         # Select translation sentence for the episode
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
 
-        # Get the observation for the first time step
+        # Get the initial observation
         src_sentence = self.data[self.translation_candidate][0]
-        observation = self.str2representation[src_sentence]
+        action_representation = self.str2representation[src_sentence]
 
-        assert self.time_step == 0, self.time_step
+        assert len(action_representation) == self.model_hidden_size
 
-        self.current_state_window[self.time_step] = observation
+        self.current_state_window[0] = action_representation
+
+        if self.state_representation == "representation_per_token":
+            # Fill the rest of the state window with the token representations of the source sentence
+            token_representations = self.get_translations([src_sentence], only_representation=True)[0]
+
+            assert isinstance(token_representations, np.ndarray), type(token_representations)
+            assert len(token_representations.shape) == 1, f"Expected token_representations to be a 1D numpy array, got shape {token_representations.shape}: {token_representations}"
+            assert token_representations.shape[0] % self.model_hidden_size == 0, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.model_hidden_size}"
+
+            token_representations = token_representations.reshape(-1, self.model_hidden_size) # (seq_len, model_hidden_size)
+            num_tokens = min(token_representations.shape[0], self.state_window_length - 1)
+
+            for i in range(num_tokens):
+                assert len(token_representations[i]) == self.model_hidden_size
+
+                self.current_state_window[i + 1] = token_representations[i]
+
+            self.logger_wrapper(gym.logger.debug, "representation_per_token: %d tokens (used: %d)", token_representations.shape[0], num_tokens)
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -1478,15 +1485,17 @@ class MTICLEnv(gym.Env):
             self.current_state_window[self.time_step + 1] = observation
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
         elif self.state_representation == "representation_per_token":
-            max_idx = min(self.state_window_length - 1, observation.shape[0])
+            num_tokens = min(observation.shape[0], self.state_window_length - 1)
 
             # Clean (do not remove the first position, which is reserved for the source sentence representation)
             for idx in range(1, self.state_window_length):
                 self.current_state_window[idx] = np.zeros(self.model_hidden_size)
 
             # Update
-            for idx in range(max_idx):
+            for idx in range(num_tokens):
                 self.current_state_window[idx + 1] = observation[idx]
+
+            self.logger_wrapper(gym.logger.debug, "representation_per_token: %d tokens (used: %d)", observation.shape[0], num_tokens)
         else:
             self.current_state_window[self.time_step] = observation
 
