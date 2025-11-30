@@ -37,9 +37,10 @@ def eval(model, source, translation, reference, batch_size=8, gpus=1, zero_score
 def main():
     batch_size = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     print_all_scores = bool(sys.argv[2]) if len(sys.argv) > 2 else False
+    model_name = sys.argv[3] if len(sys.argv) > 3 else "Unbabel/wmt22-comet-da"
 
     # Load COMET 22 DA
-    model_path = download_model("Unbabel/wmt22-comet-da")
+    model_path = download_model(model_name)
     model = load_from_checkpoint(model_path)
 
     sources, translations, references = [], [], []

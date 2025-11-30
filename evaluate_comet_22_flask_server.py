@@ -200,9 +200,10 @@ def main(args):
         # We apply this step in order to avoid loading the model multiple times due to flask debug mode
         pass
 
+    worker_timeout = 300
     global_conf["gpus"] = gpus
     global_conf["batch_size"] = args.batch_size
-    global_conf["streamer"] = ThreadedStreamer(evaluate_comet_22_batch, batch_size=args.batch_size, max_latency=streamer_max_latency)
+    global_conf["streamer"] = ThreadedStreamer(evaluate_comet_22_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["disable_streamer"] = disable_streamer
 
     # Some guidance

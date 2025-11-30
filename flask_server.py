@@ -835,15 +835,10 @@ def get_embedding_from_given_model():
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
 
-    if len(name) != 1:
-        logger.error("Only one 'name' is allowed, got: %s", name)
+    if len(set(name)) > 1 or len(set(lang)) > 1:
+        logger.error("Only one 'name' or 'lang' is allowed, got: %s %s", name, lang)
 
-        return jsonify({"ok": "null", "err": "'name' should be a single value"})
-
-    if len(lang) != 1:
-        logger.error("Only one 'lang' is allowed, got: %s", lang)
-
-        return jsonify({"ok": "null", "err": "'lang' should be a single value"})
+        return jsonify({"ok": "null", "err": "'name' and 'lang' should be a single value"})
 
     if len(sentences) == 0:
         logger.error("No sentences: %s", sentences)

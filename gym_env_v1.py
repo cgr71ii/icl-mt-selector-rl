@@ -181,8 +181,8 @@ class MTICLEnv(gym.Env):
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
         self.device = torch.device(utils.dict_or_default(kwargs, "device", "cuda"))
         self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 4096) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
-        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size)
-        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size)
+        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, type=int)
+        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, type=int)
         self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
 
         if self.state_representation == "representation_per_token_with_features":
@@ -192,7 +192,7 @@ class MTICLEnv(gym.Env):
 
         if self.action_representation != "llm":
             self.logger_wrapper(gym.logger.info,
-                                "Remember to set the correct model_hidden_size_action_{src,trg}_sentence according to the appropriate embedding sizes: %d and %d",
+                                "Remember to set the correct model_hidden_size_action_{src,trg}_sentence according to the appropriate embedding sizes: %s and %s",
                                 self.model_hidden_size_action_src_sentence, self.model_hidden_size_action_trg_sentence)
 
         if self.action_representation == "llm":
@@ -228,6 +228,8 @@ class MTICLEnv(gym.Env):
         else:
             raise Exception(f"Action representation not supported: {self.action_representation}")
 
+        assert self.action_representation_src_sentence is not None # We always need a method to represent the source sentence
+
         # Changes due to state concatenation
         self.state_window_type_callback = lambda l: np.concatenate(l, axis=0, dtype=np.float32)
         self.state_dim_per_token = self.state_dim
@@ -242,7 +244,8 @@ class MTICLEnv(gym.Env):
         self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
         self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
         self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False)
-        self.apply_l2_normalization = utils.dict_or_default(kwargs, "apply_l2_normalization", True)
+        self.apply_l2_normalization_state = utils.dict_or_default(kwargs, "apply_l2_normalization_state", True)
+        self.apply_l2_normalization_action = utils.dict_or_default(kwargs, "apply_l2_normalization_action", True)
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "api-eval")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
@@ -251,6 +254,14 @@ class MTICLEnv(gym.Env):
 
         if not self.enable_eos_action:
             self.knn_always_add_eos_action = False
+
+        if self.state_representation == "representation_per_token_with_features":
+            assert self.embedding_pooling_model_method_state == "features", self.embedding_pooling_model_method_state
+
+            if self.apply_l2_normalization_state:
+                self.logger_wrapper(gym.logger.warn, "L2 normalization should not be enabled with 'representation_per_token_with_features' state representation: disabling")
+
+                self.apply_l2_normalization_state = False
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
@@ -559,7 +570,7 @@ class MTICLEnv(gym.Env):
             self.str2representation[src_sentence] = observation
 
         ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
-        representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization)
+        representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
 
         self.src_sentences_index.add(np.array(representations_emb).astype(np.float32)) # TODO does shuffle=True affect to the multiple environments running in parallel and doing retrieval in the dummy training environment?
 
@@ -936,6 +947,14 @@ class MTICLEnv(gym.Env):
         assert batch_side_key in ("src", "trg"), f"Invalid batch_side_key: {batch_side_key}"
 
         if embedding_name == "llm":
+            batch = list(batch)
+
+            for idx in range(len(batch)):
+                if batch_side_key == "src":
+                    batch[idx]["trg"] = None
+                elif batch_side_key == "trg":
+                    batch[idx]["src"] = None
+
             return self._get_action_representation_llm(idx, batch, src_is_empty=False if batch_side_key == "src" else True, trg_is_empty=False if batch_side_key == "trg" else True)
 
         payload = []
@@ -988,22 +1007,24 @@ class MTICLEnv(gym.Env):
             data = [{"src": utils.encode_base64(s), "trg": utils.encode_base64(t)} for s, t in zip(src_sentences, trg_sentences)]
 
         for idx, batch in enumerate(utils.batchify(data, batch_size)):
+            assert isinstance(batch, list), f"Expected batch to be a list, got {type(batch)}: {batch}"
+
             if src_embedding_model == "llm" and trg_embedding_model == "llm":
                 response_result = self._get_action_representation_llm(idx, batch, trg_is_empty=trg_is_empty)
 
                 representations.append(response_result)
             else:
-                response_result_src = self._get_action_representation_external(self, idx, batch, self.src_lang, src_embedding_model, "src")
+                response_result_src = self._get_action_representation_external(idx, batch, self.src_lang, src_embedding_model, "src")
 
                 assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
 
-                if not trg_is_empty:
-                    response_result_trg = self._get_action_representation_external(self, idx, batch, self.trg_lang, trg_embedding_model, "trg")
+                if not trg_is_empty and trg_embedding_model is not None:
+                    response_result_trg = self._get_action_representation_external(idx, batch, self.trg_lang, trg_embedding_model, "trg")
 
                     assert response_result_trg.shape[1] == self.model_hidden_size_action_trg_sentence, f"Target representation shape mismatch: {response_result_trg.shape} vs model_hidden_size_action_trg_sentence {self.model_hidden_size_action_trg_sentence}"
                     assert response_result_trg.shape[0] == response_result_src.shape[0], f"Source and target representation batch size mismatch: {response_result_src.shape[0]} vs {response_result_trg.shape[0]}"
 
-                if trg_is_empty:
+                if trg_is_empty or trg_embedding_model is None:
                     representations.append(response_result_src)
                 else:
                     combined_representation = torch.cat([response_result_src, response_result_trg], dim=1) # concatenate along the feature dimension
@@ -1017,7 +1038,7 @@ class MTICLEnv(gym.Env):
         if numpy:
             representations = representations.numpy()
 
-        if self.apply_l2_normalization:
+        if self.apply_l2_normalization_action:
             representations = utils.l2_normalize(representations)
 
         return representations
@@ -1060,7 +1081,7 @@ class MTICLEnv(gym.Env):
         if numpy:
             representations = representations.numpy()
 
-        if self.apply_l2_normalization:
+        if self.apply_l2_normalization_action:
             representations = utils.l2_normalize(representations)
 
         return representations
@@ -1152,7 +1173,7 @@ class MTICLEnv(gym.Env):
             if numpy:
                 translations = translations.numpy()
 
-            if self.apply_l2_normalization:
+            if self.apply_l2_normalization_state:
                 translations = utils.l2_normalize(translations)
 
             if self.state_representation == "representation_per_token_with_features":
@@ -1580,7 +1601,7 @@ class MTICLEnv(gym.Env):
 
                 observation += self.current_state_window[0]
 
-                if self.apply_l2_normalization:
+                if self.apply_l2_normalization_state:
                     observation = utils.l2_normalize(observation)
         else:
             # Update state
@@ -1613,7 +1634,7 @@ class MTICLEnv(gym.Env):
             for idx in range(self.time_step + offset, self.current_state_window.maxlen):
                 assert np.allclose(self.current_state_window[idx], np.zeros_like(self.current_state_window[idx])), f"{self.time_step} + {offset} ...  {self.current_state_window.maxlen}: {idx}"
 
-        if self.apply_l2_normalization:
+        if self.apply_l2_normalization_state:
             assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
         if self.state_representation == "model_single_representation":
