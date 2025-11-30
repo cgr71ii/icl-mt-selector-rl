@@ -224,6 +224,7 @@ if __name__ == "__main__":
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
+    parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 1)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
@@ -293,8 +294,8 @@ if __name__ == "__main__":
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
-    #replay_buffer_size = 1000000
-    replay_buffer_size = 10000
+    replay_buffer_size = 1000000
+    #replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
     critic_learning_rate = 1e-4
@@ -326,6 +327,10 @@ if __name__ == "__main__":
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
     action_noise = normal_action_noise
+    action_dim = env_training_dummy.action_dim
+    state_dim_per_token = env_training_dummy.state_dim_per_token
+    state_window_length = env_training_dummy.state_window_length
+    skip_we = action_dim // state_dim_per_token
     callbacks = []
     #model_class = DDPG
     model_class = TD3
@@ -334,19 +339,21 @@ if __name__ == "__main__":
         "target_policy_noise": 1e-3, # small values for better generalization and robustness
         "target_noise_clip": 2e-3, # small values for better generalization and robustness
     } if model_class is TD3 else {}
-    max_seq_len = 512
+    max_seq_len = 8192 # the positional encoding is absolute and using this big value does not affect to the previous positions
     actor_transformer_args_and_kwargs = {
         "d_model": 512,
         "nhead": 4,
         "dim_feedforward": 2048,
         "nlayers": 3,
         "max_seq_len": max_seq_len,
-        "projection_in": model_hidden_size,
+        "projection_in": state_dim_per_token,
         #"l2_norm": True, # disable to let the model learn how the representation should be
         "l2_norm": False,
         "str_id": "actor",
         # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
-        "skip_n_word_embeddings_from_observation": "0:1" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
+        "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
+        #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+        "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # no action, due to skip_n_word_embeddings_from_observation
     }
     critic_transformer_args_and_kwargs = {
         "d_model": 512,
@@ -354,10 +361,12 @@ if __name__ == "__main__":
         "dim_feedforward": 2048,
         "nlayers": 3,
         "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
-        "projection_in": model_hidden_size,
+        "projection_in": state_dim_per_token,
         "str_id": "critic",
         # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
-        "skip_n_word_embeddings_from_observation": "1:2" if state_representation == "representation_per_token_with_features" else "0:0", # "1:2" instead of "0:1" due to critic_first_actions_then_features == True
+        "skip_n_word_embeddings_from_observation": f"{skip_we}:{skip_we * 2}" if state_representation == "representation_per_token_with_features" else "0:0", # "{skip_we}:{skip_we * 2}" instead of "0:{skip_we}" due to critic_first_actions_then_features == True
+        #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+        "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
     }
     actor_use_transformer = True
     critic_use_transformer = True

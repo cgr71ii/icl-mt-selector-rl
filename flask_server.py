@@ -664,7 +664,7 @@ def translate_batch(data):
 
                             stored += 1
 
-                        uppoolingdate_values[utils.get_hash(prompt)] = output
+                        update_values[utils.get_hash(prompt)] = output
 
                     for k, v in update_values.items():
                         global_conf["store_translations_buffer"][k] = v

@@ -141,10 +141,10 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
             self.state_window_length = self.max_icl_examples + 2
-        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512:
-            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512)
+        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512 + 1:
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512 + 1)
 
-            self.state_window_length = 512
+            self.state_window_length = 512 + 1 # +1 for the action representation at the beginning
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -230,16 +230,12 @@ class MTICLEnv(gym.Env):
 
         # Changes due to state concatenation
         self.state_window_type_callback = lambda l: np.concatenate(l, axis=0, dtype=np.float32)
+        self.state_dim_per_token = self.state_dim
+        self.state_dim *= self.state_window_length - 1 # -1 because we add the action in the next line
+        self.state_dim += self.action_dim # we add the action at the beginning of the state to check overlapping actions with the translation candidate source sentence
 
-        if self.state_representation == "representation_per_token_with_features":
-            assert self.action_dim % self.state_dim == 0, f"{self.action_dim} % {self.state_dim} != 0" # we need to be sure that action can be split into tokens of state_dim size
-
-            self.logger_wrapper(gym.logger.debug, "Adding %d to state_window_length=%d to allocate action tokens", self.action_dim // self.state_dim, self.state_window_length)
-
-            self.state_window_length += self.action_dim // self.state_dim
-
-        self.state_dim *= self.state_window_length
-        self.state_dim_per_token = self.state_dim // self.state_window_length
+        assert self.action_dim % self.state_dim_per_token == 0, f"{self.action_dim} % {self.state_dim_per_token} != 0" # we need to be sure that action can be split into tokens of state_dim size
+        assert self.state_dim % self.state_dim_per_token == 0, f"{self.state_dim} % {self.state_dim_per_token} != 0"
 
         # Other
         self.data_already_loaded = False
@@ -483,6 +479,7 @@ class MTICLEnv(gym.Env):
 
         for _str, emb in zip(representations_str, representations_emb):
             assert emb.shape[0] == self.action_dim, f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+            assert _str not in self.str2representation, f"ICL example {_str} already in str2representation"
 
             self.str2representation[_str] = emb
 
@@ -535,6 +532,7 @@ class MTICLEnv(gym.Env):
 
             for _str, emb in zip(representations_str, representations_emb):
                 assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+                assert _str not in self.str2representation, f"EoS token {_str} already in str2representation"
 
                 self.str2representation[_str] = emb
 
@@ -556,6 +554,7 @@ class MTICLEnv(gym.Env):
 
         for src_sentence, observation in zip(representations_str, representations_emb):
             assert observation.shape[0] == self.action_dim, f"Expected source sentence shape {self.action_dim}, got {observation.shape[0]} for {src_sentence}"
+            assert src_sentence not in self.str2representation, f"Source sentence {src_sentence} already in str2representation"
 
             self.str2representation[src_sentence] = observation
 
@@ -587,6 +586,24 @@ class MTICLEnv(gym.Env):
 
         return observation, info
 
+    def _reset_state(self):
+        sum_dim = 0
+
+        for idx in range(self.state_window_length):
+            if idx == 0:
+                self.current_state_window.append(np.zeros(self.action_dim))
+            else:
+                self.current_state_window.append(np.zeros(self.state_dim_per_token))
+
+            sum_dim += self.current_state_window[-1].shape[0]
+
+        assert len(self.current_state_window) == self.current_state_window.maxlen
+        assert self.current_state_window[0].shape[0] == self.action_dim, f"{self.current_state_window[0].shape[0]} vs {self.action_dim}"
+        assert sum_dim == self.state_dim, f"{sum_dim} vs {self.state_dim}"
+
+        for v in self.current_state_window:
+            assert np.allclose(v, np.zeros_like(v))
+
     def _soft_reset(self, seed=None, options=None):
         # Difference with self._hard_reset: we keep all the results from the models to avoid computing them again
         assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
@@ -610,22 +627,9 @@ class MTICLEnv(gym.Env):
         #self.last_representation_str = [] # former self.last_downloaded_url_representation_url
         #self.last_representation_emb = [] # former self.last_downloaded_url_representation
         self.current_datetime = datetime.datetime.now()
-        sum_dim = 0
 
-        for idx in range(self.state_window_length):
-            if idx == 0:
-                self.current_state_window.append(np.zeros(self.action_dim))
-            else:
-                self.current_state_window.append(np.zeros(self.state_dim_per_token))
-
-            sum_dim += self.current_state_window[-1].shape[0]
-
-        assert len(self.current_state_window) == self.current_state_window.maxlen
-        assert self.current_state_window[0].shape[0] == self.action_dim, f"{self.current_state_window[0].shape[0]} vs {self.action_dim}"
-        assert sum_dim == self.state_dim, f"{sum_dim} vs {self.state_dim}"
-
-        for v in self.current_state_window:
-            assert np.allclose(v, np.zeros_like(v))
+        # Reset state (self.current_state_window)
+        self._reset_state()
 
         # Select translation sentence for the episode
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
@@ -656,7 +660,7 @@ class MTICLEnv(gym.Env):
 
                 self.current_state_window[i + 1] = token_representations[i]
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: %d)", token_representations.shape, used_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, num_tokens)
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -1205,10 +1209,9 @@ class MTICLEnv(gym.Env):
             translation_candidate = []
 
             for idx, observation in enumerate(observations):
-                _observation = observation.reshape(-1, self.state_dim_per_token) # (state_window_length, model_hidden_size)
-                _observation2 = _observation[0]
+                _observation2 = observation[:self.action_dim]
 
-                assert not np.allclose(_observation2, np.zeros_like(_observation2)), f"Element was expected to be found in the first position: {idx}: {_observation}"
+                assert not np.allclose(_observation2, np.zeros_like(_observation2)), f"Element was expected to be found in the first position: {idx}: {_observation2}"
 
                 D_overlap, I_overlap = self.src_sentences_index.search(np.expand_dims(_observation2, axis=0), 1)
 
@@ -1218,7 +1221,7 @@ class MTICLEnv(gym.Env):
                 i_overlap = I_overlap[0]
 
                 assert len(d_overlap) == 1 and len(i_overlap) == 1, f"Expected single result from src_sentences_index search, got distances {d_overlap} and indices {i_overlap}"
-                assert i_overlap[0] >= 0, f"Expected to find overlapping source sentence in src_sentences_index, got distance {d_overlap[0]} and index {i_overlap[0]}: {_observation2} vs {_observation}"
+                assert i_overlap[0] >= 0, f"Expected to find overlapping source sentence in src_sentences_index, got distance {d_overlap[0]} and index {i_overlap[0]}: {_observation2}"
 
                 src_sentence = self.data[i_overlap[0]][0]
                 _observation3 = self.str2representation[src_sentence]
@@ -1236,7 +1239,7 @@ class MTICLEnv(gym.Env):
 
                     self.logger_wrapper(gym.logger.error, "Found source sentence with non-matching representation (index distance: %s): representation from index %s " \
                                                           "vs representation from str2representation %s for src_sentence %s", d_overlap[0], _observation2, _observation3, src_sentence)
-                    self.logger_wrapper(gym.logger.error, "_observation: %s", _observation)
+                    self.logger_wrapper(gym.logger.error, "observation: %s: %s", observation.shape, observation)
                     self.logger_wrapper(gym.logger.error, "Non-matching values (1): %s and %s", _observation2[allclose_non_assert_part1], _observation3[allclose_non_assert_part1])
                     self.logger_wrapper(gym.logger.error, "Non-matching values (2): %s and %s", _observation2[allclose_non_assert_part2], _observation3[allclose_non_assert_part2])
 
@@ -1636,7 +1639,7 @@ class MTICLEnv(gym.Env):
             for idx in range(num_tokens):
                 self.current_state_window[idx + 1] = observation[idx]
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %d tokens (used: %d)", observation.shape, used_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, num_tokens)
         else:
             self.current_state_window[self.time_step] = observation
 
