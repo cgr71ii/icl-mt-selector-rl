@@ -210,8 +210,8 @@ if __name__ == "__main__":
     # set defaults in case they are not provided
     max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
     max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
-    max_data_entries = 5 # TODO remove
-    max_data_icl_examples_entries = 8 # TODO remove
+    #max_data_entries = 5 # TODO remove
+    #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -225,6 +225,8 @@ if __name__ == "__main__":
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 1)
+    parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
+    parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
@@ -265,8 +267,8 @@ if __name__ == "__main__":
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    #eval_freq = 500 # steps
-    eval_freq = 5 # TODO remove
+    eval_freq = 500 # steps
+    #eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -286,7 +288,7 @@ if __name__ == "__main__":
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
-    batch_size = 2 # TODO remove
+    batch_size = 16 # TODO remove
     net_arch = {
         "pi": [400, 300],
 #        "pi": [1024, 512, 1024],
@@ -302,8 +304,8 @@ if __name__ == "__main__":
     actor_learning_rate = 1e-4
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    #init_training_steps = 5000
-    init_training_steps = 5 # TODO remove
+    init_training_steps = 5000
+    #init_training_steps = 5 # TODO remove
     #init_training_steps = 100 # TODO remove
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
@@ -350,7 +352,6 @@ if __name__ == "__main__":
         #"l2_norm": True, # disable to let the model learn how the representation should be
         "l2_norm": False,
         "str_id": "actor",
-        # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
         "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
         #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
         "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # no action, due to skip_n_word_embeddings_from_observation
@@ -363,7 +364,6 @@ if __name__ == "__main__":
         "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
         "projection_in": state_dim_per_token,
         "str_id": "critic",
-        # TODO watch out skip_n_word_embeddings_from_observation, as it depends on action_dim and state_dim_per_token!
         "skip_n_word_embeddings_from_observation": f"{skip_we}:{skip_we * 2}" if state_representation == "representation_per_token_with_features" else "0:0", # "{skip_we}:{skip_we * 2}" instead of "0:{skip_we}" due to critic_first_actions_then_features == True
         #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
         "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
@@ -419,8 +419,8 @@ if __name__ == "__main__":
             "callback_retrieve_knn": retrieve_embeddings_training,
             "callback_retrieve_knn_training": retrieve_embeddings_training_training,
             "k": k_training,
-            "add_all_knn_to_batch": True, # Faster
-            #"add_all_knn_to_batch": False, # Better avoid due to removal of overlapping actions
+            #"add_all_knn_to_batch": True, # Faster
+            "add_all_knn_to_batch": False,
             "apply_rws_inference": apply_rws_inference,
             "exploration_rate": 0.1,
             **policy_actor_kwargs,
@@ -508,7 +508,8 @@ if __name__ == "__main__":
             "callback_retrieve_knn": retrieve_embeddings_dev,
             "callback_retrieve_knn_training": None,
             "k": k_dev,
-            "add_all_knn_to_batch": True, # Faster
+            #"add_all_knn_to_batch": True, # Faster
+            "add_all_knn_to_batch": False,
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
@@ -543,7 +544,8 @@ if __name__ == "__main__":
             "callback_retrieve_knn": retrieve_embeddings_test,
             "callback_retrieve_knn_training": None,
             "k": k_test,
-            "add_all_knn_to_batch": True, # Faster
+            #"add_all_knn_to_batch": True, # Faster
+            "add_all_knn_to_batch": False,
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,

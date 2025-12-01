@@ -8,6 +8,8 @@ def init(batch_size=16, streamer_max_latency=0.1, use_all_gpus=False, pretrained
 
     devices = ''
 
+    logging.warning("Watch out multi-GPU usage: if gunicorn is used, xCOMET uses pytorch lightning and there may be conflicts. Ideally, gunicorn should use -w and pytorch lightning use a single node")
+
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         devices = os.environ["CUDA_VISIBLE_DEVICES"].split(',')
 

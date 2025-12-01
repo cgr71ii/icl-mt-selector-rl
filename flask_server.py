@@ -892,6 +892,42 @@ def get_embedding_from_given_model():
         "err": "null",
     })
 
+@app.route('/get_embedding_from_given_model_close', methods=["GET", "POST"])
+def get_embedding_from_given_model_close():
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.error("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        name = utils.string2list(request_method.getlist("name"))
+    except KeyError as e:
+        logger.error("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    for n in name:
+        if n in global_conf["model_embedding"]:
+            del global_conf["model_embedding"][n]
+
+    torch.cuda.empty_cache()
+
+    logger.debug("Models removed: %s", name)
+
+    return jsonify({
+        "ok": "ok",
+        "err": "null",
+    })
+
 def embedding_from_given_model_batch(data):
     name, lang, sentences = zip(*data)
     name = list(name)[0]

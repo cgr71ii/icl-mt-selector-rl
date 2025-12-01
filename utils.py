@@ -57,8 +57,8 @@ def string2list(s):
 
     return [s] if isinstance(s, str) else s
 
-def dict_or_default(d, k, default_value, type=None):
-    return (type(d[k]) if type is not None else d[k]) if k in d else default_value
+def dict_or_default(d, k, default_value, f=None):
+    return (f(d[k]) if f is not None else d[k]) if k in d else default_value
 
 def set_random_seed(seed: int, using_cuda: bool = False) -> None:
     """

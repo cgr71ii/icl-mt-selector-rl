@@ -155,7 +155,7 @@ class MTICLEnv(gym.Env):
         self.embedding_single_token_model_api = utils.dict_or_default(kwargs, "embedding_single_token_model_api", "http://127.0.0.1:8000/get_embedding_from_model_embedding_matrix")
         self.embedding_pooling_model_api = utils.dict_or_default(kwargs, "embedding_pooling_model_api", "http://127.0.0.1:8000/get_embedding_pooling")
         self.eval_model_api = utils.dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
-        self.embedding_external_system = utils.dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model")
+        self.embedding_external_system = utils.dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model", f=lambda s: s.rstrip('/'))
 
         assert isinstance(self.translate_model_api, str), f"translate_model_api: {type(self.translate_model_api)}: {self.translate_model_api}"
         assert isinstance(self.embedding_single_token_model_api, str), f"embedding_single_token_model_api: {type(self.embedding_single_token_model_api)}: {self.embedding_single_token_model_api}"
@@ -181,8 +181,8 @@ class MTICLEnv(gym.Env):
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
         self.device = torch.device(utils.dict_or_default(kwargs, "device", "cuda"))
         self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 4096) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
-        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, type=int)
-        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, type=int)
+        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, f=int)
+        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, f=int)
         self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
 
         if self.state_representation == "representation_per_token_with_features":
@@ -490,7 +490,6 @@ class MTICLEnv(gym.Env):
 
         for _str, emb in zip(representations_str, representations_emb):
             assert emb.shape[0] == self.action_dim, f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
-            assert _str not in self.str2representation, f"ICL example {_str} already in str2representation"
 
             self.str2representation[_str] = emb
 
@@ -543,7 +542,6 @@ class MTICLEnv(gym.Env):
 
             for _str, emb in zip(representations_str, representations_emb):
                 assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
-                assert _str not in self.str2representation, f"EoS token {_str} already in str2representation"
 
                 self.str2representation[_str] = emb
 
@@ -565,9 +563,10 @@ class MTICLEnv(gym.Env):
 
         for src_sentence, observation in zip(representations_str, representations_emb):
             assert observation.shape[0] == self.action_dim, f"Expected source sentence shape {self.action_dim}, got {observation.shape[0]} for {src_sentence}"
-            assert src_sentence not in self.str2representation, f"Source sentence {src_sentence} already in str2representation"
 
             self.str2representation[src_sentence] = observation
+
+        self.close_action_representation_server()
 
         ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
         representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
@@ -979,6 +978,27 @@ class MTICLEnv(gym.Env):
         response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
 
         return response_result
+
+    def close_action_representation_server(self):
+        payload = []
+
+        for name in (self.action_representation_src_sentence, self.action_representation_trg_sentence):
+            if name is not None and name != "llm":
+                payload.append(("name", name))
+
+        if len(payload) == 0:
+            return
+
+        self.logger_wrapper(gym.logger.info, "Server for external actions closed: %s", payload)
+
+        response = utils.requests_post(f"{self.embedding_external_system}_close", data=payload)
+
+        assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
+        assert len(response.text) > 0, f"Response text is empty"
+
+        response_text = json.loads(response.text)
+
+        assert response_text["err"] == "null", f"Response error: {response_text['err']}"
 
     def get_action_representation(self, icl_examples, numpy=True, trg_is_empty=False):
         # format icl_examples: list of lists with two elements: [[src1, trg1], [src2, trg2], ...]
