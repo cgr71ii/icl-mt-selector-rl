@@ -566,14 +566,14 @@ class MTICLEnv(gym.Env):
 
             self.str2representation[src_sentence] = observation
 
-        self.close_action_representation_server()
-
         ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
         representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
 
         self.src_sentences_index.add(np.array(representations_emb).astype(np.float32)) # TODO does shuffle=True affect to the multiple environments running in parallel and doing retrieval in the dummy training environment?
 
         time.sleep(self.initial_time_sleep)
+
+        self.close_action_representation_server()
 
         self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
 

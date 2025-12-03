@@ -21,7 +21,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor
 import numpy as np
 import torch
 
@@ -276,6 +276,7 @@ if __name__ == "__main__":
     max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     patience = 6 # early stopping patience (number of evals with no improvement)
+    #patience = 1 # TODO remove
 
     logger.info("Save path: %s", save_path)
     logger.info("Evaluation frequency (steps): %d", eval_freq)
@@ -290,9 +291,8 @@ if __name__ == "__main__":
     #batch_size = 256
     batch_size = 16 # TODO remove
     net_arch = {
-        "pi": [400, 300],
-#        "pi": [1024, 512, 1024],
-        "qf": [400, 300]
+        "pi": [512, 256],
+        "qf": [512, 256]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
@@ -341,63 +341,94 @@ if __name__ == "__main__":
         "target_policy_noise": 1e-3, # small values for better generalization and robustness
         "target_noise_clip": 2e-3, # small values for better generalization and robustness
     } if model_class is TD3 else {}
-    max_seq_len = 8192 # the positional encoding is absolute and using this big value does not affect to the previous positions
-    actor_transformer_args_and_kwargs = {
-        "d_model": 512,
-        "nhead": 4,
-        "dim_feedforward": 2048,
-        "nlayers": 3,
-        "max_seq_len": max_seq_len,
-        "projection_in": state_dim_per_token,
-        #"l2_norm": True, # disable to let the model learn how the representation should be
-        "l2_norm": False,
-        "str_id": "actor",
-        "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
-        #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
-        "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # no action, due to skip_n_word_embeddings_from_observation
-    }
-    critic_transformer_args_and_kwargs = {
-        "d_model": 512,
-        "nhead": 4,
-        "dim_feedforward": 2048,
-        "nlayers": 3,
-        "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
-        "projection_in": state_dim_per_token,
-        "str_id": "critic",
-        "skip_n_word_embeddings_from_observation": f"{skip_we}:{skip_we * 2}" if state_representation == "representation_per_token_with_features" else "0:0", # "{skip_we}:{skip_we * 2}" instead of "0:{skip_we}" due to critic_first_actions_then_features == True
-        #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
-        "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
-    }
-    actor_use_transformer = True
-    critic_use_transformer = True
+    #actor_transformer_args_and_kwargs = {
+    #    "d_model": 512,
+    #    "nhead": 4,
+    #    "dim_feedforward": 2048,
+    #    "nlayers": 3,
+    #    "max_seq_len": max_seq_len,
+    #    "projection_in": state_dim_per_token,
+    #    #"l2_norm": True, # disable to let the model learn how the representation should be
+    #    "l2_norm": False,
+    #    "str_id": "actor",
+    #    "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
+    #    #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+    #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # no action, due to skip_n_word_embeddings_from_observation
+    #}
+    #critic_transformer_args_and_kwargs = {
+    #    "d_model": 512,
+    #    "nhead": 4,
+    #    "dim_feedforward": 2048,
+    #    "nlayers": 3,
+    #    "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
+    #    "projection_in": state_dim_per_token,
+    #    "str_id": "critic",
+    #    "skip_n_word_embeddings_from_observation": f"{skip_we}:{skip_we * 2}" if state_representation == "representation_per_token_with_features" else "0:0", # "{skip_we}:{skip_we * 2}" instead of "0:{skip_we}" due to critic_first_actions_then_features == True
+    #    #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+    #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
+    #}
+    use_transformer = True
     warmup_steps = 200
     policy_actor_kwargs = {
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
-        "actor_layer_norm_input": True,
-        "actor_layer_norm_before_activation": True,
-        "actor_last_layer_init_uniform_value": 0.001,
-        "actor_dropout": True,
-        "actor_dropout_p": 0.1,
-        "actor_transformer": actor_use_transformer,
-        "actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+        #"actor_layer_norm_input": True,
+        #"actor_layer_norm_before_activation": True, # Maybe we will need it
+        #"actor_last_layer_init_uniform_value": 0.001,
+        #"actor_dropout": True, # Maybe we will need it
+        #"actor_dropout_p": 0.1,
+        #"actor_transformer": use_transformer,
+        #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
         #"lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
-        "critic_layer_norm_input": True,
-        "critic_layer_norm_before_activation": True,
-        "critic_last_layer_init_uniform_value": 0.001,
-        "critic_dropout": True,
-        "critic_dropout_p": 0.1,
-        "critic_transformer": critic_use_transformer,
-        "critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
-        "critic_first_actions_then_features": True if critic_use_transformer else False,
+        #"critic_layer_norm_input": True,
+        #"critic_layer_norm_before_activation": True, # Maybe we will need it
+        #"critic_last_layer_init_uniform_value": 0.001,
+        #"critic_dropout": True, # Maybe we will need it
+        #"critic_dropout_p": 0.1,
+        #"critic_transformer": use_transformer,
+        #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
+        #"critic_first_actions_then_features": True if use_transformer else False,
     }
 
-    assert (actor_use_transformer and critic_use_transformer) or (not actor_use_transformer and not critic_use_transformer), "Supported: both enabled or disabled"
+    if not use_transformer:
+        features_extractor_class = FlattenExtractor
+        features_extractor_kwargs_actor = {}
+        features_extractor_kwargs_critic = {}
+    else:
+        # the feature extractor only processes the state (not the action for the critic)
+        features_extractor_class = TransformerExtractor
+        transformer_common_kwargs = {
+            "d_model": 512,
+            "nhead": 4,
+            "dim_feedforward": 2048,
+            "nlayers": 3,
+            "projection_in": state_dim_per_token,
+            "projection_out": action_dim,
+            "activation": "relu",
+            "bias": True,
+            "norm_first": True,
+            "initial_layer_norm": True,
+            "initial_layer_norm_first": False,
+            "embedding_dropout": 0.1, # we can disable dropout setting to 0.0 if needed
+            "dropout_p": 0.1,
+            "projection_out_dropout_p": 0.1,
+            "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
+            "l2_norm": False, # disable to let the model learn how the representation should be
+            "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+        }
+        features_extractor_kwargs_actor = {
+            "str_id": "actor",
+            **transformer_common_kwargs
+        }
+        features_extractor_kwargs_critic = {
+            "str_id": "critic",
+            **transformer_common_kwargs
+        }
 
-    features_extractor_class = NoFlattenExtractor if actor_use_transformer or critic_use_transformer else FlattenExtractor
     model = model_class(
         "WolpertingerPolicy",
         env,
@@ -427,6 +458,8 @@ if __name__ == "__main__":
             **policy_critic_kwargs,
             "squash_output": True,
             "features_extractor_class": features_extractor_class,
+            "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
+            "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
         },
         gamma=gamma,
         device=device,
@@ -515,6 +548,8 @@ if __name__ == "__main__":
             **policy_critic_kwargs,
             "squash_output": True,
             "features_extractor_class": features_extractor_class,
+            "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
+            "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
         },
     )
 
@@ -551,6 +586,8 @@ if __name__ == "__main__":
             **policy_critic_kwargs,
             "squash_output": True,
             "features_extractor_class": features_extractor_class,
+            "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
+            "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
         },
     )
 

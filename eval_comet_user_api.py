@@ -59,10 +59,10 @@ def main():
     mt = []
     ref = []
 
-    for l in sys.stdin:
+    for idx, l in enumerate(sys.stdin):
         l = l.rstrip("\r\n").split('\t')
 
-        assert len(l) == 3
+        assert len(l) == 3, idx
         assert l[0].strip() != "", "Source sentence is empty"
         assert l[1].strip() != "", "MT sentence is empty"
         assert l[2].strip() != "", "Reference sentence is empty"

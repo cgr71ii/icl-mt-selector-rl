@@ -210,13 +210,9 @@ def main(args):
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
     ## Translation in example by google translate, july 2025
     logger.debug("Example: curl http://127.0.0.1:%d/evaluate_comet_22 -X POST -d \"" + \
-                 r'src_lang=English&' + \
-                 r'trg_lang=Spanish&' + \
                  r'src_sentence=IldlIG5vdyBoYXZlIDQtbW9udGgtb2xkIG1pY2UgdGhhdCBhcmUgbm9uLWRpYWJldGljIHRoYXQgdXNlZCB0byBiZSBkaWFiZXRpYywiIGhlIGFkZGVkLgo=&' + \
                  r'mt_sentence=IkFob3JhIHRlbmVtb3MgcmF0b25lcyBkZSBjdWF0cm8gbWVzZXMgcXVlIG5vIHNvbiBkaWFiw6l0aWNvcyB5IHF1ZSBhbnRlcyBlcmFuIGRpYWLDqXRpY29zIiwgYcOxYWRpw7MuCg==&' + \
                  r'ref_sentence=wqtBY3R1YWxtZW50ZSwgdGVuZW1vcyByYXRvbmVzIGRlIGN1YXRybyBtZXNlcyBkZSBlZGFkIHF1ZSBhbnRlcyBzb2zDrWFuIHNlciBkaWFiw6l0aWNvcyB5IHF1ZSB5YSBubyBsbyBzb27CuywgYWdyZWfDsy4K&' + \
-                 r'src_lang=English&' + \
-                 r'trg_lang=French&' + \
                  r'src_sentence=IldlIG5vdyBoYXZlIDQtbW9udGgtb2xkIG1pY2UgdGhhdCBhcmUgbm9uLWRpYWJldGljIHRoYXQgdXNlZCB0byBiZSBkaWFiZXRpYywiIGhlIGFkZGVkLgo=&' + \
                  r'mt_sentence=IkFob3JhIHRlbmVtb3MgcmF0b25lcyBkZSBjdWF0cm8gbWVzZXMgcXVlIG5vIHNvbiBkaWFiw6l0aWNvcyB5IHF1ZSBhbnRlcyBlcmFuIGRpYWLDqXRpY29zIiwgYcOxYWRpw7MuCg==&' + \
                  r'ref_sentence=wqvCoE5vdXMgYXZvbnMgw6AgcHLDqXNlbnQgZGVzIHNvdXJpcyBkZSA0wqBtb2lzIHF1aSBuZSBzb250IHBhcyBkaWFiw6l0aXF1ZXMgYWxvcnMgcXUnZWxsZXMgbCfDqXRhaWVudCBhdXBhcmF2YW50wqDCuywgYS10LWlsIGFqb3V0w6kuCg==&' + \
