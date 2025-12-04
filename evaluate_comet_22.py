@@ -64,7 +64,7 @@ def main():
         translations.append(row[1])
         references.append(row[2])
 
-    avg, scores = eval(model, source, translation, reference, batch_size=8, gpus=1)
+    avg, scores = eval(model, sources, translations, references, batch_size=8, gpus=1)
 
     if print_all_scores:
         for score in scores:

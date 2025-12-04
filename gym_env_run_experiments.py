@@ -291,7 +291,7 @@ if __name__ == "__main__":
     #batch_size = 256
     batch_size = 16 # TODO remove
     net_arch = {
-        "pi": [512, 256],
+        "pi": [256, 256],
         "qf": [512, 256]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
@@ -368,14 +368,15 @@ if __name__ == "__main__":
     #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
     #}
     use_transformer = True
+    dropout_p = 0.1
     warmup_steps = 200
     policy_actor_kwargs = {
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
-        #"actor_layer_norm_input": True,
-        #"actor_layer_norm_before_activation": True, # Maybe we will need it
-        #"actor_last_layer_init_uniform_value": 0.001,
-        #"actor_dropout": True, # Maybe we will need it
+        "actor_layer_norm_input": True,
+        "actor_layer_norm_before_activation": True,
+        "actor_last_layer_init_uniform_value": 0.001,
+        #"actor_dropout": True,
         #"actor_dropout_p": 0.1,
         #"actor_transformer": use_transformer,
         #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
@@ -383,11 +384,11 @@ if __name__ == "__main__":
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
         #"lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
-        #"critic_layer_norm_input": True,
-        #"critic_layer_norm_before_activation": True, # Maybe we will need it
+        "critic_layer_norm_input": True,
+        "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        #"critic_dropout": True, # Maybe we will need it
-        #"critic_dropout_p": 0.1,
+        #"critic_dropout": True,
+        #"critic_dropout_p": dropout_p,
         #"critic_transformer": use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,
@@ -406,15 +407,17 @@ if __name__ == "__main__":
             "dim_feedforward": 2048,
             "nlayers": 3,
             "projection_in": state_dim_per_token,
-            "projection_out": action_dim,
+            #"projection_out": action_dim,
+            #"projection_out": 256,
+            "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
             "activation": "relu",
             "bias": True,
             "norm_first": True,
             "initial_layer_norm": True,
             "initial_layer_norm_first": False,
-            "embedding_dropout": 0.1, # we can disable dropout setting to 0.0 if needed
-            "dropout_p": 0.1,
-            "projection_out_dropout_p": 0.1,
+            "embedding_dropout": 0.0, # it can increse the variance in the training
+            "dropout_p": dropout_p, # we can disable dropout setting to 0.0 if needed
+            "projection_out_dropout_p": 0.0,
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
             "l2_norm": False, # disable to let the model learn how the representation should be
             "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
