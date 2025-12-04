@@ -4,8 +4,9 @@ import sys
 import math
 
 from comet import download_model, load_from_checkpoint
+import numpy as np
 
-def eval(model, source, translation, reference, batch_size=8, gpus=1, zero_score_empty=False):
+def eval(model, source, translation, reference, batch_size=8, gpus=1, zero_score_empty=False, clip_values=(-np.inf, np.inf), logger=None):
     source = [source] if isinstance(source, str) else source
     translation = [translation] if isinstance(translation, str) else translation
     reference = [reference] if isinstance(reference, str) else reference
@@ -29,8 +30,17 @@ def eval(model, source, translation, reference, batch_size=8, gpus=1, zero_score
     assert math.isclose(avg, scores["system_score"]), f"Average score {avg} does not match system score {scores['system_score']}"
 
     # Remove zero scores
-    scores = [s for i, s in enumerate(scores) if i not in score_zero_idxs] if len(score_zero_idxs) > 0 else scores["scores"]
+    a_min, a_max = clip_values
+    original_scores = [s for i, s in enumerate(scores) if i not in score_zero_idxs] if len(score_zero_idxs) > 0 else scores["scores"]
+    scores = [np.clip(s, a_min=a_min, a_max=a_max) for s in original_scores]
     avg = (sum(scores) / len(scores) if len(scores) > 0 else 0.0) if len(score_zero_idxs) > 0 else avg
+
+    for idx, (s1, s2) in enumerate(zip(original_scores, scores)):
+        if not np.isclose(s1, s2):
+            if logges is None:
+                print(f"Score out of the clipping values #{idx}: {s1} vs {s2}: {data[idx]}", file=sys.stderr)
+            else:
+                logger.warning("Score out of the clipping values #%d: %s vs %s: %s", idx, s1, s2, data[idx])
 
     return avg, scores
 

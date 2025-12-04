@@ -130,6 +130,8 @@ def evaluate_comet_22_batch(data):
     model = global_conf["model"]
     gpus = global_conf["gpus"]
     batch_size = global_conf["batch_size"]
+    clip_min = global_conf["clip_min"]
+    clip_max = global_conf["clip_max"]
 
     # Build prompts
     _gpus = gpus
@@ -145,7 +147,7 @@ def evaluate_comet_22_batch(data):
             assert len(_src_sentences) == len(_mt_sentences) == len(_ref_sentences), f"Length mismatch: {len(_src_sentences)} vs {len(_mt_sentences)} vs {len(_ref_sentences)}"
 
             # Evaluation
-            all_outputs_avg, all_outputs = eval_comet.eval(model, _src_sentences, _mt_sentences, _ref_sentences, batch_size=_bsz, gpus=_gpus)
+            all_outputs_avg, all_outputs = eval_comet.eval(model, _src_sentences, _mt_sentences, _ref_sentences, batch_size=_bsz, gpus=_gpus, clip_values=(clip_min, clip_max), logger=logger)
 
             assert len(all_outputs) == len(src_sentences[:_bsz])
 
@@ -205,6 +207,8 @@ def main(args):
     global_conf["batch_size"] = args.batch_size
     global_conf["streamer"] = ThreadedStreamer(evaluate_comet_22_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["disable_streamer"] = disable_streamer
+    global_conf["clip_min"] = args.clip_min
+    global_conf["clip_max"] = args.clip_max
 
     # Some guidance
     logger.info("Example: curl http://127.0.0.1:%d/hello-world", flask_port)
@@ -236,6 +240,8 @@ def initialization():
     parser.add_argument('--streamer-max-latency', type=float, default=0.1,
                         help="Streamer max latency. You will need to modify this parameter if you want to increase the GPU usage")
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
+    parser.add_argument('--clip-min', type=float, default=0.0, help="Minimum clipping score value")
+    parser.add_argument('--clip-max', type=float, default=1.0, help="Maximum clipping score value")
 
     parser.add_argument('-v', '--verbose', action="store_true", help="Verbose logging mode")
     parser.add_argument('--flask-debug', action="store_true", help="Flask debug mode. Warning: this option might load the model multiple times")
