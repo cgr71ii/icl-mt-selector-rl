@@ -236,8 +236,9 @@ class MTICLEnv(gym.Env):
         self.state_dim *= self.state_window_length - 1 # -1 because we add the action in the next line
         self.state_dim += self.action_dim # we add the action at the beginning of the state to check overlapping actions with the translation candidate source sentence
 
-        assert self.action_dim % self.state_dim_per_token == 0, f"{self.action_dim} % {self.state_dim_per_token} != 0" # we need to be sure that action can be split into tokens of state_dim size
-        assert self.state_dim % self.state_dim_per_token == 0, f"{self.state_dim} % {self.state_dim_per_token} != 0"
+        if self.state_representation == "representation_per_token_with_features":
+            assert self.action_dim % self.state_dim_per_token == 0, f"{self.action_dim} % {self.state_dim_per_token} != 0" # we need to be sure that action can be split into tokens of state_dim size
+            assert self.state_dim % self.state_dim_per_token == 0, f"{self.state_dim} % {self.state_dim_per_token} != 0"
 
         # Other
         self.data_already_loaded = False
@@ -251,6 +252,9 @@ class MTICLEnv(gym.Env):
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "sequential_shuffle_per_epoch")
+        self.reward_power = utils.dict_or_default(kwargs, "reward_power", 2)
+
+        assert self.reward_power > 0, self.reward_power
 
         if not self.enable_eos_action:
             self.knn_always_add_eos_action = False
@@ -310,7 +314,7 @@ class MTICLEnv(gym.Env):
         translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
         translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
         translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
-        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation)
+        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=True)
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
@@ -398,15 +402,16 @@ class MTICLEnv(gym.Env):
             src_sentence, reference = self.data[self.translation_candidate]
             reward_sum = sum(self.translation_candidates_reward_mean_episode)
             reward_steps = len(self.translation_candidates_reward_mean_episode)
-            reward_mean = (reward_sum / reward_steps) if reward_steps > 0 else -100.0
+            reward_mean = statistics.mean(self.translation_candidates_reward_mean_episode) if reward_steps > 0 else -100.0
+            reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
 
             self.logger_wrapper(gym.logger.info, "Result episode:\n    src: %s\n    ref: %s\n     mt: %s", src_sentence, reference, translation)
-            self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'last_episode_reward': %s, 'last_episode_steps': %s}", reward_sum, reward_mean, reward, self.time_step)
+            self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'stdev': %s, 'last_episode_reward': %s, 'last_episode_steps': %s}", reward_sum, reward_mean, reward_stdev, reward, self.time_step)
 
         sys.stdout.flush()
         sys.stderr.flush()
 
-        return observation, reward, terminated, truncated, info
+        return observation, reward ** self.reward_power, terminated, truncated, info
 
     def _init_translation_candidate_variables(self):
         # Variables for selecting the translation sentences for the episodes
@@ -1488,8 +1493,8 @@ class MTICLEnv(gym.Env):
                 assert isinstance(all_urls[0], str), f"Expected all_urls to be a list of strings, got {type(all_urls[0])}: {all_urls[0]}"
 
             if debug:
-                self.logger_wrapper(gym.logger.error, "faiss.I (first and last 5): %s ... %s", I[:,:5], I[:,-5:])
-                #self.logger_wrapper(gym.logger.error, "faiss.D (min max mean stdev): %s %s %s %s", np.min(D, axis=1), np.max(D, axis=1), np.mean(D, axis=1), np.std(D, ddof=1, axis=1))
+                self.logger_wrapper(gym.logger.error, "faiss.I (first and last 5): %s: %s ... %s", I.shape, I[:,:5], I[:,-5:])
+                self.logger_wrapper(gym.logger.error, "faiss.D (first and last 5): %s: %s ... %s", D.shape, D[:,:5], D[:,-5:])
 
             _all_urls_subset = [url for url in all_urls if url not in self.str2representation]
 
@@ -1507,7 +1512,7 @@ class MTICLEnv(gym.Env):
                 results2 = results[0,:5]
                 results3 = results[0,-5:]
 
-                self.logger_wrapper(gym.logger.error, "faiss.closest_embedding (first and last 5): %s ... %s", results2, results3)
+                self.logger_wrapper(gym.logger.error, "faiss.closest_embedding (first and last 5): %s: %s ... %s", results.shape, results2, results3)
 
             results = results.to(self.device)
 
@@ -1629,24 +1634,27 @@ class MTICLEnv(gym.Env):
             if self.state_representation in ("model_single_representation", "representation_per_token_with_features"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
+
+                assert observation.shape[0] % self.state_dim_per_token == 0, f"Observation shape mismatch: {observation.shape[0]} vs {self.state_dim_per_token}"
             elif self.state_representation in ("sentence_and_actions", "model_single_representation+sentence_and_actions"):
                 icl_example = '\t'.join(self.current_icl_examples[-1])
 
                 assert icl_example in self.str2representation, icl_example
 
                 observation = self.str2representation[icl_example]
+
+                assert observation.shape[0] == self.action_dim, f"Observation shape mismatch: {observation.shape[0]} vs {self.action_dim}"
             else:
                 raise Exception(f"Unknown state representation: {self.state_representation}")
 
         assert isinstance(observation, np.ndarray), type(observation)
         assert len(observation.shape) == 1, f"Expected observation to be a 1D numpy array, got shape {observation.shape}: {observation}"
-        assert observation.shape[0] % self.state_dim_per_token == 0, f"Observation shape mismatch: {observation.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
 
         observation = observation.copy()
 
         if self.state_representation == "representation_per_token_with_features":
             observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
-        else:
+        elif self.time_step > 1:
             offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
 
             assert not np.allclose(self.current_state_window[self.time_step - 1], np.zeros_like(self.current_state_window[self.time_step])), self.time_step

@@ -37,7 +37,7 @@ def eval(model, source, translation, reference, batch_size=8, gpus=1, zero_score
 
     for idx, (s1, s2) in enumerate(zip(original_scores, scores)):
         if not np.isclose(s1, s2):
-            if logges is None:
+            if logger is None:
                 print(f"Score out of the clipping values #{idx}: {s1} vs {s2}: {data[idx]}", file=sys.stderr)
             else:
                 logger.warning("Score out of the clipping values #%d: %s vs %s: %s", idx, s1, s2, data[idx])

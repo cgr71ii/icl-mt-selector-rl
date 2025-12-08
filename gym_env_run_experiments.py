@@ -276,7 +276,7 @@ if __name__ == "__main__":
     max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     patience = 6 # early stopping patience (number of evals with no improvement)
-    #patience = 1 # TODO remove
+    #patience = 20 # TODO remove
 
     logger.info("Save path: %s", save_path)
     logger.info("Evaluation frequency (steps): %d", eval_freq)
@@ -289,7 +289,8 @@ if __name__ == "__main__":
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
-    batch_size = 16 # TODO remove
+    batch_size = 192
+    #batch_size = 16 # TODO remove
     net_arch = {
         "pi": [256, 256],
         "qf": [512, 256]
@@ -300,13 +301,13 @@ if __name__ == "__main__":
     #replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
-    critic_learning_rate = 1e-4
-    actor_learning_rate = 1e-4
+    critic_learning_rate = 5e-4
+    actor_learning_rate = 5e-4
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     init_training_steps = 5000
     #init_training_steps = 5 # TODO remove
-    #init_training_steps = 100 # TODO remove
+    #init_training_steps = 200 # TODO remove
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
 
@@ -323,12 +324,13 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations)[0] # Get only the result, not I or D
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
     action_noise = normal_action_noise
+    #action_noise = None # TODO remove
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
     state_window_length = env_training_dummy.state_window_length
@@ -340,6 +342,8 @@ if __name__ == "__main__":
         "policy_delay": 2,
         "target_policy_noise": 1e-3, # small values for better generalization and robustness
         "target_noise_clip": 2e-3, # small values for better generalization and robustness
+        #"target_policy_noise": 0.0, # TODO remove
+        #"target_noise_clip": 0.0, # TODO remove
     } if model_class is TD3 else {}
     #actor_transformer_args_and_kwargs = {
     #    "d_model": 512,
@@ -369,7 +373,8 @@ if __name__ == "__main__":
     #}
     use_transformer = True
     dropout_p = 0.1
-    warmup_steps = 200
+    #warmup_steps = 200
+    warmup_steps = 1000
     policy_actor_kwargs = {
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
@@ -396,6 +401,7 @@ if __name__ == "__main__":
 
     if not use_transformer:
         features_extractor_class = FlattenExtractor
+        #features_extractor_class = NoFlattenExtractor
         features_extractor_kwargs_actor = {}
         features_extractor_kwargs_critic = {}
     else:
@@ -421,7 +427,9 @@ if __name__ == "__main__":
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
             "l2_norm": False, # disable to let the model learn how the representation should be
             "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
             "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+            #"expected_seq_len": None, # TODO remove
         }
         features_extractor_kwargs_actor = {
             "str_id": "actor",
@@ -473,8 +481,11 @@ if __name__ == "__main__":
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         max_grad_norm=1.0,
         #invert_grad=True,
-        wolpertinger_target_policy_actor_noise=0.1,
+        wolpertinger_add_noise_after_knn=True, # TD3 noise -> it should improve generalization
+        wolpertinger_target_policy_actor_noise=0.1, # noise before kNN -> it should improve exploration of different actions
         wolpertinger_target_actor_noise_clip=0.25,
+        #wolpertinger_target_policy_actor_noise=0.0, # TODO remove
+        #wolpertinger_target_actor_noise_clip=0.0, # TODO remove
         n_steps=max_icl_examples, # Monte-carlo TD3/DDPG instead of 1-step TD. Better for handling differences in the length of episodes for the early-stopping action (for 1-step TD, the episodes of length 1 due to early stopping are selected most times)
         **td3_args,
     )

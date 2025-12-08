@@ -1,5 +1,6 @@
 
 import sys
+import statistics
 
 import gym_env_v1 as gym_env
 import utils
@@ -43,6 +44,14 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
             if "shuffle_all_data" not in options:
                 options["shuffle_all_data"] = False # deterministic sweeping
         elif (self.reset_times + 1) % (len(self.data) + 1) == 0: # this avoids off-by-one problem with self.episode since EvalCallback does a last reset...
+            reward_sum = sum(self.translation_candidates_reward_mean_episode)
+            reward_steps = len(self.translation_candidates_reward_mean_episode)
+            reward_mean = statistics.mean(self.translation_candidates_reward_mean_episode) if reward_steps > 0 else -100.0
+            reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
+
+            self.logger_wrapper(gym.logger.info, "All episodes statistics (eval): {'sum': %s, 'mean': %s, 'stdev': %s}", reward_sum, reward_mean, reward_stdev)
+
+            # Reset
             self._init_translation_candidate_variables()
 
             self.episode = 0
