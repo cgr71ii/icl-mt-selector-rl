@@ -486,6 +486,11 @@ class MTICLEnv(gym.Env):
         representations_str = [f"{src_icl}\t{trg_icl}" for src_icl, trg_icl in self.data_icl_examples]
         representations_emb = self.get_action_representation(self.data_icl_examples)
 
+        #np.save("actions.npy", representations_emb)
+        #self.logger_wrapper(gym.logger.error, "DONE")
+        #time.sleep(100)
+        #sys.exit(0)
+
         assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
         self.insert_embeddings(representations_str, representations_emb)

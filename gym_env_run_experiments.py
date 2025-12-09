@@ -126,6 +126,39 @@ class DelayedEvalCallback(sb3_cb.EvalCallback):
 
         return super()._on_step()
 
+class LinearDecayScheduler:
+
+    def __init__(self, start_val, end_val, total_steps, logger, str_id="none"):
+        assert start_val >= end_val
+        assert total_steps > 0, total_steps
+
+        self.start_val = start_val
+        self.end_val = end_val
+        self.total_steps = total_steps
+        self.step = 0
+        self.logger = logger
+        self.str_id = str_id
+
+        self.logger.debug("[%s] Linear decay: start and end values, and total steps: %f-%f %d", self.str_id, self.start_val, self.end_val, self.total_steps)
+
+    def __call__(self):
+        if self.step - 1 >= self.total_steps:
+            return self.end_val
+
+        # Linear interpolation
+        progress = min(1.0, self.step / self.total_steps)
+        new_value = self.start_val - progress * (self.start_val - self.end_val)
+
+        if self.step == self.total_steps:
+            assert np.isclose(progress, 1.0), progress
+            assert np.isclose(new_value, self.end_val), f"{new_value} vs {self.end_val}"
+
+        self.logger.debug("[%s] Linear decay: new value (step %d): %f%s", self.str_id, self.step + 1, new_value, " (and the rest of steps...)" if self.step == self.total_steps else '')
+
+        self.step += 1
+
+        return new_value
+
 def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False):
     def _init():
         sys.stderr.flush()
@@ -301,8 +334,10 @@ if __name__ == "__main__":
     #replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
-    critic_learning_rate = 5e-4
-    actor_learning_rate = 5e-4
+    #critic_learning_rate = 5e-4
+    #actor_learning_rate = 5e-4
+    critic_learning_rate = 1e-3
+    actor_learning_rate = 1e-3
     max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     init_training_steps = 5000
@@ -374,8 +409,10 @@ if __name__ == "__main__":
     use_transformer = True
     dropout_p = 0.1
     #warmup_steps = 200
-    warmup_steps = 1000
+    warmup_steps = 2000
     policy_actor_kwargs = {
+        #"squash_output": True,
+        "squash_output": False, # actor l2-norm
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
         "actor_layer_norm_input": True,
@@ -385,6 +422,7 @@ if __name__ == "__main__":
         #"actor_dropout_p": 0.1,
         #"actor_transformer": use_transformer,
         #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+        "actor_mlp_l2_norm": True,
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
@@ -464,10 +502,10 @@ if __name__ == "__main__":
             #"add_all_knn_to_batch": True, # Faster
             "add_all_knn_to_batch": False,
             "apply_rws_inference": apply_rws_inference,
-            "exploration_rate": 0.1,
+            #"exploration_rate": 0.1,
+            "exploration_rate": LinearDecayScheduler(1.0, 0.1, 10, logger, "epsilon-greedy exploration"),
             **policy_actor_kwargs,
             **policy_critic_kwargs,
-            "squash_output": True,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
@@ -560,7 +598,6 @@ if __name__ == "__main__":
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
-            "squash_output": True,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
@@ -598,7 +635,6 @@ if __name__ == "__main__":
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
-            "squash_output": True,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
