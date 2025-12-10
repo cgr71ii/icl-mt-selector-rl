@@ -503,7 +503,7 @@ if __name__ == "__main__":
             "add_all_knn_to_batch": False,
             "apply_rws_inference": apply_rws_inference,
             #"exploration_rate": 0.1,
-            "exploration_rate": LinearDecayScheduler(1.0, 0.1, 10, logger, "epsilon-greedy exploration"),
+            "exploration_rate": LinearDecayScheduler(1.0, 0.1, 15000, logger, "epsilon-greedy exploration"),
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "features_extractor_class": features_extractor_class,
