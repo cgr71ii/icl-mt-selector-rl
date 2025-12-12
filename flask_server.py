@@ -720,7 +720,7 @@ def translate_batch(data):
 
     if get_representation:
         for idx in range(len(results) - 1):
-            assert results[idx].shape == results[idx + 1].shape, f"Results shape mismatch at idx {idx}: {results[idx].shape} vs {results[idx + 1].shape}"
+            assert results[idx].shape[1:] == results[idx + 1].shape[1:], f"Results shape mismatch at idx {idx}: {results[idx].shape} vs {results[idx + 1].shape}"
 
         results = torch.cat(results, dim=0)
 
