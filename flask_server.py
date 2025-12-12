@@ -551,7 +551,7 @@ def translate_batch(data):
     results = []
     sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(src_sentences, trg_sentences)] if teacher_forcing else src_sentences
     ## We build the prompt here because when get_representation is True and there is an OOM, we split the batch and we need to keep the same dimensionality (this does not harm if the streamer is enabled, so we force to be enabled)
-    _prompts, _src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
+    _prompts, src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
 
     while True:
         try:
@@ -573,7 +573,6 @@ def translate_batch(data):
 #
 #            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
             prompts = _prompts[:_bsz]
-            src_sentence_n_tokens = _src_sentence_n_tokens[:_bsz]
 
             assert isinstance(prompts, list), type(prompts)
 
