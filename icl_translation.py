@@ -129,16 +129,16 @@ def tokenize_prompts(prompts, tokenizer, lock=None):
 
     return inputs
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None):
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None):
     # Tokenize
     if lock is not None:
         lock.acquire()
-    inputs = tokenize_prompts(prompts, tokenizer, lock=None).to(model.device) if _inputs is None else _inputs.to(model.device)
+    inputs = tokenize_prompts(prompts, tokenizer, lock=None).to(model.device) if _inputs is None and _masks is None else None
     if lock is not None:
         lock.release()
 
-    input_ids = inputs["input_ids"].to(model.device)
-    attention_mask = inputs["attention_mask"].to(model.device)
+    input_ids = inputs["input_ids"].to(model.device) if inputs is not None else _inputs.to(model.device)
+    attention_mask = inputs["attention_mask"].to(model.device) if inputs is not None else _masks.to(model.device)
 
     for idx in range(attention_mask.shape[0]):
         assert attention_mask[idx].sum().item() > 0, f"All tokens are padding for input idx {idx}: input_ids: {input_ids[idx]}, attention_mask: {attention_mask[idx]}"

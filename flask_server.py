@@ -553,9 +553,12 @@ def translate_batch(data):
     ## We build the prompt here because when get_representation is True and there is an OOM, we split the batch and we need to keep the same dimensionality (this does not harm if the streamer is enabled, so we force to be enabled)
     _prompts, src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
     _inputs = None
+    _masks = None
 
     if get_representation:
-        _inputs = mt_icl.tokenize_prompts(_prompts, tokenizer, lock=global_conf["lock"])
+        _tokens = mt_icl.tokenize_prompts(_prompts, tokenizer, lock=global_conf["lock"])
+        _inputs = _tokens["input_ids"]
+        _masks = _tokens["attention_mask"]
 
     assert isinstance(_prompts, list), type(_prompts)
 
@@ -580,6 +583,7 @@ def translate_batch(data):
 #            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
             prompts = _prompts[:_bsz]
             inputs = _inputs[:_bsz] if _inputs is not None else None
+            masks = _masks[:_bsz] if _masks is not None else None
 
             assert isinstance(prompts, list), type(prompts)
 
@@ -591,7 +595,7 @@ def translate_batch(data):
 
             if get_representation:
                 # Get embeddings
-                all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer, lock=global_conf["lock"], _inputs=inputs)
+                all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer, lock=global_conf["lock"], _inputs=inputs, _masks=masks)
 
 #                assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz])
                 assert len(all_outputs) == len(prompts) == len(_prompts[:_bsz])
@@ -696,6 +700,7 @@ def translate_batch(data):
 #            trg_lang = trg_lang[len(prompts):]
             _prompts = _prompts[len(prompts):]
             _inputs = _inputs[len(prompts):] if _inputs is not None else None
+            _masks = _masks[len(prompts):] if _masks is not None else None
         except torch.OutOfMemoryError as e:
             # Handle OOM
 
@@ -979,7 +984,9 @@ def lazy_load_llm():
             model_memory = 30 # GiB
             mem_per_gpu = model_memory // total_gpus + 1
             max_memory_mapping = {idx: f"{mem_per_gpu}GiB" for idx in range(total_gpus)}
-            max_memory_mapping[0] = f"2GiB" # the first GPU takes care of some extra memory
+
+            if total_gpus > 1:
+                max_memory_mapping[0] = f"1GiB" # the first GPU takes care of some extra memory
 
             assert os.environ["CUDA_VISIBLE_DEVICES"].count(',') + 1 == total_gpus, f"Expected CUDA_VISIBLE_DEVICES to have {total_gpus} devices, got: {os.environ['CUDA_VISIBLE_DEVICES']}"
 
