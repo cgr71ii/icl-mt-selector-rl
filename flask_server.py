@@ -688,7 +688,6 @@ def translate_batch(data):
 #            src_lang = src_lang[len(prompts):]
 #            trg_lang = trg_lang[len(prompts):]
             _prompts = _prompts[_bsz:]
-            _src_sentence_n_tokens = _src_sentence_n_tokens[_bsz:]
         except torch.OutOfMemoryError as e:
             # Handle OOM
 
