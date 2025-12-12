@@ -553,6 +553,8 @@ def translate_batch(data):
     ## We build the prompt here because when get_representation is True and there is an OOM, we split the batch and we need to keep the same dimensionality (this does not harm if the streamer is enabled, so we force to be enabled)
     _prompts, src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
 
+    assert isinstance(_prompts, list), type(_prompts)
+
     while True:
         try:
             if model.device != _device:
@@ -572,7 +574,7 @@ def translate_batch(data):
 #                _sentences = _src_sentences
 #
 #            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
-            prompts = _prompts[:_bsz]
+            prompts = list(_prompts[:_bsz])
 
             assert isinstance(prompts, list), type(prompts)
 
@@ -687,7 +689,7 @@ def translate_batch(data):
 #            icl_examples = icl_examples[len(prompts):]
 #            src_lang = src_lang[len(prompts):]
 #            trg_lang = trg_lang[len(prompts):]
-            _prompts = _prompts[_bsz:]
+            _prompts = _prompts[len(prompts):]
         except torch.OutOfMemoryError as e:
             # Handle OOM
 
@@ -964,7 +966,19 @@ def lazy_load_llm():
     if "model_llm" not in global_conf:
         # quantization with fp16
         # examples of quantization: https://github.com/jogonba2/llmixtic/blob/main/src/quantization.py
-        global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"])
+        max_memory_mapping = None
+
+        if os.environ.get("CUDA_VISIBLE_DEVICES", None) is not None and os.environ["CUDA_VISIBLE_DEVICES"] != "":
+            total_gpus = torch.cuda.device_count()
+            model_memory = 30 # GiB
+            mem_per_gpu = model_memory // total_gpus + 1
+            max_memory_mapping = {idx: f"{mem_per_gpu}GiB" for idx in range(total_gpus)}
+
+            assert os.environ["CUDA_VISIBLE_DEVICES"].count(',') + 1 == total_gpus, f"Expected CUDA_VISIBLE_DEVICES to have {total_gpus} devices, got: {os.environ['CUDA_VISIBLE_DEVICES']}"
+
+            logger.info("Total GPUs: %d | Memory per GPU: %d GiB | Model memory: %s GiB | max_memory_mapping: %s", total_gpus, mem_per_gpu, model_memory, max_memory_mapping)
+
+        global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"], max_memory=max_memory_mapping)
         device = global_conf["model_llm"].device # data loading
         global_conf["device_map"] = device
     else:
