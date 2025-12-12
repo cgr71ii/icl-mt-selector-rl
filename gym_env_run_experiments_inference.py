@@ -142,6 +142,7 @@ if __name__ == "__main__":
         #"actor_dropout_p": 0.1,
         #"actor_transformer": actor_use_transformer,
         #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+        "actor_mlp_l2_norm": True,
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
@@ -214,7 +215,8 @@ if __name__ == "__main__":
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
-            "squash_output": True,
+            #"squash_output": True,
+            "squash_output": False,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,

@@ -15,6 +15,7 @@ def main():
     visualize_file = sys.argv[2]
     output_file = sys.argv[3]
     use_umap = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
+    num_icl_examples = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
     if use_umap:
         import umap
@@ -31,8 +32,33 @@ def main():
         sys.exit(1)
 
     # Basic shape checks
-    if X_train.ndim == 1: X_train = X_train.reshape(1, -1)
-    if X_vis.ndim == 1: X_vis = X_vis.reshape(1, -1)
+    assert X_train.ndim == 2, X_train.shape
+    assert X_vis.ndim == 2, X_vis.shape
+
+    # Split by ICL example
+    if num_icl_examples > 0:
+        print(f"num_icl_examples = {num_icl_examples} > 0 will work if all episodes had the same number of steps (i.e., no EoS action)")
+
+        assert X_vis.shape[0] % num_icl_examples == 0, f"{X_vis.shape} vs {num_icl_examples}"
+
+        all_X_vis = [[] for _ in range(num_icl_examples)]
+        all_X_vis_num = []
+
+        for i in range(X_vis.shape[0]):
+            idx = i % num_icl_examples
+            all_X_vis[idx].append(X_vis[i])
+
+        for i in range(len(all_X_vis)):
+            all_X_vis[i] = np.array(all_X_vis[i])
+
+            assert all_X_vis[i].ndim == 2, all_X_vis[i].ndim
+
+            all_X_vis_num.append(all_X_vis[i].shape[0])
+    else:
+        all_X_vis = [X_vis]
+        all_X_vis_num = [X_vis_num]
+
+    assert len(all_X_vis) == len(all_X_vis_num)
 
     print(f"  Training Data Shape: {X_train.shape}")
     print(f"  Visualize Data Shape: {X_vis.shape}")
@@ -65,7 +91,6 @@ def main():
     # Transform both datasets into the same 2D coordinate system
     print("Transforming data to 2D...")
     train_2d = reducer.transform(X_train)
-    vis_2d = reducer.transform(X_vis)
 
     # 4. Plotting
     print("Generating plot...")
@@ -81,11 +106,15 @@ def main():
 
     # Plot the "Traveler" (Foreground / Actor Output)
     # Using alpha=0.8 and a bright color (red) to highlight where the actor is pointing
-    plt.scatter(
-        vis_2d[:, 0], vis_2d[:, 1],
-        c='crimson', alpha=0.7, s=40, label=f'Proto-Actions (The Actor): {X_vis_num}',
-        edgecolors='black', linewidth=0.5
-    )
+    for idx, (_X_vis, _X_vis_num) in enumerate(zip(all_X_vis, all_X_vis_num), 1):
+        vis_2d = reducer.transform(_X_vis)
+        plt.scatter(
+            vis_2d[:, 0], vis_2d[:, 1],
+            #c='crimson',
+            c=f"C{idx - 1}",
+            alpha=0.7, s=40, label=f'Proto-Actions (The Actor; example #{idx}): {_X_vis_num}',
+            edgecolors='black', linewidth=0.5
+        )
 
     # Styling
     plt.title(f"Embedding Space Projection ({method})\nFeature Dim: {X_train.shape[1]} -> 2", fontsize=14)
