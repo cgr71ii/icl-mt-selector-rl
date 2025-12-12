@@ -120,12 +120,20 @@ def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=
 
     return all_outputs, all_original_outputs
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None):
-    # Tokenize
-
+def tokenize_prompts(prompts, tokenizer, lock=None):
     if lock is not None:
         lock.acquire()
-    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left").to(model.device)
+    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left")
+    if lock is not None:
+        lock.release()
+
+    return inputs
+
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None):
+    # Tokenize
+    if lock is not None:
+        lock.acquire()
+    inputs = tokenize_prompts(prompts, tokenizer, lock=None).to(model.device) if _inputs is None else _inputs.to(model.device)
     if lock is not None:
         lock.release()
 

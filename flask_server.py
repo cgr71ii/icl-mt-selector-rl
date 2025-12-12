@@ -543,30 +543,37 @@ def translate_batch(data):
     batch_size = global_conf["batch_size"]
     _max_new_tokens = global_conf["max_new_tokens"]
 
+    assert not global_conf["disable_streamer"], "If this is assert is removed, you may get very long prompts as they are processed all at once"
+
     # Build prompts
     _device = device
     _bsz = batch_size
     results = []
+    sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(src_sentences, trg_sentences)] if teacher_forcing else src_sentences
+    ## We build the prompt here because when get_representation is True and there is an OOM, we split the batch and we need to keep the same dimensionality (this does not harm if the streamer is enabled, so we force to be enabled)
+    _prompts, _src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
 
     while True:
         try:
             if model.device != _device:
                 model = model.to(_device)
 
-            _src_sentences = src_sentences[:_bsz]
-            _trg_sentences = trg_sentences[:_bsz]
-            _icl_examples = icl_examples[:_bsz]
-            _src_lang = src_lang[:_bsz]
-            _trg_lang = trg_lang[:_bsz]
-
-            assert len(_icl_examples) == len(_src_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_icl_examples)} vs {len(_src_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
-
-            if teacher_forcing:
-                _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
-            else:
-                _sentences = _src_sentences
-
-            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
+#            _src_sentences = src_sentences[:_bsz]
+#            _trg_sentences = trg_sentences[:_bsz]
+#            _icl_examples = icl_examples[:_bsz]
+#            _src_lang = src_lang[:_bsz]
+#            _trg_lang = trg_lang[:_bsz]
+#
+#            assert len(_icl_examples) == len(_src_sentences) == len(_src_lang) == len(_trg_lang), f"Length mismatch: {len(_icl_examples)} vs {len(_src_sentences)} vs {len(_src_lang)} vs {len(_trg_lang)}"
+#
+#            if teacher_forcing:
+#                _sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(_src_sentences, _trg_sentences)]
+#            else:
+#                _sentences = _src_sentences
+#
+#            prompts, src_sentence_n_tokens = mt_icl.build_prompt(_sentences, _src_lang, _trg_lang, tokenizer, _icl_examples, _bsz, teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
+            prompts = _prompts[:_bsz]
+            src_sentence_n_tokens = _src_sentence_n_tokens[:_bsz]
 
             assert isinstance(prompts, list), type(prompts)
 
@@ -580,7 +587,8 @@ def translate_batch(data):
                 # Get embeddings
                 all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer, lock=global_conf["lock"])
 
-                assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz])
+#                assert len(all_outputs) == len(prompts) == len(src_sentences[:_bsz])
+                assert len(all_outputs) == len(prompts) == len(_prompts[:_bsz])
 
                 results.append(all_outputs)
             else:
@@ -612,7 +620,8 @@ def translate_batch(data):
                 if len(new_prompts) > 0:
                     aux_all_outputs, aux_all_original_outputs = mt_icl.translate(model, tokenizer, new_prompts, max_new_tokens=max_new_tokens, stopping_criteria=None, lock=global_conf["lock"], num_beams=global_conf["num_beams"])
 
-                    assert len(aux_all_outputs) + new_prompts_none == len(aux_all_original_outputs) + new_prompts_none == len(prompts) == len(src_sentences[:_bsz])
+#                    assert len(aux_all_outputs) + new_prompts_none == len(aux_all_original_outputs) + new_prompts_none == len(prompts) == len(src_sentences[:_bsz])
+                    assert len(aux_all_outputs) + new_prompts_none == len(aux_all_original_outputs) + new_prompts_none == len(prompts) == len(_prompts[:_bsz])
 
                 all_outputs = []
                 all_outputs_idx = 0
@@ -674,11 +683,13 @@ def translate_batch(data):
 
             _device = device
             _bsz = batch_size
-            src_sentences = src_sentences[len(prompts):]
-            trg_sentences = trg_sentences[len(prompts):]
-            icl_examples = icl_examples[len(prompts):]
-            src_lang = src_lang[len(prompts):]
-            trg_lang = trg_lang[len(prompts):]
+#            src_sentences = src_sentences[len(prompts):]
+#            trg_sentences = trg_sentences[len(prompts):]
+#            icl_examples = icl_examples[len(prompts):]
+#            src_lang = src_lang[len(prompts):]
+#            trg_lang = trg_lang[len(prompts):]
+            _prompts = _prompts[_bsz:]
+            _src_sentence_n_tokens = _src_sentence_n_tokens[_bsz:]
         except torch.OutOfMemoryError as e:
             # Handle OOM
 
@@ -692,7 +703,8 @@ def translate_batch(data):
 
                 _bsz = _bsz // 2
 
-        if len(src_sentences) == 0:
+#        if len(src_sentences) == 0:
+        if len(_prompts) == 0:
             break
 
     if get_representation:
