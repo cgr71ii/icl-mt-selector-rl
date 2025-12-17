@@ -554,7 +554,6 @@ def translate_batch(data):
     _prompts, src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
     _inputs = None
     _masks = None
-    reset_device = False
     last_oom = False
     tries = 0
 
@@ -567,12 +566,6 @@ def translate_batch(data):
 
     while True:
         try:
-            if reset_device:
-                lazy_load_llm(force=True)
-
-                model = global_conf["model_llm"]
-                reset_device = False # needed here in case that again we have another OOM now (in that case, without this line we would have an infinite loop of OOM and reset_device when _bsz=1)
-
 #            _src_sentences = src_sentences[:_bsz]
 #            _trg_sentences = trg_sentences[:_bsz]
 #            _icl_examples = icl_examples[:_bsz]
@@ -697,7 +690,14 @@ def translate_batch(data):
                     logger.debug("Storage hits: %d out of %d", storage_hits1, len(prompts))
                     logger.debug("Stored in storage: %d out of %d", stored, len(prompts))
 
-            reset_device = True if last_oom else False
+            if last_oom:
+                # Reset model to original device
+                logger.debug("Resetting model to original device: %s", global_conf["device_map"])
+
+                lazy_load_llm(force=True)
+
+                model = global_conf["model_llm"]
+
             last_oom = False
             _bsz = batch_size
 #            src_sentences = src_sentences[len(prompts):]
