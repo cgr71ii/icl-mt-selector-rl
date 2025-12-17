@@ -541,7 +541,6 @@ def translate_batch(data):
 
     model = global_conf["model_llm"]
     tokenizer = global_conf["tokenizer"]
-    device = global_conf["device_map"]
     batch_size = global_conf["batch_size"]
     _max_new_tokens = global_conf["max_new_tokens"]
 
@@ -557,6 +556,7 @@ def translate_batch(data):
     _masks = None
     reset_device = False
     last_oom = False
+    tries = 0
 
     if get_representation:
         _tokens = mt_icl.tokenize_prompts(_prompts, tokenizer, lock=global_conf["lock"])
@@ -708,6 +708,7 @@ def translate_batch(data):
             _prompts = _prompts[len(prompts):]
             _inputs = _inputs[len(prompts):] if _inputs is not None else None
             _masks = _masks[len(prompts):] if _masks is not None else None
+            tries = 0
         except torch.OutOfMemoryError as e:
             # Handle OOM
 
@@ -729,6 +730,17 @@ def translate_batch(data):
                 logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
 
                 _bsz = _bsz // 2
+        except Exception as e:
+            # Handle other exceptions
+            assert prompts == _prompts[:_bsz], f"This should not happen: prompts and _prompts do not match: {prompts} vs {_prompts[:_bsz]}"
+
+            tries += 1
+
+            logger.error("Exception error: attempt %d: msg: %s", tries, e)
+            logger.error("Exception error: attempt %d: prompts: %s", tries, prompts)
+
+            if tries >= 3:
+                raise e
 
 #        if len(src_sentences) == 0:
         if len(_prompts) == 0:
