@@ -21,6 +21,7 @@ from flask import (
 )
 from service_streamer import ThreadedStreamer
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import accelerate
 
 app = Flask("MT-ICL-flask-server")
 global_conf = {} # Empty since it will be filled once main is run
@@ -565,7 +566,15 @@ def translate_batch(data):
     while True:
         try:
             if model.device != _device:
-                model = model.to(_device)
+                if _device == "auto":
+                    lazy_load_llm(force=True)
+
+                    model = global_conf["model_llm"]
+                else:
+                    if _device == "cpu" and global_conf["device_map"] == "auto":
+                        accelerate.remove_hook_from_module(model, recurse=True) # https://github.com/huggingface/accelerate/issues/2840
+
+                    model = model.to(_device)
 
 #            _src_sentences = src_sentences[:_bsz]
 #            _trg_sentences = trg_sentences[:_bsz]
@@ -973,8 +982,8 @@ def embedding_from_given_model_batch(data):
 
     return embeddings
 
-def lazy_load_llm():
-    if "model_llm" not in global_conf:
+def lazy_load_llm(force=False):
+    if force or "model_llm" not in global_conf:
         # quantization with fp16
         # examples of quantization: https://github.com/jogonba2/llmixtic/blob/main/src/quantization.py
         max_memory_mapping = None
@@ -986,15 +995,15 @@ def lazy_load_llm():
             max_memory_mapping = {idx: f"{mem_per_gpu}GiB" for idx in range(total_gpus)}
 
             if total_gpus > 1:
-                max_memory_mapping[0] = f"1GiB" # the first GPU takes care of some extra memory
+                max_memory_mapping[0] = f"2GiB" # the first GPU takes care of some extra memory
 
             assert os.environ["CUDA_VISIBLE_DEVICES"].count(',') + 1 == total_gpus, f"Expected CUDA_VISIBLE_DEVICES to have {total_gpus} devices, got: {os.environ['CUDA_VISIBLE_DEVICES']}"
 
             logger.info("Total GPUs: %d | Memory per GPU: %d GiB | Model memory: %s GiB | max_memory_mapping: %s", total_gpus, mem_per_gpu, model_memory, max_memory_mapping)
 
         global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"], max_memory=max_memory_mapping)
-        device = global_conf["model_llm"].device # data loading
-        global_conf["device_map"] = device
+        #device = global_conf["model_llm"].device # data loading
+        #global_conf["device_map"] = device
     else:
         # We apply this step in order to avoid loading the model multiple times due to flask debug mode
         pass
@@ -1026,7 +1035,7 @@ def main(args):
         # https://github.com/meta-llama/llama3/issues/114#issuecomment-2127131096
         global_conf["tokenizer"].pad_token = global_conf["tokenizer"].eos_token
 
-    worker_timeout = 300
+    worker_timeout = 3600 # 1h
     global_conf["pretrained_model"] = pretrained_model
     global_conf["device"] = device
     global_conf["device_map"] = device_map
