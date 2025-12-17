@@ -8,6 +8,7 @@ import inspect
 import argparse
 from threading import Lock
 import shelve
+import gc
 
 import utils
 import icl_translation as mt_icl
@@ -547,7 +548,6 @@ def translate_batch(data):
     assert not global_conf["disable_streamer"], "If this is assert is removed, you may get very long prompts as they are processed all at once"
 
     # Build prompts
-    _device = device
     _bsz = batch_size
     results = []
     sentences = [(src_sentence, trg_sentence) for src_sentence, trg_sentence in zip(src_sentences, trg_sentences)] if teacher_forcing else src_sentences
@@ -555,6 +555,8 @@ def translate_batch(data):
     _prompts, src_sentence_n_tokens = mt_icl.build_prompt(sentences, src_lang, trg_lang, tokenizer, icl_examples, len(sentences), teacher_forcing=teacher_forcing, add_eos_token=add_eos_token, lock=global_conf["lock"], **template_kwargs)
     _inputs = None
     _masks = None
+    reset_device = False
+    last_oom = False
 
     if get_representation:
         _tokens = mt_icl.tokenize_prompts(_prompts, tokenizer, lock=global_conf["lock"])
@@ -565,16 +567,11 @@ def translate_batch(data):
 
     while True:
         try:
-            if model.device != _device:
-                if _device == "auto":
-                    lazy_load_llm(force=True)
+            if reset_device:
+                lazy_load_llm(force=True)
 
-                    model = global_conf["model_llm"]
-                else:
-                    if _device == "cpu" and global_conf["device_map"] == "auto":
-                        accelerate.remove_hook_from_module(model, recurse=True) # https://github.com/huggingface/accelerate/issues/2840
-
-                    model = model.to(_device)
+                model = global_conf["model_llm"]
+                reset_device = False # needed here in case that again we have another OOM now (in that case, without this line we would have an infinite loop of OOM and reset_device when _bsz=1)
 
 #            _src_sentences = src_sentences[:_bsz]
 #            _trg_sentences = trg_sentences[:_bsz]
@@ -700,7 +697,8 @@ def translate_batch(data):
                     logger.debug("Storage hits: %d out of %d", storage_hits1, len(prompts))
                     logger.debug("Stored in storage: %d out of %d", stored, len(prompts))
 
-            _device = device
+            reset_device = True if last_oom else False
+            last_oom = False
             _bsz = batch_size
 #            src_sentences = src_sentences[len(prompts):]
 #            trg_sentences = trg_sentences[len(prompts):]
@@ -714,10 +712,19 @@ def translate_batch(data):
             # Handle OOM
 
             if _bsz == 1:
-                _device = "cpu"
                 _bsz = batch_size
+                last_oom = True
 
                 logger.error("torch.OutOfMemoryError error: current batch size is 1: using CPU device and using original batch size: %d", batch_size)
+
+                # Move model to CPU
+                if global_conf["device_map"] == "auto":
+                    accelerate.hooks.remove_hook_from_module(model, recurse=True) # https://github.com/huggingface/accelerate/issues/2840
+
+                model = model.to("cpu")
+
+                gc.collect()
+                torch.cuda.empty_cache()
             else:
                 logger.error("torch.OutOfMemoryError error: current batch size is %d: using smaller batch size: %d", _bsz, _bsz // 2)
 
@@ -951,6 +958,7 @@ def get_embedding_from_given_model_close():
         if n in global_conf["model_embedding"]:
             del global_conf["model_embedding"][n]
 
+    gc.collect()
     torch.cuda.empty_cache()
 
     logger.debug("Models removed: %s", name)
@@ -1002,8 +1010,6 @@ def lazy_load_llm(force=False):
             logger.info("Total GPUs: %d | Memory per GPU: %d GiB | Model memory: %s GiB | max_memory_mapping: %s", total_gpus, mem_per_gpu, model_memory, max_memory_mapping)
 
         global_conf["model_llm"] = AutoModelForCausalLM.from_pretrained(global_conf["pretrained_model"], torch_dtype=torch.float16, device_map=global_conf["device_map"], max_memory=max_memory_mapping)
-        #device = global_conf["model_llm"].device # data loading
-        #global_conf["device_map"] = device
     else:
         # We apply this step in order to avoid loading the model multiple times due to flask debug mode
         pass
