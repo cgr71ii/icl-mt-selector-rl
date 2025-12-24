@@ -17,6 +17,20 @@ def main():
     use_umap = bool(int(sys.argv[4])) if len(sys.argv) > 4 else False
     num_icl_examples = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 
+    manual_limits = None
+    if len(sys.argv) >= 10:
+        try:
+            manual_limits = {
+                'xmin': float(sys.argv[6]),
+                'xmax': float(sys.argv[7]),
+                'ymin': float(sys.argv[8]),
+                'ymax': float(sys.argv[9])
+            }
+            print(f"Manual zoom limits detected: X({manual_limits['xmin']}, {manual_limits['xmax']}) Y({manual_limits['ymin']}, {manual_limits['ymax']})")
+        except ValueError:
+            print("Error: Zoom limits must be numeric.")
+            sys.exit(1)
+
     if use_umap:
         import umap
 
@@ -123,8 +137,21 @@ def main():
     plt.tight_layout()
 
     # 5. Save Output
-    print(f"Saving plot to {output_file}...")
+    # --- SAVE 1: Full View ---
+    print(f"Saving full plot to {output_file} ...")
     plt.savefig(output_file)
+
+    # --- SAVE 2: Manual Zoom-in ---
+    if manual_limits:
+        plt.xlim(manual_limits['xmin'], manual_limits['xmax'])
+        plt.ylim(manual_limits['ymin'], manual_limits['ymax'])
+
+        zoom_output = f"{output_file}.zoom-in.png"
+        print(f"Saving manual zoom to {zoom_output} ...")
+        plt.savefig(zoom_output)
+    else:
+        print("No manual limits provided. Skipping zoomed plot.")
+
     print("Done!")
 
 if __name__ == "__main__":
