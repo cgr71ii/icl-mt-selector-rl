@@ -200,8 +200,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         probs[probs == 0] = smallest_normal
 
         # Compute features
-        #features = ["constant", "observed", "most_likely", "entropy"]
-        features = ["observed", "most_likely", "entropy"]
+        features = ["constant", "observed", "most_likely", "entropy"]
         len_features = len(features)
         model_features = {feature: torch.tensor([]) for feature in features}
         batch_features = compute_features(
