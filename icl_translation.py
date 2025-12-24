@@ -200,7 +200,9 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         probs[probs == 0] = smallest_normal
 
         # Compute features
-        features = ["constant", "observed", "most_likely", "entropy"]
+        #features = ["constant", "observed", "most_likely", "entropy"]
+        features = ["observed", "most_likely", "entropy"]
+        len_features = len(features)
         model_features = {feature: torch.tensor([]) for feature in features}
         batch_features = compute_features(
                             probs,
@@ -227,7 +229,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
         pooled_embeddings = torch.cat(list(model_features.values()), dim=-1)
 
-        assert pooled_embeddings.shape == (hidden_states.shape[0], hidden_states.shape[1] - 1, 4), f"pooled_embeddings shape mismatch: {pooled_embeddings.shape} vs {(hidden_states.shape[0], hidden_states.shape[1] - 1, 4)}"
+        assert pooled_embeddings.shape == (hidden_states.shape[0], hidden_states.shape[1] - 1, len_features), f"pooled_embeddings shape mismatch: {pooled_embeddings.shape} vs {(hidden_states.shape[0], hidden_states.shape[1] - 1, len_features)}"
     else:
         raise ValueError(f"Unknown pooling method: {pooling}")
 
@@ -239,7 +241,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
             expected_shape = hidden_states.shape[1:]
         else:
             _attention_mask = attention_mask[..., 1:]
-            expected_shape = (hidden_states.shape[1] - 1, 4)
+            expected_shape = (hidden_states.shape[1] - 1, len_features)
 
         assert pooled_embeddings.shape == (hidden_states.shape[0], *expected_shape), f"pooled_embeddings expected shape (except batch_size): {(hidden_states.shape[0], *expected_shape)}; got: {pooled_embeddings.shape}"
 
