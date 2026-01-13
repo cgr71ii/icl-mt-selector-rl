@@ -25,7 +25,18 @@ from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExt
 import numpy as np
 import torch
 
-# TODO implement a replay buffer that samples from two different bins (given a probability p): actions with >= reward and < reward
+class NormalActionNoiseWithClip(NormalActionNoise):
+    def __init__(self, *args, clip_value=np.inf, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.clip_value = clip_value
+
+    def __call__(self, *args, **kwargs):
+        noise = super().__call__(*args, **kwargs)
+
+        assert isinstance(noise, np.ndarray), f"Expected noise to be a numpy array, found {type(noise)}"
+
+        return np.clip(noise, a_min=-self.clip_value, a_max=self.clip_value)
 
 class InverseSqrtWithWarmUpLRSchedule:
     def __init__(self, warmup_steps, initial_lr, logger, str_id="none"):
@@ -38,7 +49,7 @@ class InverseSqrtWithWarmUpLRSchedule:
         self.logger = logger
         self.str_id = str_id
 
-        self.logger.debug("[%s] First LR and warmup steps: %f (initial: %f) %d", self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
+        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
 
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
         lr = self.get_lr()
@@ -53,7 +64,7 @@ class InverseSqrtWithWarmUpLRSchedule:
 
             self.old_current_progress_remaining = _current_progress_remaining
 
-        self.logger.debug("[%s] New LR (step %d): %f", self.str_id, self.step, lr)
+        self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
 
         self.step += 1
 
@@ -64,6 +75,54 @@ class InverseSqrtWithWarmUpLRSchedule:
             lr = self.initial_lr * float(self.step) / float(self.warmup_steps)
         else:
             lr = self.initial_lr * (self.warmup_steps ** 0.5) * (self.step ** -0.5)
+
+        return lr
+
+class LinearWithWarmUpLRSchedule:
+    def __init__(self, warmup_steps, initial_lr, total_steps, logger, min_lr=0.0, str_id="none"):
+        assert warmup_steps >= 0, warmup_steps
+
+        self.warmup_steps = warmup_steps + 1
+        self.initial_lr = initial_lr
+        self.total_steps = total_steps
+        self.old_current_progress_remaining = np.inf
+        self.step = 1
+        self.logger = logger
+        self.str_id = str_id
+        self.min_lr = min_lr
+        self.m, self.n = np.polyfit([self.warmup_steps, self.total_steps], [self.initial_lr, 0.0], 1)
+
+        assert self.total_steps > self.warmup_steps
+        assert self.min_lr >= 0.0, self.min_lr
+
+        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
+        self.logger.debug("[%s] [%s] m and n values: %f %f", self.__class__.__name__, self.str_id, self.m, self.n)
+
+    def __call__(self, _current_progress_remaining, _update_learning_rate=False):
+        lr = self.get_lr()
+
+        if not _update_learning_rate:
+            assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
+            assert self.step == 1, self.step
+
+            return lr
+        else:
+            assert _current_progress_remaining <= self.old_current_progress_remaining, f"Expected _current_progress_remaining to be non-increasing, but got {self.old_current_progress_remaining} -> {_current_progress_remaining}"
+
+            self.old_current_progress_remaining = _current_progress_remaining
+
+        self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
+
+        self.step += 1
+
+        return lr
+
+    def get_lr(self):
+        if self.step < self.warmup_steps:
+            lr = self.initial_lr * float(self.step) / float(self.warmup_steps)
+        else:
+            lr = self.m * self.step + self.n
+            lr = max(lr, self.min_lr)
 
         return lr
 
@@ -207,7 +266,7 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = max(1, parsed_kwargs.pop("num_envs", 4))
+    num_envs = max(1, parsed_kwargs.pop("num_envs", 2))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = parsed_kwargs.get("max_icl_examples", 5)
     #max_icl_examples = 1 # TODO remove
@@ -308,8 +367,18 @@ if __name__ == "__main__":
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
-    patience = 6 # early stopping patience (number of evals with no improvement)
+    #patience = 6 # early stopping patience (number of evals with no improvement)
     #patience = 20 # TODO remove
+    patience = -1 # disabled
+    enable_eval = True
+
+    if not enable_eval:
+        logger.info("Evaluation (dev set) disabled: no best model will be available, only last model")
+
+    if patience < 0:
+        logger.info("Early stopping disabled (patience < 0)")
+    else:
+        logger.info("Early stopping enabled (patience: %d evals with no improvement every %d steps)", patience, eval_freq)
 
     logger.info("Save path: %s", save_path)
     logger.info("Evaluation frequency (steps): %d", eval_freq)
@@ -338,13 +407,19 @@ if __name__ == "__main__":
     #actor_learning_rate = 5e-4
     critic_learning_rate = 1e-3
     actor_learning_rate = 1e-3
-    max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
+    #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
+    max_steps_training = 30000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     init_training_steps = 5000
     #init_training_steps = 5 # TODO remove
     #init_training_steps = 200 # TODO remove
+    max_steps = max_steps_training + init_training_steps
 
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
+    logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
+
+    if num_envs > 1:
+        logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)", max_steps, max_steps, num_envs, max_steps // num_envs, (max_steps - init_training_steps) // num_envs, max_steps - init_training_steps)
 
     #env = env_class(src_lang, trg_lang, file_data_training, file_data_icl_examples_training, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
@@ -359,12 +434,11 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0] # Get only the result, not I or D
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
-    normal_action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
-    action_noise = normal_action_noise
+    action_noise = NormalActionNoiseWithClip(mean=np.zeros(n_actions), sigma=0.05 * np.ones(n_actions), clip_value=0.1)
     #action_noise = None # TODO remove
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
@@ -410,11 +484,27 @@ if __name__ == "__main__":
     dropout_p = 0.1
     #warmup_steps = 200
     warmup_steps = 2000
+    #warmup_steps = 10 # TODO remove
+    exploration_rate_steps_percentage = 0.8
+    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
+    exploration_rate_initial = 1.0
+    exploration_rate_last = 0.01
+
+    logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
+
+    if patience >= 0:
+        actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable
+        critic_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic") # callable
+    else:
+        total_steps = (max_steps - init_training_steps) // num_envs
+        actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, str_id="actor")
+        critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, str_id="critic")
+
     policy_actor_kwargs = {
         #"squash_output": True,
         "squash_output": False, # actor l2-norm
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
-        "actor_lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor"), # callable
+        "actor_lr_schedule": actor_lr_schedule,
         "actor_layer_norm_input": True,
         "actor_layer_norm_before_activation": True,
         "actor_last_layer_init_uniform_value": 0.001,
@@ -426,7 +516,7 @@ if __name__ == "__main__":
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
-        #"lr_schedule": InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
+        #"lr_schedule": critic_lr_schedule,
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
@@ -486,7 +576,7 @@ if __name__ == "__main__":
         batch_size=batch_size,
         learning_starts=init_training_steps,
         #learning_rate=critic_learning_rate,
-        learning_rate=InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic"), # callable
+        learning_rate=critic_lr_schedule,
         policy_kwargs={
             # Optimizer
             "optimizer_class": torch.optim.AdamW,
@@ -503,7 +593,7 @@ if __name__ == "__main__":
             "add_all_knn_to_batch": False,
             "apply_rws_inference": apply_rws_inference,
             #"exploration_rate": 0.1,
-            "exploration_rate": LinearDecayScheduler(1.0, 0.1, 15000, logger, "epsilon-greedy exploration"),
+            "exploration_rate": LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration"),
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "features_extractor_class": features_extractor_class,
@@ -515,13 +605,15 @@ if __name__ == "__main__":
         gradient_steps=-1 if num_envs > 1 else 1, # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
         train_freq=(1, "step"),
         buffer_size=replay_buffer_size,
-        action_noise=action_noise,
+        action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_add_noise_after_knn=True, # TD3 noise -> it should improve generalization
-        wolpertinger_target_policy_actor_noise=0.1, # noise before kNN -> it should improve exploration of different actions
-        wolpertinger_target_actor_noise_clip=0.25,
+        #wolpertinger_target_policy_actor_noise=0.1, # noise before kNN for the target policy -> it should improve exploration of different actions
+        #wolpertinger_target_actor_noise_clip=0.25,
+        wolpertinger_target_policy_actor_noise=0.02,
+        wolpertinger_target_actor_noise_clip=0.05,
         #wolpertinger_target_policy_actor_noise=0.0, # TODO remove
         #wolpertinger_target_actor_noise_clip=0.0, # TODO remove
         n_steps=max_icl_examples, # Monte-carlo TD3/DDPG instead of 1-step TD. Better for handling differences in the length of episodes for the early-stopping action (for 1-step TD, the episodes of length 1 due to early stopping are selected most times)
@@ -531,7 +623,7 @@ if __name__ == "__main__":
     #assert init_training_episodes < max_episodes
 
     # Add callbacks
-    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=patience, min_evals=0, verbose=1) # early stopping
+    stop_train_callback = sb3_cb.StopTrainingOnNoModelImprovement(max_no_improvement_evals=patience, min_evals=0, verbose=1) if patience >= 0 else None # early stopping
     # EvalCallback
     ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
     ## it does not evaluate the model performance when training finishes (we evaluate below)
@@ -570,13 +662,14 @@ if __name__ == "__main__":
     model.learn(max_steps, log_interval=1, callback=callback)
 
     # Store last version (adapted from CheckpointCallback)
-    model.save(os.path.join(save_path, f"{name_prefix}_last-step_model.zip"))
+    last_model_path = f"{name_prefix}_last-step_model.zip"
+    model.save(os.path.join(save_path, last_model_path))
     #model.save_replay_buffer(os.path.join(save_path, f"{name_prefix}_last-step_replay-buffer.pkl")) # too much disk...
     if model.get_vec_normalize_env() is not None:
         model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_last-step_vecnormalize.pkl"))
 
     # Evaluate
-    best_model_path = os.path.join(save_path, "best_model.zip")
+    best_model_path = os.path.join(save_path, "best_model.zip" if enable_eval else last_model_path)
 
     assert utils.file_exists(best_model_path), f"Best model not found: {best_model_path}"
 

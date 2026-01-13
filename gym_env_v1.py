@@ -251,7 +251,7 @@ class MTICLEnv(gym.Env):
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
-        self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "sequential_shuffle_per_epoch")
+        self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 2)
 
         assert self.reward_power > 0, self.reward_power
@@ -270,7 +270,7 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
         assert self.eval_strategy in ("api-eval", "chrf2"), self.eval_strategy
-        assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like"), self.translation_candidate_strategy
+        assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like", "choice_with_replacement"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
 
@@ -465,7 +465,7 @@ class MTICLEnv(gym.Env):
                                 "that the model does not cheat in the translation")
 
         # Shuffle data in order to avoid model memorization
-        if options.get("shuffle_all_data", True):
+        if options.get("shuffle_all_data", False):
             self.logger_wrapper(gym.logger.info, "Data shuffled")
 
             random.shuffle(self.data)
@@ -1557,7 +1557,7 @@ class MTICLEnv(gym.Env):
         # Select translation candidate
         if translation_candidate is None:
             if self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch"):
-                translation_candidate = (self.episode - 1) % len(self.data) # sequential sweep
+                translation_candidate = (self.episode - 1) % n # sequential sweep
 
                 if self.translation_candidate_strategy == "sequential_shuffle_per_epoch" and translation_candidate == 0:
                     # shuffle once per epoch
@@ -1584,6 +1584,11 @@ class MTICLEnv(gym.Env):
                 src_translation_candidate = self.data[translation_candidate][0]
 
                 self.logger_wrapper(gym.logger.info, "Translation candidate #%d (p: %.4f): %s", translation_candidate, prob_dist[translation_candidate], src_translation_candidate)
+            elif self.translation_candidate_strategy == "choice_with_replacement":
+                translation_candidate = random.choice(range(n))
+                src_translation_candidate = self.data[translation_candidate][0]
+
+                self.logger_wrapper(gym.logger.info, "Translation candidate #%d: %s", translation_candidate, src_translation_candidate)
             else:
                 raise Exception(f"Unknown translation candidate selection strategy: {self.translation_candidate_strategy}")
 

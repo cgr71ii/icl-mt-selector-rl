@@ -285,15 +285,16 @@ def _requests(url, method, max_retries=5, backoff_factor=1.0, **kwargs):
         allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
     )
     adapter = HTTPAdapter(max_retries=retries)
+    timeout = kwargs.pop("timeout", (3 * 20, 3600)) # https://requests.readthedocs.io/en/latest/user/advanced/#timeouts
 
     with requests.Session() as session:
         session.mount("http://", adapter)
         session.mount("https://", adapter)
 
         if method == "get":
-            response = session.get(url, **kwargs)
+            response = session.get(url, timeout=timeout, **kwargs)
         elif method == "post":
-            response = session.post(url, **kwargs)
+            response = session.post(url, timeout=timeout, **kwargs)
         else:
             raise Exception(f"Unsupported method: {method}")
 
