@@ -33,37 +33,83 @@ from sacrebleu.metrics import CHRF
 #)
 
 class ActionBoxSampleFromList(gym.spaces.Box):
-    def __init__(self, *args, sample_p=None, sample_list_actions=None, sample_list_actions_is_callable=False, error_when_sampling=False, **kwargs):
+    def __init__(self, *args, sample_p=None, sample_list_actions=None, sample_list_actions_is_callable=False, sample_list_actions_args=(), error_when_sampling=False, max_icl_examples=None, remove_overlapping_actions=True, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.sample_p = sample_p
         self.sample_list_actions = sample_list_actions
         self.sample_list_actions_is_callable = sample_list_actions_is_callable
+        self.sample_list_actions_args = sample_list_actions_args
         self.error_when_sampling = error_when_sampling
+        self.max_icl_examples = max_icl_examples
+        self.remove_overlapping_actions = remove_overlapping_actions
+
+        assert max_icl_examples is not None
 
         if self.sample_p is not None:
             assert isinstance(self.sample_p, float), type(self.sample_p)
             assert 0.0 <= self.sample_p <= 1.0, self.sample_p
 
         if self.sample_list_actions is not None and not self.sample_list_actions_is_callable:
-            assert isinstance(self.sample_list_actions, (list, np.ndarray)), type(self.sample_list_actions)
+            #assert isinstance(self.sample_list_actions, (list, np.ndarray)), type(self.sample_list_actions)
+            assert isinstance(self.sample_list_actions, list), type(self.sample_list_actions)
             assert len(self.sample_list_actions) > 0, len(self.sample_list_actions)
-            assert all(action.shape == self._shape for action in self.sample_list_actions), f"{len(self.sample_list_actions[0].shape)}... vs {self._shape}"
+            assert len(self.sample_list_actions[0]) == 2, len(self.sample_list_actions[0])
+            assert isinstance(self.sample_list_actions[0][0], str), type(self.sample_list_actions[0][0])
+            assert isinstance(self.sample_list_actions[0][1], np.ndarray), type(self.sample_list_actions[0][1])
+            assert all(action_emb.shape == self._shape for action_str, action_emb in self.sample_list_actions), f"{len(self.sample_list_actions[0][1].shape)}... vs {self._shape}"
 
     def sample(self, *args, **kwargs):
         assert not self.error_when_sampling, "Sampling from ActionBoxSampleFromList is disabled (error_when_sampling=True)"
 
         if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
             if self.sample_list_actions_is_callable:
-                action = self.sample_list_actions()
+                action_str, action = self.sample_list_actions(*self.sample_list_actions_args)
             elif len(self.sample_list_actions):
-                action = random.choice(self.sample_list_actions)
+                action_str, action = random.choice(self.sample_list_actions)
 
             assert action.shape == self._shape, f"{action.shape} vs {self._shape}"
 
             return action
 
         return super().sample(*args, **kwargs)
+
+    def sample_bm25(self, time_step, src_translation_candidate, custom_env_id="none"):
+        from rank_bm25 import BM25Okapi
+
+        corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
+        bm25 = BM25Okapi([icl_example[0].split() for icl_example in corpus])
+
+        assert len(corpus) >= self.max_icl_examples
+        assert 0 <= time_step < self.max_icl_examples
+
+        tokenized_query = src_translation_candidate.split()
+        scores = bm25.get_scores(tokenized_query).tolist()
+
+        assert len(scores) == len(self.sample_list_actions), f"BM25 scores length mismatch: {len(scores)} vs {len(self.sample_list_actions)}"
+
+        top_n_indices = sorted(range(len(scores)), key=lambda idx: scores[idx], reverse=True)
+
+        if self.remove_overlapping_actions:
+            sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0] # if there are overlapping actions, the first will be an overlapping
+
+            while sentence == src_translation_candidate:
+                del top_n_indices[0] # warning: if many elements are removed, there may be an index out of range
+                del scores[0]
+
+                sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0]
+
+        idx = top_n_indices[time_step]
+
+        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: translation_candidate (idx: %d): %s", custom_env_id, time_step, idx, src_translation_candidate)
+        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: scores: %s ...", custom_env_id, time_step, scores[:self.max_icl_examples])
+        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: top_n_indices: %s ...", custom_env_id, time_step, top_n_indices[:self.max_icl_examples])
+        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: selected: %s", custom_env_id, time_step, self.sample_list_actions[idx][0])
+
+        return self.sample_list_actions[idx][1]
+
+    def __str__(self):
+        return "ActionBoxSampleFromList"
 
 class MTICLEnv(gym.Env):
     """Custom Environment for selecting ICL examples for MT using LLMs that follows gym interface."""
@@ -126,8 +172,10 @@ class MTICLEnv(gym.Env):
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
         self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
         self.action_representation = utils.dict_or_default(kwargs, "action_representation", "llm")
+        self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by off_policy_algorithm.py
 
         assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features"), f"Unexpected state representation: {self.state_representation}"
+        assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
             self.logger_wrapper(gym.logger.warn, "State window type is 'concatenate' and state window length is greater than 1: %d > 1. Modifying value to 1", self.state_window_length)
@@ -252,7 +300,7 @@ class MTICLEnv(gym.Env):
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
-        self.reward_power = utils.dict_or_default(kwargs, "reward_power", 2)
+        self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
 
         assert self.reward_power > 0, self.reward_power
 
@@ -290,13 +338,16 @@ class MTICLEnv(gym.Env):
         if initial_sample_list_actions is not None:
             assert isinstance(initial_sample_list_actions, list), type(initial_sample_list_actions)
             assert len(initial_sample_list_actions) > 0
-            assert isinstance(initial_sample_list_actions[0], np.ndarray), type(initial_sample_list_actions[0])
-            assert len(initial_sample_list_actions[0].shape) == 1, initial_sample_list_actions[0].shape
-            assert initial_sample_list_actions[0].shape[0] == self.action_dim, initial_sample_list_actions[0].shape
+            assert isinstance(initial_sample_list_actions[0], tuple), type(initial_sample_list_actions[0])
+            assert len(initial_sample_list_actions[0]) == 2, len(initial_sample_list_actions[0])
+            assert isinstance(initial_sample_list_actions[0][0], str), type(initial_sample_list_actions[0][0])
+            assert isinstance(initial_sample_list_actions[0][1], np.ndarray), type(initial_sample_list_actions[0][1])
+            assert len(initial_sample_list_actions[0][1].shape) == 1, initial_sample_list_actions[0][1].shape
+            assert initial_sample_list_actions[0][1].shape[0] == self.action_dim, initial_sample_list_actions[0][1].shape
 
             self.logger_wrapper(gym.logger.info, "Loading initial sample list actions with %d entries", len(initial_sample_list_actions))
 
-            _initial_sample_list_actions = [initial_sample_list_actions[i].astype(np.float32) for i in range(len(initial_sample_list_actions))]
+            _initial_sample_list_actions = [(initial_sample_list_actions[i][0], initial_sample_list_actions[i][1].astype(np.float32)) for i in range(len(initial_sample_list_actions))]
         else:
             #self.logger_wrapper(gym.logger.warning, "Generating initial sample list actions with random normal values: this is not expected by the Wolpertinger policy and should only be used for non-main training environments")
 
@@ -304,7 +355,12 @@ class MTICLEnv(gym.Env):
             _initial_sample_list_actions = None
             error_when_sampling = True
 
-        self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, sample_list_actions=_initial_sample_list_actions, error_when_sampling=error_when_sampling)
+        action_space_kwargs = {
+            "sample_list_actions": _initial_sample_list_actions,
+            "sample_list_actions_is_callable": False, # SubprocVecEnv does pickle environments, and local functions can't be pickled
+            "max_icl_examples": self.max_icl_examples,
+        }
+        self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, error_when_sampling=error_when_sampling, **action_space_kwargs)
         self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
 
     def preprocess_action(self, action):

@@ -268,7 +268,7 @@ if __name__ == "__main__":
     # default values
     num_envs = max(1, parsed_kwargs.pop("num_envs", 2))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
-    max_icl_examples = parsed_kwargs.get("max_icl_examples", 5)
+    max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     #max_icl_examples = 1 # TODO remove
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
@@ -300,8 +300,8 @@ if __name__ == "__main__":
     assert not apply_rws_inference, "Biased learning"
 
     # set defaults in case they are not provided
-    max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
-    max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
+    max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
+    max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
@@ -428,7 +428,7 @@ if __name__ == "__main__":
 
     env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_training_dummy.get_closest_neighbors_urls() is available
 
-    parsed_kwargs_training["initial_sample_list_actions"] = [env_training_dummy.str2representation[k] for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
+    parsed_kwargs_training["initial_sample_list_actions"] = [(k, env_training_dummy.str2representation[k]) for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
 
