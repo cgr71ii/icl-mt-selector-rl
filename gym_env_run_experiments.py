@@ -310,13 +310,13 @@ if __name__ == "__main__":
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
-    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "api-eval")
+    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "chrf2")
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
-    parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 1)
+    parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 2)
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
@@ -391,7 +391,7 @@ if __name__ == "__main__":
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
-    batch_size = 192
+    batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 192)))
     #batch_size = 16 # TODO remove
     net_arch = {
         "pi": [256, 256],
@@ -410,7 +410,9 @@ if __name__ == "__main__":
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
     max_steps_training = 30000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    init_training_steps = 5000
+    #init_training_steps = 5000
+    init_training_steps = 1000
+    #init_training_steps = 0 # TODO remove
     #init_training_steps = 5 # TODO remove
     #init_training_steps = 200 # TODO remove
     max_steps = max_steps_training + init_training_steps
@@ -419,7 +421,10 @@ if __name__ == "__main__":
     logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
 
     if num_envs > 1:
-        logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)", max_steps, max_steps, num_envs, max_steps // num_envs, (max_steps - init_training_steps) // num_envs, max_steps - init_training_steps)
+        logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment (%d // %d = %d init. training steps) instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)",
+                    max_steps, max_steps, num_envs, max_steps // num_envs,
+                    init_training_steps, num_envs, init_training_steps // num_envs,
+                    (max_steps - init_training_steps) // num_envs, max_steps - init_training_steps)
 
     #env = env_class(src_lang, trg_lang, file_data_training, file_data_icl_examples_training, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
@@ -485,7 +490,7 @@ if __name__ == "__main__":
     #warmup_steps = 200
     warmup_steps = 2000
     #warmup_steps = 10 # TODO remove
-    exploration_rate_steps_percentage = 0.8
+    exploration_rate_steps_percentage = 0.5
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
     exploration_rate_initial = 1.0
     exploration_rate_last = 0.01

@@ -74,39 +74,45 @@ class ActionBoxSampleFromList(gym.spaces.Box):
 
         return super().sample(*args, **kwargs)
 
-    def sample_bm25(self, time_step, src_translation_candidate, custom_env_id="none"):
-        from rank_bm25 import BM25Okapi
+    def sample_bm25(self, *args, time_step=None, src_translation_candidate=None, custom_env_id="none", **kwargs):
+        if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
+            from rank_bm25 import BM25Okapi
 
-        corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
-        bm25 = BM25Okapi([icl_example[0].split() for icl_example in corpus])
+            assert time_step is not None
+            assert src_translation_candidate is not None
 
-        assert len(corpus) >= self.max_icl_examples
-        assert 0 <= time_step < self.max_icl_examples
+            corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
+            bm25 = BM25Okapi([icl_example[0].split() for icl_example in corpus])
 
-        tokenized_query = src_translation_candidate.split()
-        scores = bm25.get_scores(tokenized_query).tolist()
+            assert len(corpus) >= self.max_icl_examples
+            assert 0 <= time_step < self.max_icl_examples
 
-        assert len(scores) == len(self.sample_list_actions), f"BM25 scores length mismatch: {len(scores)} vs {len(self.sample_list_actions)}"
+            tokenized_query = src_translation_candidate.split()
+            scores = bm25.get_scores(tokenized_query).tolist()
 
-        top_n_indices = sorted(range(len(scores)), key=lambda idx: scores[idx], reverse=True)
+            assert len(scores) == len(self.sample_list_actions), f"BM25 scores length mismatch: {len(scores)} vs {len(self.sample_list_actions)}"
 
-        if self.remove_overlapping_actions:
-            sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0] # if there are overlapping actions, the first will be an overlapping
+            top_n_indices = sorted(range(len(scores)), key=lambda idx: scores[idx], reverse=True)
 
-            while sentence == src_translation_candidate:
-                del top_n_indices[0] # warning: if many elements are removed, there may be an index out of range
-                del scores[0]
+            if self.remove_overlapping_actions:
+                sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0] # if there are overlapping actions, the first will be an overlapping
 
-                sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0]
+                while sentence == src_translation_candidate:
+                    del top_n_indices[0] # warning: if many elements are removed, there may be an index out of range
+                    del scores[0]
 
-        idx = top_n_indices[time_step]
+                    sentence = self.sample_list_actions[top_n_indices[0]][0].split('\t')[0]
 
-        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: translation_candidate (idx: %d): %s", custom_env_id, time_step, idx, src_translation_candidate)
-        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: scores: %s ...", custom_env_id, time_step, scores[:self.max_icl_examples])
-        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: top_n_indices: %s ...", custom_env_id, time_step, top_n_indices[:self.max_icl_examples])
-        gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: selected: %s", custom_env_id, time_step, self.sample_list_actions[idx][0])
+            idx = top_n_indices[time_step]
 
-        return self.sample_list_actions[idx][1]
+            gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: translation_candidate (idx: %d): %s", custom_env_id, time_step, idx, src_translation_candidate)
+            gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: scores: %s ...", custom_env_id, time_step, scores[:self.max_icl_examples])
+            gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: top_n_indices: %s ...", custom_env_id, time_step, top_n_indices[:self.max_icl_examples])
+            gym.logger.info("[id: %s] [x:%d -> x] Sampling strategy: BM25: selected: %s", custom_env_id, time_step, self.sample_list_actions[idx][0])
+
+            return self.sample_list_actions[idx][1]
+
+        return super().sample(*args, **kwargs)
 
     def __str__(self):
         return "ActionBoxSampleFromList"
@@ -172,7 +178,19 @@ class MTICLEnv(gym.Env):
         self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
         self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
         self.action_representation = utils.dict_or_default(kwargs, "action_representation", "llm")
-        self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by off_policy_algorithm.py
+        self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by td3.py
+        self.select_max_icl_examples_randomly = utils.dict_or_default(kwargs, "select_max_icl_examples_randomly", True)
+        self.current_max_icl_examples = self.max_icl_examples
+
+        if self.select_max_icl_examples_randomly:
+            if self.is_eval_env:
+                self.select_max_icl_examples_randomly = False
+            elif self.state_representation != "representation_per_token_with_features":
+                self.select_max_icl_examples_randomly = False
+
+                self.logger_wrapper(gym.logger.warn, "self.select_max_icl_examples_randomly set to False because self.state_representation != 'representation_per_token_with_features'")
+            else:
+                self.logger_wrapper(gym.logger.info, "Each new episode will change the total number of ICL examples to select between 1 and %d", self.max_icl_examples)
 
         assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features"), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
@@ -189,10 +207,10 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
             self.state_window_length = self.max_icl_examples + 2
-        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512 + 1:
+        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512 + 2:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512 + 1)
 
-            self.state_window_length = 512 + 1 # +1 for the action representation at the beginning
+            self.state_window_length = 512 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -297,7 +315,7 @@ class MTICLEnv(gym.Env):
         self.apply_l2_normalization_action = utils.dict_or_default(kwargs, "apply_l2_normalization_action", True)
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "api-eval")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
-        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False) # TODO remove? Not used
+        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
@@ -434,8 +452,8 @@ class MTICLEnv(gym.Env):
 
         #self.rewards.append(reward)
         self.logger_wrapper(gym.logger.info,
-                            "Action in time step #%d (reward: %s; distance: %s): %s",
-                            self.time_step, reward, action_url_distance, action_url)
+                            "Action in time step #%d (reward: %s; distance: %s; max_icl_examples: %s): %s",
+                            self.time_step, reward, action_url_distance, self.current_max_icl_examples, action_url)
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
@@ -462,7 +480,7 @@ class MTICLEnv(gym.Env):
             reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
 
             self.logger_wrapper(gym.logger.info, "Result episode:\n    src: %s\n    ref: %s\n     mt: %s", src_sentence, reference, translation)
-            self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'stdev': %s, 'last_episode_reward': %s, 'last_episode_steps': %s}", reward_sum, reward_mean, reward_stdev, reward, self.time_step)
+            self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'stdev': %s, 'last_episode_reward': %s, 'last_episode_steps': %s, 'max_icl_examples': %s}", reward_sum, reward_mean, reward_stdev, reward, self.time_step, self.current_max_icl_examples)
 
         sys.stdout.flush()
         sys.stderr.flush()
@@ -667,6 +685,7 @@ class MTICLEnv(gym.Env):
 
         for idx in range(self.state_window_length):
             if idx == 0:
+                # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
@@ -704,6 +723,11 @@ class MTICLEnv(gym.Env):
         #self.last_representation_emb = [] # former self.last_downloaded_url_representation
         self.current_datetime = datetime.datetime.now()
 
+        if self.select_max_icl_examples_randomly:
+            self.current_max_icl_examples = np.random.randint(1, self.max_icl_examples + 1)
+
+            self.logger_wrapper(gym.logger.info, "Current max. ICL examples: %d (max.: %d)", self.current_max_icl_examples, self.max_icl_examples)
+
         # Reset state (self.current_state_window)
         self._reset_state()
 
@@ -719,7 +743,10 @@ class MTICLEnv(gym.Env):
         self.current_state_window[0] = action_representation
 
         if self.state_representation == "representation_per_token_with_features":
+            self.current_state_window[1] = np.ones(self.state_dim_per_token) * self.current_max_icl_examples / 10 # state representing the number of maximum examples that will be selected. 10 as constant so the value is less than 1 (as long as self.max_icl_examples is less than 10)
+
             # Fill the rest of the state window with the token representations of the source sentence
+
             token_representations = self.get_state_representation([src_sentence])[0]
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
@@ -734,7 +761,7 @@ class MTICLEnv(gym.Env):
             for i in range(num_tokens):
                 assert len(token_representations[i]) == self.state_dim_per_token
 
-                self.current_state_window[i + 1] = token_representations[i]
+                self.current_state_window[i + 1 + 1] = token_representations[i] # +1 for the action and +1 for self.current_max_icl_examples
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, num_tokens)
 
@@ -1276,7 +1303,7 @@ class MTICLEnv(gym.Env):
         return translations
 
     def is_done(self):
-        limit_examples = len(self.current_icl_examples) >= self.max_icl_examples
+        limit_examples = len(self.current_icl_examples) >= self.current_max_icl_examples
         early_stopping_terminated = self.early_stopping
         terminated = limit_examples or early_stopping_terminated
         truncated = False # we have not defined an artificial termination of the environment
@@ -1656,7 +1683,7 @@ class MTICLEnv(gym.Env):
 
     def apply_step(self, current_action):
         assert isinstance(current_action, str), f"Expected current_action to be a string, got {type(current_action)}: {current_action}"
-        assert len(self.current_icl_examples) < self.max_icl_examples, f"Current length of ICL examples ({self.current_icl_examples}) must be less than max ICL examples ({self.max_icl_examples})"
+        assert len(self.current_icl_examples) < self.current_max_icl_examples, f"Current length of ICL examples ({self.current_icl_examples}) must be less than max ICL examples ({self.current_max_icl_examples})"
         assert self.time_step > 0, self.time_step
 
         if self.enable_eos_action and current_action == self.eos_token_str:
@@ -1746,13 +1773,13 @@ class MTICLEnv(gym.Env):
             is_zero_vector = (observation == 0).all(axis=1)
             used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
 
-            # Clean (do not remove the first position, which is reserved for the source sentence representation)
-            for idx in range(1, self.state_window_length):
+            # Clean (do not remove the first position, which is reserved for the source sentence representation; do not remove the second position, which is reserved for the information regardin the max. number of ICL examples)
+            for idx in range(2, self.state_window_length):
                 self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
             for idx in range(num_tokens):
-                self.current_state_window[idx + 1] = observation[idx]
+                self.current_state_window[idx + 2] = observation[idx]
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, num_tokens)
         else:
