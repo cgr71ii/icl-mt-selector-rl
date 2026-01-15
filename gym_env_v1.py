@@ -183,9 +183,7 @@ class MTICLEnv(gym.Env):
         self.current_max_icl_examples = self.max_icl_examples
 
         if self.select_max_icl_examples_randomly:
-            if self.is_eval_env:
-                self.select_max_icl_examples_randomly = False
-            elif self.state_representation != "representation_per_token_with_features":
+            if self.state_representation != "representation_per_token_with_features":
                 self.select_max_icl_examples_randomly = False
 
                 self.logger_wrapper(gym.logger.warn, "self.select_max_icl_examples_randomly set to False because self.state_representation != 'representation_per_token_with_features'")
@@ -319,6 +317,9 @@ class MTICLEnv(gym.Env):
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
+
+        if self.select_max_icl_examples_randomly and self.is_eval_env:
+            self.select_max_icl_examples_randomly = False
 
         assert self.reward_power > 0, self.reward_power
 
@@ -754,7 +755,7 @@ class MTICLEnv(gym.Env):
             assert token_representations.shape[0] % self.state_dim_per_token == 0, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
 
             token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
-            num_tokens = min(token_representations.shape[0], self.state_window_length - 1)
+            num_tokens = min(token_representations.shape[0], self.state_window_length - 1 - 1)
             is_zero_vector = (token_representations == 0).all(axis=1)
             used_tokens = token_representations.shape[0] - is_zero_vector.sum(axis=0)
 
@@ -1769,7 +1770,7 @@ class MTICLEnv(gym.Env):
             self.current_state_window[self.time_step + 1] = observation
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
         elif self.state_representation == "representation_per_token_with_features":
-            num_tokens = min(observation.shape[0], self.state_window_length - 1)
+            num_tokens = min(observation.shape[0], self.state_window_length - 1 - 1)
             is_zero_vector = (observation == 0).all(axis=1)
             used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
 
@@ -1779,7 +1780,7 @@ class MTICLEnv(gym.Env):
 
             # Update
             for idx in range(num_tokens):
-                self.current_state_window[idx + 2] = observation[idx]
+                self.current_state_window[idx + 1 + 1] = observation[idx]
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, num_tokens)
         else:
