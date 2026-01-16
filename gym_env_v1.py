@@ -308,7 +308,9 @@ class MTICLEnv(gym.Env):
         self.data_already_loaded = False
         self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
         self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
-        self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False)
+        self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False) # reward-based repetition
+        self.repeat_translation_candidates_times = utils.dict_or_default(kwargs, "repeat_translation_candidates_times", -1)
+        self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
         self.apply_l2_normalization_state = utils.dict_or_default(kwargs, "apply_l2_normalization_state", True)
         self.apply_l2_normalization_action = utils.dict_or_default(kwargs, "apply_l2_normalization_action", True)
         self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "api-eval")
@@ -758,11 +760,17 @@ class MTICLEnv(gym.Env):
             num_tokens = min(token_representations.shape[0], self.state_window_length - 1 - 1)
             is_zero_vector = (token_representations == 0).all(axis=1)
             used_tokens = token_representations.shape[0] - is_zero_vector.sum(axis=0)
+            found_zeros = 0
 
             for i in range(num_tokens):
+                if (token_representations[i] == 0).all(axis=0):
+                    found_zeros += 1
+
+                    continue
+
                 assert len(token_representations[i]) == self.state_dim_per_token
 
-                self.current_state_window[i + 1 + 1] = token_representations[i] # +1 for the action and +1 for self.current_max_icl_examples
+                self.current_state_window[i - found_zeros + 1 + 1] = token_representations[i] # +1 for the action and +1 for self.current_max_icl_examples
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, num_tokens)
 
@@ -1626,7 +1634,17 @@ class MTICLEnv(gym.Env):
 
             assert 0.0 <= p <= 1.0, f"Probability p must be in [0, 1], got {p} for idx {idx}: {self.translation_candidates_reward_mean_exponential_decay_episode} / {self.translation_candidates_selected_consecutive_episode}"
 
-            if random.random() < p:
+            if_stm = False
+
+            if self.repeat_translation_candidates_times > 0:
+                assert self.repeat_translation_candidates_times_counter >= 0, self.repeat_translation_candidates_times_counter
+
+                if_stm = self.repeat_translation_candidates_times_counter > 0
+                self.repeat_translation_candidates_times_counter -= 1
+            else:
+                if_stm = random.random() < p
+
+            if if_stm:
                 src_translation_candidate = self.data[self.translation_candidate][0]
 
                 self.logger_wrapper(gym.logger.info, "Translation candidate (repeating) #%d (p: %.4f): %s", idx, p, src_translation_candidate)
@@ -1635,6 +1653,7 @@ class MTICLEnv(gym.Env):
                 repeat = True
             else:
                 self.translation_candidates_selected_consecutive_episode[idx] = 0
+                self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
 
         translation_candidate = self.translation_candidate if repeat else None
 
@@ -1779,8 +1798,15 @@ class MTICLEnv(gym.Env):
                 self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
+            found_zeros = 0
+
             for idx in range(num_tokens):
-                self.current_state_window[idx + 1 + 1] = observation[idx]
+                if (observation[idx] == 0).all(axis=0):
+                    found_zeros += 1
+
+                    continue
+
+                self.current_state_window[idx - found_zeros + 1 + 1] = observation[idx]
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, num_tokens)
         else:

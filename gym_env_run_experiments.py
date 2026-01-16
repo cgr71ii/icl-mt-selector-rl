@@ -311,12 +311,13 @@ if __name__ == "__main__":
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "chrf2")
-    parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
+    parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", True)
+    parsed_kwargs["repeat_translation_candidates_times"] = parsed_kwargs.get("repeat_translation_candidates_times", 3)
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
-    parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 2)
+    parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 2
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
