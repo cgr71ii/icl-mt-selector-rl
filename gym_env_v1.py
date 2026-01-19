@@ -226,9 +226,12 @@ class MTICLEnv(gym.Env):
         assert isinstance(self.embedding_pooling_model_api, str), f"embedding_pooling_model_api: {type(self.embedding_pooling_model_api)}: {self.embedding_pooling_model_api}"
         assert isinstance(self.eval_model_api, str), f"eval_model_api: {type(self.eval_model_api)}: {self.eval_model_api}"
 
-        self.logger_wrapper(gym.logger.debug, "translate_model_api: %s", self.translate_model_api)
+        self.translate_model_api = self.translate_model_api.split('|')
+        self.embedding_pooling_model_api = self.embedding_pooling_model_api.split('|')
+
+        self.logger_wrapper(gym.logger.debug, "translate_model_api (pool size: %d): %s", len(self.translate_model_api), self.translate_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
-        self.logger_wrapper(gym.logger.debug, "embedding_pooling_model_api: %s", self.embedding_pooling_model_api)
+        self.logger_wrapper(gym.logger.debug, "embedding_pooling_model_api (pool size: %d): %s", len(self.embedding_pooling_model_api), self.embedding_pooling_model_api)
         self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
 
         ## Other API parameters
@@ -383,6 +386,12 @@ class MTICLEnv(gym.Env):
         }
         self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, error_when_sampling=error_when_sampling, **action_space_kwargs)
         self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
+
+    def get_int_env_id(self):
+        try:
+            return int(self.custom_env_id)
+        except:
+            return None
 
     def preprocess_action(self, action):
         assert isinstance(action, np.ndarray), type(action)
@@ -757,22 +766,32 @@ class MTICLEnv(gym.Env):
             assert token_representations.shape[0] % self.state_dim_per_token == 0, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
 
             token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
-            num_tokens = min(token_representations.shape[0], self.state_window_length - 1 - 1)
             is_zero_vector = (token_representations == 0).all(axis=1)
-            used_tokens = token_representations.shape[0] - is_zero_vector.sum(axis=0)
-            found_zeros = 0
+            sum_zero = is_zero_vector.sum(axis=0)
+            sum_ones = token_representations.shape[0] - sum_zero
+            used_tokens = token_representations.shape[0] - sum_zero
+            num_tokens = min(used_tokens, self.state_window_length - 1 - 1)
+
+            assert used_tokens > 0
+
+            if sum_zero > 0:
+                # LLMs use left padding, but we adapt the embeddings so padding is located at right position
+                assert (token_representations[-1] == 0).all(axis=0), f"{token_representations.shape}: {token_representations[:5]} ... {token_representations[-5:]}"
+                assert (token_representations[sum_ones:] == 0).all(axis=1).all(axis=0)
+                assert (token_representations[0] != 0).any(axis=0)
+                assert (token_representations[:sum_ones] != 0).any(axis=1).all(axis=0), f"{sum_zero}: {token_representations[:sum_ones]} ... {token_representations[sum_ones:sum_ones + 5]}"
+
+            initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
 
             for i in range(num_tokens):
-                if (token_representations[i] == 0).all(axis=0):
-                    found_zeros += 1
+                self.current_state_window[i + 1 + 1] = token_representations[i + initial_idx] # +1 for the action and +1 for self.current_max_icl_examples
 
-                    continue
+            assert (token_representations[i + initial_idx] != 0).any(axis=0)
 
-                assert len(token_representations[i]) == self.state_dim_per_token
+            if sum_zero > 0:
+                assert (token_representations[i + initial_idx + 1] == 0).all(axis=0)
 
-                self.current_state_window[i - found_zeros + 1 + 1] = token_representations[i] # +1 for the action and +1 for self.current_max_icl_examples
-
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, num_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, self.state_window_length - 1 - 1)
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -1002,6 +1021,9 @@ class MTICLEnv(gym.Env):
 
         payload = []
         url = self.embedding_pooling_model_api
+        url_idx = self.get_int_env_id()
+        url_idx = 0 if url_idx is None else url_idx % len(url)
+        url = url[url_idx]
 
         for sample in batch:
             if src_is_empty:
@@ -1222,6 +1244,9 @@ class MTICLEnv(gym.Env):
         assert isinstance(src_sentences[0], str), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
 
         url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
+        url_idx = self.get_int_env_id()
+        url_idx = 0 if url_idx is None else url_idx % len(url)
+        url = url[url_idx]
         batch_size = self.batch_size
         translations = []
         data = [{"src_sentence": utils.encode_base64(s), "src_examples": [], "trg_examples": [], "icl_idx_src_sentence": []} for s in src_sentences]
@@ -1789,26 +1814,37 @@ class MTICLEnv(gym.Env):
             self.current_state_window[self.time_step + 1] = observation
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
         elif self.state_representation == "representation_per_token_with_features":
-            num_tokens = min(observation.shape[0], self.state_window_length - 1 - 1)
             is_zero_vector = (observation == 0).all(axis=1)
+            sum_zero = is_zero_vector.sum(axis=0)
+            sum_ones = observation.shape[0] - sum_zero
             used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
+            num_tokens = min(used_tokens, self.state_window_length - 1 - 1)
+
+            assert used_tokens > 0
+
+            if sum_zero > 0:
+                # LLMs use left padding, but we adapt the embeddings so padding is located at right position
+                assert (observation[-1] == 0).all(axis=0)
+                assert (observation[sum_ones:] == 0).all(axis=1).all(axis=0)
+                assert (observation[0] != 0).any(axis=0)
+                assert (observation[:sum_ones] != 0).any(axis=1).all(axis=0)
 
             # Clean (do not remove the first position, which is reserved for the source sentence representation; do not remove the second position, which is reserved for the information regardin the max. number of ICL examples)
             for idx in range(2, self.state_window_length):
                 self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
-            found_zeros = 0
+            initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
 
             for idx in range(num_tokens):
-                if (observation[idx] == 0).all(axis=0):
-                    found_zeros += 1
+                self.current_state_window[idx + 1 + 1] = observation[idx + initial_idx]
 
-                    continue
+            assert (observation[idx + initial_idx] != 0).any(axis=0)
 
-                self.current_state_window[idx - found_zeros + 1 + 1] = observation[idx]
+            if sum_zero > 0:
+                assert (observation[idx + initial_idx + 1] == 0).all(axis=0)
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, num_tokens)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, self.state_window_length - 1 - 1)
         else:
             self.current_state_window[self.time_step] = observation
 
