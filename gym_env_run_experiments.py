@@ -360,7 +360,8 @@ if __name__ == "__main__":
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    eval_freq = 500 # steps
+    #eval_freq = 500 # steps
+    eval_freq = 1000 # steps
     #eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
@@ -406,10 +407,12 @@ if __name__ == "__main__":
     #actor_learning_rate = 1e-4
     #critic_learning_rate = 5e-4
     #actor_learning_rate = 5e-4
-    critic_learning_rate = 1e-3
-    actor_learning_rate = 1e-3
+    #critic_learning_rate = 1e-3
+    #actor_learning_rate = 1e-3
+    critic_learning_rate = 1e-4
+    actor_learning_rate = 1e-5
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
-    max_steps_training = 30000 # steps while training
+    max_steps_training = 10000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     #init_training_steps = 5000
     init_training_steps = 1000
@@ -489,7 +492,7 @@ if __name__ == "__main__":
     use_transformer = True
     dropout_p = 0.1
     #warmup_steps = 200
-    warmup_steps = 2000
+    warmup_steps = 1000
     #warmup_steps = 10 # TODO remove
     exploration_rate_steps_percentage = 0.5
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
