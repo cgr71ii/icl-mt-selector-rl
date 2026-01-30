@@ -211,7 +211,7 @@ if __name__ == "__main__":
             "callback_retrieve_knn_training": None,
             "k": k,
             #"add_all_knn_to_batch": True, # Faster
-            "add_all_knn_to_batch": False,
+            "add_all_knn_to_batch": 1,
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,

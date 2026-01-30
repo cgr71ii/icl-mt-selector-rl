@@ -266,14 +266,19 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = max(1, parsed_kwargs.pop("num_envs", 2))
+    num_envs = max(1, parsed_kwargs.pop("num_envs", 6))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     #max_icl_examples = 1 # TODO remove
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
-    pre_k = parsed_kwargs.pop("k", "0.05")
-    pre_k_is_float = '.' in pre_k
+    wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
+    pre_k = parsed_kwargs.pop("k", "0.15")
+
+    if wolpertinger_disable_actor and pre_k != "1.0":
+        logger.warning("wolpertinger_disable_actor is set to True, and k should be set to 1.0 (instead of %s)", pre_k)
+
+    logger.debug("wolpertinger_disable_actor: %s", wolpertinger_disable_actor)
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
@@ -317,7 +322,7 @@ if __name__ == "__main__":
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
-    parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 2
+    parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 3
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
@@ -331,6 +336,7 @@ if __name__ == "__main__":
     #assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
+    pre_k_is_float = '.' in pre_k
     k_training = max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k))
     k_dev = max(1, int(float(pre_k) * len(data_icl_examples_dev)) if pre_k_is_float else int(pre_k))
     k_test = max(1, int(float(pre_k) * len(data_icl_examples_test)) if pre_k_is_float else int(pre_k))
@@ -361,7 +367,8 @@ if __name__ == "__main__":
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
     #eval_freq = 500 # steps
-    eval_freq = 1000 # steps
+    #eval_freq = 1000 # steps
+    eval_freq = 2000 # steps
     #eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
@@ -380,10 +387,11 @@ if __name__ == "__main__":
     if patience < 0:
         logger.info("Early stopping disabled (patience < 0)")
     else:
-        logger.info("Early stopping enabled (patience: %d evals with no improvement every %d steps)", patience, eval_freq)
+        logger.info("Early stopping enabled (patience: %d evals with no improvement)", patience)
 
     logger.info("Save path: %s", save_path)
-    logger.info("Evaluation frequency (steps): %d", eval_freq)
+
+    eval_freq = max(1, eval_freq // num_envs)
 
     # Environment
     env_class = MTICLEnv
@@ -393,11 +401,13 @@ if __name__ == "__main__":
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
-    batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 192)))
+    batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 256)))
     #batch_size = 16 # TODO remove
     net_arch = {
-        "pi": [256, 256],
-        "qf": [512, 256]
+        #"pi": [256, 256],
+        "pi": [512, 512],
+        #"qf": [512, 256]
+        "qf": [512, 512]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
@@ -409,20 +419,29 @@ if __name__ == "__main__":
     #actor_learning_rate = 5e-4
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-3
-    critic_learning_rate = 1e-4
-    actor_learning_rate = 1e-5
+    #critic_learning_rate = 1e-4
+    #actor_learning_rate = 1e-5
+    critic_learning_rate = 5e-4
+    actor_learning_rate = 1e-4
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
-    max_steps_training = 10000 # steps while training
+#    max_steps_training = 10000 # steps while training
+    max_steps_training = 20000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    #init_training_steps = 5000
-    init_training_steps = 1000
+    init_training_steps = 5000
+#    init_training_steps = 1000
+#    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
     #init_training_steps = 5 # TODO remove
     #init_training_steps = 200 # TODO remove
     max_steps = max_steps_training + init_training_steps
+    actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
+    add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
 
+    logger.info("Evaluation frequency (steps, adjusted by number of parallel environments): %d // %d = %d (total times evaluation: %d)", eval_freq, num_envs, max(1, eval_freq // num_envs), ((max_steps - init_training_steps) / num_envs) // max(1, eval_freq / num_envs))
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
     logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
+    logger.info("actor_mlp_l2_norm: %s", actor_mlp_l2_norm)
+    logger.info("Actual batch_size for running the critic with the observations and the kNN elements: %d * min(%d, k) = %d", batch_size, add_all_knn_to_batch, batch_size * add_all_knn_to_batch)
 
     if num_envs > 1:
         logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment (%d // %d = %d init. training steps) instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)",
@@ -447,7 +466,12 @@ if __name__ == "__main__":
     retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
-    action_noise = NormalActionNoiseWithClip(mean=np.zeros(n_actions), sigma=0.05 * np.ones(n_actions), clip_value=0.1)
+    #action_noise_sigma = 0.05
+    action_noise_sigma = 0.0215
+    action_noise_clip = 2.5 * action_noise_sigma
+    #action_noise_sigma = 0.5
+    #action_noise_clip = 1.0
+    action_noise = NormalActionNoiseWithClip(mean=np.zeros(n_actions), sigma=action_noise_sigma * np.ones(n_actions), clip_value=action_noise_clip)
     #action_noise = None # TODO remove
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
@@ -458,10 +482,10 @@ if __name__ == "__main__":
     model_class = TD3
     td3_args = {
         "policy_delay": 2,
-        "target_policy_noise": 1e-3, # small values for better generalization and robustness
-        "target_noise_clip": 2e-3, # small values for better generalization and robustness
-        #"target_policy_noise": 0.0, # TODO remove
-        #"target_noise_clip": 0.0, # TODO remove
+        #"target_policy_noise": 1e-3, # small values for better generalization and robustness
+        #"target_noise_clip": 2e-3, # small values for better generalization and robustness
+        "target_policy_noise": 0.0, # TODO remove
+        "target_noise_clip": 0.0, # TODO remove
     } if model_class is TD3 else {}
     #actor_transformer_args_and_kwargs = {
     #    "d_model": 512,
@@ -498,6 +522,19 @@ if __name__ == "__main__":
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
     exploration_rate_initial = 1.0
     exploration_rate_last = 0.01
+    #exploration_rate = LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration")
+    exploration_rate = 0.1
+    #wolpertinger_target_policy_actor_noise = 0.1
+    #wolpertinger_target_policy_actor_noise = 0.02
+    wolpertinger_target_policy_actor_noise = 0.0212
+    wolpertinger_target_actor_noise_clip = 2.5 * wolpertinger_target_policy_actor_noise
+    share_features_extractor = False
+    #share_features_extractor = True
+
+    if wolpertinger_disable_actor and share_features_extractor:
+        share_features_extractor = False
+
+        logger.info("Disabling share_features_extractor because wolpertinger_disable_actor is set to True")
 
     logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
 
@@ -511,7 +548,7 @@ if __name__ == "__main__":
 
     policy_actor_kwargs = {
         #"squash_output": True,
-        "squash_output": False, # actor l2-norm
+        "squash_output": not actor_mlp_l2_norm, # actor l2-norm
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": actor_lr_schedule,
         "actor_layer_norm_input": True,
@@ -521,7 +558,7 @@ if __name__ == "__main__":
         #"actor_dropout_p": 0.1,
         #"actor_transformer": use_transformer,
         #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
-        "actor_mlp_l2_norm": True,
+        "actor_mlp_l2_norm": actor_mlp_l2_norm,
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
@@ -545,10 +582,13 @@ if __name__ == "__main__":
         # the feature extractor only processes the state (not the action for the critic)
         features_extractor_class = TransformerExtractor
         transformer_common_kwargs = {
-            "d_model": 512,
+            #"d_model": 512,
+            "d_model": 128,
             "nhead": 4,
-            "dim_feedforward": 2048,
-            "nlayers": 3,
+            #"dim_feedforward": 2048,
+            "dim_feedforward": 512,
+            #"nlayers": 3,
+            "nlayers": 2,
             "projection_in": state_dim_per_token,
             #"projection_out": action_dim,
             #"projection_out": 256,
@@ -599,15 +639,16 @@ if __name__ == "__main__":
             "callback_retrieve_knn_training": retrieve_embeddings_training_training,
             "k": k_training,
             #"add_all_knn_to_batch": True, # Faster
-            "add_all_knn_to_batch": False,
+            "add_all_knn_to_batch": add_all_knn_to_batch,
             "apply_rws_inference": apply_rws_inference,
-            #"exploration_rate": 0.1,
-            "exploration_rate": LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration"),
+            "exploration_rate": exploration_rate,
+            "share_features_extractor": share_features_extractor,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
+            "wolpertinger_disable_actor": wolpertinger_disable_actor,
         },
         gamma=gamma,
         device=device,
@@ -619,10 +660,8 @@ if __name__ == "__main__":
         max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_add_noise_after_knn=True, # TD3 noise -> it should improve generalization
-        #wolpertinger_target_policy_actor_noise=0.1, # noise before kNN for the target policy -> it should improve exploration of different actions
-        #wolpertinger_target_actor_noise_clip=0.25,
-        wolpertinger_target_policy_actor_noise=0.02,
-        wolpertinger_target_actor_noise_clip=0.05,
+        wolpertinger_target_policy_actor_noise=wolpertinger_target_policy_actor_noise, # noise before kNN for the target policy -> it should improve exploration of different actions
+        wolpertinger_target_actor_noise_clip=wolpertinger_target_actor_noise_clip,
         #wolpertinger_target_policy_actor_noise=0.0, # TODO remove
         #wolpertinger_target_actor_noise_clip=0.0, # TODO remove
         n_steps=max_icl_examples, # Monte-carlo TD3/DDPG instead of 1-step TD. Better for handling differences in the length of episodes for the early-stopping action (for 1-step TD, the episodes of length 1 due to early stopping are selected most times)
@@ -678,7 +717,7 @@ if __name__ == "__main__":
         model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_last-step_vecnormalize.pkl"))
 
     # Evaluate
-    best_model_path = os.path.join(save_path, "best_model.zip" if enable_eval else last_model_path)
+    best_model_path = os.path.join(save_path, last_model_path) # do not evaluate best_model as the result is already in the log
 
     assert utils.file_exists(best_model_path), f"Best model not found: {best_model_path}"
 
@@ -696,13 +735,14 @@ if __name__ == "__main__":
             "callback_retrieve_knn_training": None,
             "k": k_dev,
             #"add_all_knn_to_batch": True, # Faster
-            "add_all_knn_to_batch": False,
+            "add_all_knn_to_batch": add_all_knn_to_batch,
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
+            "wolpertinger_disable_actor": wolpertinger_disable_actor,
         },
     )
 
@@ -733,13 +773,14 @@ if __name__ == "__main__":
             "callback_retrieve_knn_training": None,
             "k": k_test,
             #"add_all_knn_to_batch": True, # Faster
-            "add_all_knn_to_batch": False,
+            "add_all_knn_to_batch": add_all_knn_to_batch,
             "apply_rws_inference": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
+            "wolpertinger_disable_actor": wolpertinger_disable_actor,
         },
     )
 

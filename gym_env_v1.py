@@ -179,7 +179,7 @@ class MTICLEnv(gym.Env):
         self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
         self.action_representation = utils.dict_or_default(kwargs, "action_representation", "llm")
         self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by td3.py
-        self.select_max_icl_examples_randomly = utils.dict_or_default(kwargs, "select_max_icl_examples_randomly", True)
+        self.select_max_icl_examples_randomly = utils.dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
         self.current_max_icl_examples = self.max_icl_examples
 
         if self.select_max_icl_examples_randomly:
@@ -205,10 +205,12 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d != self.max_icl_examples + 2 = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples + 2)
 
             self.state_window_length = self.max_icl_examples + 2
-        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512 + 2:
-            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512 + 1)
+        elif self.state_representation == "representation_per_token_with_features" and self.state_window_length < 512 + 3:
+            #self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, 512 + 1)
+            #self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d. Value too low: modifying value to %d", self.state_window_length, 512 + 1)
+            self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d. Value too low", self.state_window_length)
 
-            self.state_window_length = 512 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples
+            #self.state_window_length = 512 + 1 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples and +1 for the current step
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -228,6 +230,7 @@ class MTICLEnv(gym.Env):
 
         self.translate_model_api = self.translate_model_api.split('|')
         self.embedding_pooling_model_api = self.embedding_pooling_model_api.split('|')
+        self.embedding_external_system = self.embedding_external_system.split('|')
 
         self.logger_wrapper(gym.logger.debug, "translate_model_api (pool size: %d): %s", len(self.translate_model_api), self.translate_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
@@ -756,6 +759,7 @@ class MTICLEnv(gym.Env):
 
         if self.state_representation == "representation_per_token_with_features":
             self.current_state_window[1] = np.ones(self.state_dim_per_token) * self.current_max_icl_examples / 10 # state representing the number of maximum examples that will be selected. 10 as constant so the value is less than 1 (as long as self.max_icl_examples is less than 10)
+            self.current_state_window[2] = np.ones(self.state_dim_per_token) * (self.time_step + 1) / 10 # state representing the current step. 10 as constant so the value is less than 1 (as long as the current step is less than 10)
 
             # Fill the rest of the state window with the token representations of the source sentence
 
@@ -770,7 +774,7 @@ class MTICLEnv(gym.Env):
             sum_zero = is_zero_vector.sum(axis=0)
             sum_ones = token_representations.shape[0] - sum_zero
             used_tokens = token_representations.shape[0] - sum_zero
-            num_tokens = min(used_tokens, self.state_window_length - 1 - 1)
+            num_tokens = min(used_tokens, self.state_window_length - 1 - 1 - 1)
 
             assert used_tokens > 0
 
@@ -784,14 +788,17 @@ class MTICLEnv(gym.Env):
             initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
 
             for i in range(num_tokens):
-                self.current_state_window[i + 1 + 1] = token_representations[i + initial_idx] # +1 for the action and +1 for self.current_max_icl_examples
+                self.current_state_window[i + 1 + 1 + 1] = token_representations[i + initial_idx] # +1 for the action and +1 for self.current_max_icl_examples and +1 for the current step
 
             assert (token_representations[i + initial_idx] != 0).any(axis=0)
 
             if sum_zero > 0:
                 assert (token_representations[i + initial_idx + 1] == 0).all(axis=0)
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, self.state_window_length - 1 - 1)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", token_representations.shape, used_tokens, self.state_window_length - 1 - 1 - 1)
+            self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
+                                self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
+                                self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -971,7 +978,12 @@ class MTICLEnv(gym.Env):
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
                 reward = avg_eval_values
             elif self.eval_strategy == "chrf2":
-                score = CHRF().corpus_score(translation, reference)
+                assert len(translation) == 1, len(translation)
+                assert len(reference) == 1, len(reference)
+                assert isinstance(translation[0], str), type(translation[0])
+                assert isinstance(reference[0], str), type(reference[0])
+
+                score = CHRF().sentence_score(translation[0], reference) # expected format: (hypothesis, [reference]) (string, list of strings)
                 reward = score.score / 100.0
             else:
                 raise Exception(f"Unknown eval_strategy: {self.eval_strategy}")
@@ -1082,6 +1094,9 @@ class MTICLEnv(gym.Env):
 
         payload = []
         url = self.embedding_external_system
+        url_idx = self.get_int_env_id()
+        url_idx = 0 if url_idx is None else url_idx % len(url)
+        url = url[url_idx]
 
         for sample in batch:
             payload.append(('lang', lang))
@@ -1115,7 +1130,11 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "Server for external actions closed: %s", payload)
 
-        response = utils.requests_post(f"{self.embedding_external_system}_close", data=payload)
+        url = [f"{u}_close" for u in self.embedding_external_system]
+        url_idx = self.get_int_env_id()
+        url_idx = 0 if url_idx is None else url_idx % len(url)
+        url = url[url_idx]
+        response = utils.requests_post(url, data=payload)
 
         assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
         assert len(response.text) > 0, f"Response text is empty"
@@ -1818,7 +1837,7 @@ class MTICLEnv(gym.Env):
             sum_zero = is_zero_vector.sum(axis=0)
             sum_ones = observation.shape[0] - sum_zero
             used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
-            num_tokens = min(used_tokens, self.state_window_length - 1 - 1)
+            num_tokens = min(used_tokens, self.state_window_length - 1 - 1 - 1)
 
             assert used_tokens > 0
 
@@ -1829,22 +1848,27 @@ class MTICLEnv(gym.Env):
                 assert (observation[0] != 0).any(axis=0)
                 assert (observation[:sum_ones] != 0).any(axis=1).all(axis=0)
 
+            self.current_state_window[2] = np.ones(self.state_dim_per_token) * (self.time_step + 1) / 10 # state representing the current step. 10 as constant so the value is less than 1 (as long as the current step is less than 10)
+
             # Clean (do not remove the first position, which is reserved for the source sentence representation; do not remove the second position, which is reserved for the information regardin the max. number of ICL examples)
-            for idx in range(2, self.state_window_length):
+            for idx in range(3, self.state_window_length):
                 self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
             initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
 
             for idx in range(num_tokens):
-                self.current_state_window[idx + 1 + 1] = observation[idx + initial_idx]
+                self.current_state_window[idx + 1 + 1 + 1] = observation[idx + initial_idx]
 
             assert (observation[idx + initial_idx] != 0).any(axis=0)
 
             if sum_zero > 0:
                 assert (observation[idx + initial_idx + 1] == 0).all(axis=0)
 
-            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, self.state_window_length - 1 - 1)
+            self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, self.state_window_length - 1 - 1 - 1)
+            self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
+                                self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
+                                self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
         else:
             self.current_state_window[self.time_step] = observation
 
