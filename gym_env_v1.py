@@ -325,6 +325,7 @@ class MTICLEnv(gym.Env):
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
+        self.best_reward_seen = {}
 
         if self.select_max_icl_examples_randomly and self.is_eval_env:
             self.select_max_icl_examples_randomly = False
@@ -403,7 +404,7 @@ class MTICLEnv(gym.Env):
         translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
         translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
         translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
-        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=True)
+        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False)
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
@@ -467,8 +468,8 @@ class MTICLEnv(gym.Env):
 
         #self.rewards.append(reward)
         self.logger_wrapper(gym.logger.info,
-                            "Action in time step #%d (reward: %s; distance: %s; max_icl_examples: %s): %s",
-                            self.time_step, reward, action_url_distance, self.current_max_icl_examples, action_url)
+                            "Action in time step #%d (reward: %s; distance: %s; max_icl_examples: %s; translation_candidate: %s): %s",
+                            self.time_step, reward, action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
@@ -493,9 +494,11 @@ class MTICLEnv(gym.Env):
             reward_steps = len(self.translation_candidates_reward_mean_episode)
             reward_mean = statistics.mean(self.translation_candidates_reward_mean_episode) if reward_steps > 0 else -100.0
             reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
+            reward_mean_all_episodes = sum(list(self.best_reward_seen.values())) / len(self.best_reward_seen) if len(self.best_reward_seen) > 0 else -100.0
 
             self.logger_wrapper(gym.logger.info, "Result episode:\n    src: %s\n    ref: %s\n     mt: %s", src_sentence, reference, translation)
             self.logger_wrapper(gym.logger.info, "All episodes statistics: {'sum': %s, 'mean': %s, 'stdev': %s, 'last_episode_reward': %s, 'last_episode_steps': %s, 'max_icl_examples': %s}", reward_sum, reward_mean, reward_stdev, reward, self.time_step, self.current_max_icl_examples)
+            self.logger_wrapper(gym.logger.info, "Best mean reward so far across all episodes (%d elements seen): %s", len(self.best_reward_seen), reward_mean_all_episodes)
 
         sys.stdout.flush()
         sys.stderr.flush()
@@ -771,8 +774,7 @@ class MTICLEnv(gym.Env):
 
             token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
             is_zero_vector = (token_representations == 0).all(axis=1)
-            sum_zero = is_zero_vector.sum(axis=0)
-            sum_ones = token_representations.shape[0] - sum_zero
+            sum_zero = is_zero_vector.sum(axis=0).item()
             used_tokens = token_representations.shape[0] - sum_zero
             num_tokens = min(used_tokens, self.state_window_length - 1 - 1 - 1)
 
@@ -781,9 +783,9 @@ class MTICLEnv(gym.Env):
             if sum_zero > 0:
                 # LLMs use left padding, but we adapt the embeddings so padding is located at right position
                 assert (token_representations[-1] == 0).all(axis=0), f"{token_representations.shape}: {token_representations[:5]} ... {token_representations[-5:]}"
-                assert (token_representations[sum_ones:] == 0).all(axis=1).all(axis=0)
+                assert (token_representations[used_tokens:] == 0).all(axis=1).all(axis=0)
                 assert (token_representations[0] != 0).any(axis=0)
-                assert (token_representations[:sum_ones] != 0).any(axis=1).all(axis=0), f"{sum_zero}: {token_representations[:sum_ones]} ... {token_representations[sum_ones:sum_ones + 5]}"
+                assert (token_representations[:used_tokens] != 0).any(axis=1).all(axis=0), f"{sum_zero}: {token_representations[:used_tokens]} ... {token_representations[used_tokens:used_tokens + 5]}"
 
             initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
 
@@ -973,10 +975,12 @@ class MTICLEnv(gym.Env):
 
         if translation is None:
             reward = 0.0
+            normalized_reward = 0.0
         else:
             if self.eval_strategy == "api-eval":
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
-                reward = avg_eval_values
+                reward = avg_eval_values * 100.0
+                normalized_reward = avg_eval_values
             elif self.eval_strategy == "chrf2":
                 assert len(translation) == 1, len(translation)
                 assert len(reference) == 1, len(reference)
@@ -984,13 +988,14 @@ class MTICLEnv(gym.Env):
                 assert isinstance(reference[0], str), type(reference[0])
 
                 score = CHRF().sentence_score(translation[0], reference) # expected format: (hypothesis, [reference]) (string, list of strings)
-                reward = score.score / 100.0
+                reward = score.score
+                normalized_reward = reward / 100.0
             else:
                 raise Exception(f"Unknown eval_strategy: {self.eval_strategy}")
 
-            assert 0.0 <= reward <= 1.0, f"Invalid reward value: {reward}"
+            assert 0.0 <= normalized_reward <= 1.0, f"Invalid reward value: {reward}"
 
-        return reward
+        return reward, normalized_reward
 
     def api_eval(self, src, mt, ref):
         assert isinstance(src, list), "Source should be a list"
@@ -1834,9 +1839,8 @@ class MTICLEnv(gym.Env):
             self.current_state_window[1] = model_single_representation.copy() # the first position is for the src sentence representation
         elif self.state_representation == "representation_per_token_with_features":
             is_zero_vector = (observation == 0).all(axis=1)
-            sum_zero = is_zero_vector.sum(axis=0)
-            sum_ones = observation.shape[0] - sum_zero
-            used_tokens = observation.shape[0] - is_zero_vector.sum(axis=0)
+            sum_zero = is_zero_vector.sum(axis=0).item()
+            used_tokens = observation.shape[0] - sum_zero
             num_tokens = min(used_tokens, self.state_window_length - 1 - 1 - 1)
 
             assert used_tokens > 0
@@ -1844,9 +1848,9 @@ class MTICLEnv(gym.Env):
             if sum_zero > 0:
                 # LLMs use left padding, but we adapt the embeddings so padding is located at right position
                 assert (observation[-1] == 0).all(axis=0)
-                assert (observation[sum_ones:] == 0).all(axis=1).all(axis=0)
+                assert (observation[used_tokens:] == 0).all(axis=1).all(axis=0)
                 assert (observation[0] != 0).any(axis=0)
-                assert (observation[:sum_ones] != 0).any(axis=1).all(axis=0)
+                assert (observation[:used_tokens] != 0).any(axis=1).all(axis=0)
 
             self.current_state_window[2] = np.ones(self.state_dim_per_token) * (self.time_step + 1) / 10 # state representing the current step. 10 as constant so the value is less than 1 (as long as the current step is less than 10)
 
@@ -1876,12 +1880,17 @@ class MTICLEnv(gym.Env):
             # Compute reward
             src_sentence, reference = self.data[self.translation_candidate]
             translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
-            reward = self.get_reward(src_sentence, reference, translation=translation)
+            reward, normalized_reward = self.get_reward(src_sentence, reference, translation=translation)
+
+            if self.translation_candidate not in self.best_reward_seen:
+                self.best_reward_seen[self.translation_candidate] = reward
+            else:
+                self.best_reward_seen[self.translation_candidate] = max(self.best_reward_seen[self.translation_candidate], reward)
 
             # Update translation candidate mean reward
             previous_value = self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate]
             self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate] = \
-                previous_value + self.translation_candidates_reward_mean_exponential_decay_alpha * (reward - previous_value)
+                previous_value + self.translation_candidates_reward_mean_exponential_decay_alpha * (normalized_reward - previous_value)
             self.translation_candidates_reward_mean_episode.append(reward)
 
             return terminated, truncated, reward, translation

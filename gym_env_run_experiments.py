@@ -368,7 +368,8 @@ if __name__ == "__main__":
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
     #eval_freq = 500 # steps
     #eval_freq = 1000 # steps
-    eval_freq = 2000 # steps
+    #eval_freq = 2000 # steps
+    eval_freq = 5000 # steps
     #eval_freq = 5 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
@@ -407,7 +408,8 @@ if __name__ == "__main__":
         #"pi": [256, 256],
         "pi": [512, 512],
         #"qf": [512, 256]
-        "qf": [512, 512]
+        #"qf": [512, 512]
+        "qf": [1024, 512]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
@@ -421,11 +423,13 @@ if __name__ == "__main__":
     #actor_learning_rate = 1e-3
     #critic_learning_rate = 1e-4
     #actor_learning_rate = 1e-5
-    critic_learning_rate = 5e-4
+    #critic_learning_rate = 5e-4
+    critic_learning_rate = 5e-5
     actor_learning_rate = 1e-4
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
 #    max_steps_training = 10000 # steps while training
-    max_steps_training = 20000 # steps while training
+    #max_steps_training = 20000 # steps while training
+    max_steps_training = 50000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     init_training_steps = 5000
 #    init_training_steps = 1000
@@ -464,7 +468,7 @@ if __name__ == "__main__":
 
     retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
     retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     #action_noise_sigma = 0.05
     action_noise_sigma = 0.0215
@@ -514,9 +518,11 @@ if __name__ == "__main__":
     #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
     #}
     use_transformer = True
-    dropout_p = 0.1
+    #dropout_p = 0.1 # TODO enable?
+    dropout_p = 0.0
     #warmup_steps = 200
-    warmup_steps = 1000
+    #warmup_steps = 1000
+    warmup_steps = 2000
     #warmup_steps = 10 # TODO remove
     exploration_rate_steps_percentage = 0.5
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
@@ -530,6 +536,9 @@ if __name__ == "__main__":
     wolpertinger_target_actor_noise_clip = 2.5 * wolpertinger_target_policy_actor_noise
     share_features_extractor = False
     #share_features_extractor = True
+    #gradient_steps = -1 if num_envs > 1 else 1
+    #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
+    gradient_steps = max(num_envs // 2, 1) # faster training
 
     if wolpertinger_disable_actor and share_features_extractor:
         share_features_extractor = False
@@ -537,6 +546,7 @@ if __name__ == "__main__":
         logger.info("Disabling share_features_extractor because wolpertinger_disable_actor is set to True")
 
     logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
+    logger.info("Gradient steps: %d", gradient_steps)
 
     if patience >= 0:
         actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable
@@ -592,12 +602,15 @@ if __name__ == "__main__":
             "projection_in": state_dim_per_token,
             #"projection_out": action_dim,
             #"projection_out": 256,
-            "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
-            "activation": "relu",
+            #"projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
+            "projection_out": 1024,
+            #"activation": "relu",
+            "activation": "gelu",
             "bias": True,
             "norm_first": True,
             "initial_layer_norm": True,
-            "initial_layer_norm_first": False,
+            #"initial_layer_norm_first": False,
+            "initial_layer_norm_first": True,
             "embedding_dropout": 0.0, # it can increse the variance in the training
             "dropout_p": dropout_p, # we can disable dropout setting to 0.0 if needed
             "projection_out_dropout_p": 0.0,
@@ -614,6 +627,7 @@ if __name__ == "__main__":
         }
         features_extractor_kwargs_critic = {
             "str_id": "critic",
+            "last_layer_norm": False,
             **transformer_common_kwargs
         }
 
@@ -649,10 +663,13 @@ if __name__ == "__main__":
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
+            "critic_action_layer_norm_input": True,
+            "critic_features_layer_norm_input": True,
+            "activation_fn": torch.nn.GELU,
         },
         gamma=gamma,
         device=device,
-        gradient_steps=-1 if num_envs > 1 else 1, # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
+        gradient_steps=gradient_steps,
         train_freq=(1, "step"),
         buffer_size=replay_buffer_size,
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
@@ -761,7 +778,7 @@ if __name__ == "__main__":
 
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
+    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
