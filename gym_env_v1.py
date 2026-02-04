@@ -1372,7 +1372,7 @@ class MTICLEnv(gym.Env):
         return terminated, truncated
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
-                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False):
+                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False, return_all_neighbors=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -1384,6 +1384,22 @@ class MTICLEnv(gym.Env):
         assert proto_actions.shape[-1] == self.action_dim, f"Expected proto_actions last dimension to be {self.action_dim}, got {proto_actions.shape[-1]}"
         assert isinstance(k, int), k
         assert k > 0, "k must be greater than 0"
+
+        if return_all_neighbors:
+            results = [list(self.str2representation_valid_actions_k) for _ in range(proto_actions.shape[0])]
+
+            if not get_representations_instead_of_embeddings:
+                flatten = [q for w in results for q in w] # Flatten list of lists
+                results = np.stack([self.str2representation[s] for s in flatten], axis=0)
+                results = torch.from_numpy(results)
+
+                assert len(results.shape) == 2, results.shape
+                assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1]), f"Results shape mismatch: {results.shape} vs {(proto_actions.shape[0] * k, proto_actions.shape[1])}"
+
+                results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1]))
+                results = results.to(self.device)
+
+            return results, None, None
 
         translation_candidate = None
 
@@ -1633,24 +1649,24 @@ class MTICLEnv(gym.Env):
             if len(results) > 0:
                 assert isinstance(results[0], list)
 
-            all_urls = [q for w in results for q in w] # Flatten list of lists
+            flatten = [q for w in results for q in w] # Flatten list of lists
 
-            if len(all_urls) > 0:
-                assert isinstance(all_urls[0], str), f"Expected all_urls to be a list of strings, got {type(all_urls[0])}: {all_urls[0]}"
+            if len(flatten) > 0:
+                assert isinstance(flatten[0], str), f"Expected flatten to be a list of strings, got {type(flatten[0])}: {flatten[0]}"
 
             if debug:
                 self.logger_wrapper(gym.logger.error, "faiss.I (first and last 5): %s: %s ... %s", I.shape, I[:,:5], I[:,-5:])
                 self.logger_wrapper(gym.logger.error, "faiss.D (first and last 5): %s: %s ... %s", D.shape, D[:,:5], D[:,-5:])
 
-            _all_urls_subset = [url for url in all_urls if url not in self.str2representation]
+            _all_urls_subset = [url for url in flatten if url not in self.str2representation]
 
             assert len(_all_urls_subset) == 0, f"This should not happen in this environment: {_all_urls_subset}"
 
-            results = [torch.tensor(self.str2representation[url]) for url in all_urls]
-            results = torch.stack(results, dim=0)
+            results = np.stack([self.str2representation[s] for s in flatten], axis=0)
+            results = torch.from_numpy(results)
 
             assert len(results.shape) == 2, results.shape
-            assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1])
+            assert results.shape == (proto_actions.shape[0] * k, proto_actions.shape[1]), f"Results shape mismatch: {results.shape} vs {(proto_actions.shape[0] * k, proto_actions.shape[1])}"
 
             results = results.reshape((proto_actions.shape[0], k, proto_actions.shape[1]))
 

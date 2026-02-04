@@ -274,6 +274,7 @@ if __name__ == "__main__":
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
+    update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
 
     if wolpertinger_disable_actor and pre_k != "1.0":
         logger.warning("wolpertinger_disable_actor is set to True, and k should be set to 1.0 (instead of %s)", pre_k)
@@ -337,9 +338,15 @@ if __name__ == "__main__":
 
     # Some values
     pre_k_is_float = '.' in pre_k
-    k_training = max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k))
-    k_dev = max(1, int(float(pre_k) * len(data_icl_examples_dev)) if pre_k_is_float else int(pre_k))
-    k_test = max(1, int(float(pre_k) * len(data_icl_examples_test)) if pre_k_is_float else int(pre_k))
+    k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
+    k_dev = min(max(1, int(float(pre_k) * len(data_icl_examples_dev)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_dev))
+    k_test = min(max(1, int(float(pre_k) * len(data_icl_examples_test)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_test))
+    return_all_neighbors_training = k_training == len(data_icl_examples_training)
+    return_all_neighbors_dev = k_dev == len(data_icl_examples_dev)
+    return_all_neighbors_test = k_test == len(data_icl_examples_test)
+    return_all_neighbors_training = False # TODO remove?
+    return_all_neighbors_dev = False # TODO remove?
+    return_all_neighbors_test = False # TODO remove?
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -436,7 +443,7 @@ if __name__ == "__main__":
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
     #init_training_steps = 5 # TODO remove
-    #init_training_steps = 200 # TODO remove
+    #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
     add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
@@ -466,9 +473,9 @@ if __name__ == "__main__":
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0] # Get only the result, not I or D
-    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0]
+    retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_training)[0] # Get only the result, not I or D
+    retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_training)[0] # Get only the result, not I or D
+    retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k_dev, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_dev)[0]
     n_actions = env.unwrapped.action_space.shape[-1]
     #action_noise_sigma = 0.05
     action_noise_sigma = 0.0215
@@ -519,7 +526,9 @@ if __name__ == "__main__":
     #}
     use_transformer = True
     #dropout_p = 0.1 # TODO enable?
-    dropout_p = 0.0
+    dropout_p = 0.01
+    #critic_dropout_p = 0.1
+    critic_dropout_p = 0.0
     #warmup_steps = 200
     #warmup_steps = 1000
     warmup_steps = 2000
@@ -538,7 +547,7 @@ if __name__ == "__main__":
     #share_features_extractor = True
     #gradient_steps = -1 if num_envs > 1 else 1
     #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
-    gradient_steps = max(num_envs // 2, 1) # faster training
+    gradient_steps = max(int(update_to_data_ratio * num_envs), 1) # times data is sampled from the replay buffer and then used for training
 
     if wolpertinger_disable_actor and share_features_extractor:
         share_features_extractor = False
@@ -546,7 +555,7 @@ if __name__ == "__main__":
         logger.info("Disabling share_features_extractor because wolpertinger_disable_actor is set to True")
 
     logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
-    logger.info("Gradient steps: %d", gradient_steps)
+    logger.info("Gradient steps (UTD: %s): %d", update_to_data_ratio, gradient_steps)
 
     if patience >= 0:
         actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable
@@ -576,8 +585,8 @@ if __name__ == "__main__":
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        #"critic_dropout": True,
-        #"critic_dropout_p": dropout_p,
+        "critic_dropout": True,
+        "critic_dropout_p": dropout_p, # DroQ paper
         #"critic_transformer": use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,
@@ -665,6 +674,7 @@ if __name__ == "__main__":
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
+            "critic_action_layer_dropout": critic_dropout_p,
             "activation_fn": torch.nn.GELU,
         },
         gamma=gamma,
@@ -778,7 +788,7 @@ if __name__ == "__main__":
 
     env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
 
-    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0]
+    retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_test)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
         best_model_path,
