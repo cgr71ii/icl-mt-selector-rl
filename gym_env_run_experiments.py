@@ -21,7 +21,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor, NFeaturesExtractor
 import numpy as np
 import torch
 
@@ -266,10 +266,9 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = max(1, parsed_kwargs.pop("num_envs", 6))
+    num_envs = max(1, parsed_kwargs.pop("num_envs", 3))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
-    #max_icl_examples = 1 # TODO remove
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
@@ -344,9 +343,9 @@ if __name__ == "__main__":
     return_all_neighbors_training = k_training == len(data_icl_examples_training)
     return_all_neighbors_dev = k_dev == len(data_icl_examples_dev)
     return_all_neighbors_test = k_test == len(data_icl_examples_test)
-    return_all_neighbors_training = False # TODO remove?
-    return_all_neighbors_dev = False # TODO remove?
-    return_all_neighbors_test = False # TODO remove?
+    #return_all_neighbors_training = False # TODO remove?
+    #return_all_neighbors_dev = False # TODO remove?
+    #return_all_neighbors_test = False # TODO remove?
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -377,7 +376,7 @@ if __name__ == "__main__":
     #eval_freq = 1000 # steps
     #eval_freq = 2000 # steps
     eval_freq = 5000 # steps
-    #eval_freq = 5 # TODO remove
+    #eval_freq = 50 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -416,7 +415,8 @@ if __name__ == "__main__":
         "pi": [512, 512],
         #"qf": [512, 256]
         #"qf": [512, 512]
-        "qf": [1024, 512]
+        #"qf": [1024, 512]
+        "qf": [400, 300]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
@@ -431,7 +431,8 @@ if __name__ == "__main__":
     #critic_learning_rate = 1e-4
     #actor_learning_rate = 1e-5
     #critic_learning_rate = 5e-4
-    critic_learning_rate = 5e-5
+    #critic_learning_rate = 5e-5
+    critic_learning_rate = 1e-4
     actor_learning_rate = 1e-4
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
 #    max_steps_training = 10000 # steps while training
@@ -526,7 +527,8 @@ if __name__ == "__main__":
     #}
     use_transformer = True
     #dropout_p = 0.1 # TODO enable?
-    dropout_p = 0.01
+    dropout_p = 0.0
+    dropout_droq_p = 0.01
     #critic_dropout_p = 0.1
     critic_dropout_p = 0.0
     #warmup_steps = 200
@@ -548,6 +550,9 @@ if __name__ == "__main__":
     #gradient_steps = -1 if num_envs > 1 else 1
     #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
     gradient_steps = max(int(update_to_data_ratio * num_envs), 1) # times data is sampled from the replay buffer and then used for training
+    #n_features = 0 # disabled
+    n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
+    use_transformer = False # TODO remove?
 
     if wolpertinger_disable_actor and share_features_extractor:
         share_features_extractor = False
@@ -557,13 +562,25 @@ if __name__ == "__main__":
     logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
     logger.info("Gradient steps (UTD: %s): %d", update_to_data_ratio, gradient_steps)
 
+    min_actor_learning_rate = actor_learning_rate / 10
+    min_critic_learning_rate = critic_learning_rate / 10
+
+    if not use_transformer:
+        logger.info("Transformer disabled: using MLP")
+
+        warmup_steps = 0
+        actor_learning_rate = 1e-3
+        critic_learning_rate = 1e-3
+        min_actor_learning_rate = 1e-3
+        min_critic_learning_rate = 1e-3
+
     if patience >= 0:
         actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable
         critic_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic") # callable
     else:
         total_steps = (max_steps - init_training_steps) // num_envs
-        actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, str_id="actor")
-        critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, str_id="critic")
+        actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_actor_learning_rate, str_id="actor")
+        critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
 
     policy_actor_kwargs = {
         #"squash_output": True,
@@ -586,17 +603,25 @@ if __name__ == "__main__":
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
         "critic_dropout": True,
-        "critic_dropout_p": dropout_p, # DroQ paper
+        "critic_dropout_p": dropout_droq_p, # DroQ paper
         #"critic_transformer": use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,
     }
 
     if not use_transformer:
-        features_extractor_class = FlattenExtractor
-        #features_extractor_class = NoFlattenExtractor
-        features_extractor_kwargs_actor = {}
-        features_extractor_kwargs_critic = {}
+        if n_features <= 0:
+            features_extractor_class = FlattenExtractor
+            #features_extractor_class = NoFlattenExtractor
+            features_extractor_kwargs_actor = {}
+            features_extractor_kwargs_critic = {}
+        else:
+            features_extractor_class = NFeaturesExtractor
+            features_extractor_kwargs_actor = {
+                "n": n_features,
+                "skip_n": action_dim,
+            }
+            features_extractor_kwargs_critic = dict(features_extractor_kwargs_actor)
     else:
         # the feature extractor only processes the state (not the action for the critic)
         features_extractor_class = TransformerExtractor
@@ -611,8 +636,8 @@ if __name__ == "__main__":
             "projection_in": state_dim_per_token,
             #"projection_out": action_dim,
             #"projection_out": 256,
-            #"projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
-            "projection_out": 1024,
+            "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
+            #"projection_out": 64,
             #"activation": "relu",
             "activation": "gelu",
             "bias": True,
@@ -675,6 +700,8 @@ if __name__ == "__main__":
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
             "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_linear_layer_projection": 256,
+            "critic_features_linear_layer_projection": 256,
             "activation_fn": torch.nn.GELU,
         },
         gamma=gamma,
@@ -684,7 +711,7 @@ if __name__ == "__main__":
         buffer_size=replay_buffer_size,
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
         #invert_grad=True,
         wolpertinger_add_noise_after_knn=True, # TD3 noise -> it should improve generalization
         wolpertinger_target_policy_actor_noise=wolpertinger_target_policy_actor_noise, # noise before kNN for the target policy -> it should improve exploration of different actions
