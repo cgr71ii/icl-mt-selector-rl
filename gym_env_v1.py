@@ -18,6 +18,7 @@ import numpy as np
 import requests
 import faiss
 from sacrebleu.metrics import CHRF
+import rank_bm25
 
 # https://stable-baselines3.readthedocs.io/en/master/guide/custom_env.html
 # https://gymnasium.farama.org/api/env/
@@ -43,6 +44,7 @@ class ActionBoxSampleFromList(gym.spaces.Box):
         self.error_when_sampling = error_when_sampling
         self.max_icl_examples = max_icl_examples
         self.remove_overlapping_actions = remove_overlapping_actions
+        self.bm25 = None
 
         assert max_icl_examples is not None
 
@@ -58,6 +60,10 @@ class ActionBoxSampleFromList(gym.spaces.Box):
             assert isinstance(self.sample_list_actions[0][0], str), type(self.sample_list_actions[0][0])
             assert isinstance(self.sample_list_actions[0][1], np.ndarray), type(self.sample_list_actions[0][1])
             assert all(action_emb.shape == self._shape for action_str, action_emb in self.sample_list_actions), f"{len(self.sample_list_actions[0][1].shape)}... vs {self._shape}"
+
+        if self.sample_list_actions is not None:
+            corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
+            self.bm25 = rank_bm25.BM25Okapi([icl_example[0].split() for icl_example in corpus])
 
     def sample(self, *args, **kwargs):
         assert not self.error_when_sampling, "Sampling from ActionBoxSampleFromList is disabled (error_when_sampling=True)"
@@ -76,19 +82,16 @@ class ActionBoxSampleFromList(gym.spaces.Box):
 
     def sample_bm25(self, *args, time_step=None, src_translation_candidate=None, custom_env_id="none", **kwargs):
         if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
-            from rank_bm25 import BM25Okapi
+            #from rank_bm25 import BM25Okapi
 
+            assert self.bm25 is not None
             assert time_step is not None
             assert src_translation_candidate is not None
-
-            corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
-            bm25 = BM25Okapi([icl_example[0].split() for icl_example in corpus])
-
-            assert len(corpus) >= self.max_icl_examples
+            assert len(self.sample_list_actions) >= self.max_icl_examples
             assert 0 <= time_step < self.max_icl_examples
 
             tokenized_query = src_translation_candidate.split()
-            scores = bm25.get_scores(tokenized_query).tolist()
+            scores = self.bm25.get_scores(tokenized_query).tolist()
 
             assert len(scores) == len(self.sample_list_actions), f"BM25 scores length mismatch: {len(scores)} vs {len(self.sample_list_actions)}"
 
@@ -153,6 +156,8 @@ class MTICLEnv(gym.Env):
 
         # kNN
         self.data_icl_examples = []
+        self.data_icl_examples_bm25_corpus = []
+        self.data_icl_examples_bm25_corpus_tokenized = []
         self.knn_api_retrieve = utils.dict_or_default(kwargs, "knn_api_retrieve", None)
         self.knn_api_insert = utils.dict_or_default(kwargs, "knn_api_insert", None)
         self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
@@ -319,7 +324,8 @@ class MTICLEnv(gym.Env):
         self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
         self.apply_l2_normalization_state = utils.dict_or_default(kwargs, "apply_l2_normalization_state", True)
         self.apply_l2_normalization_action = utils.dict_or_default(kwargs, "apply_l2_normalization_action", True)
-        self.eval_strategy = utils.dict_or_default(kwargs, "eval_strategy", "api-eval")
+        self.eval_strategy_training = utils.dict_or_default(kwargs, "eval_strategy_training", "chrf2")
+        self.eval_strategy_eval = utils.dict_or_default(kwargs, "eval_strategy_eval", "chrf2")
         self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
@@ -345,7 +351,10 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
-        assert self.eval_strategy in ("api-eval", "chrf2"), self.eval_strategy
+        self.multi_step_eval_strategies = ("actions-bm25",) # reward will be computed for all steps in the episode for these strategies
+
+        assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_training
+        assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_eval
         assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like", "choice_with_replacement"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
@@ -906,6 +915,8 @@ class MTICLEnv(gym.Env):
                         self.src_data_overlap_src_icl_examples += 1
 
                     self.data_icl_examples.append(entry_data)
+                    self.data_icl_examples_bm25_corpus.append(entry_data[0])
+                    self.data_icl_examples_bm25_corpus_tokenized.append(self.data_icl_examples_bm25_corpus[-1].split())
                 except Exception as e:
                     self.logger_wrapper(gym.logger.error, "Loading data: error in line #%d", idx)
 
@@ -918,6 +929,8 @@ class MTICLEnv(gym.Env):
                     break
 
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): finished! %d entries read (%d URLs loaded)", idx, len(self.data_icl_examples))
+
+        self.data_icl_examples_bm25 = rank_bm25.BM25Okapi(self.data_icl_examples_bm25_corpus_tokenized)
 
     def insert_embeddings(self, urls, embeddings, _index=None, _urls_representation=None, _urls_representation_url2idx=None, update_representation=True, check_l2_norm=True):
         assert isinstance(urls, list), f"Expected urls to be a list, got {type(urls)}: {urls}"
@@ -959,7 +972,7 @@ class MTICLEnv(gym.Env):
 
         utils.insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, self.action_dim, update_representation=update_representation, check_l2_norm=check_l2_norm)
 
-    def get_reward(self, src_sentence, reference, translation=None):
+    def get_reward(self, src_sentence, reference, translation=None, icl_examples=None):
         if isinstance(src_sentence, str):
             src_sentence = [src_sentence]
         if isinstance(reference, str):
@@ -969,19 +982,28 @@ class MTICLEnv(gym.Env):
                 translation = [translation]
 
             assert isinstance(translation, list), f"Expected translation to be a list, got {type(translation)}: {translation}"
+        if icl_examples is not None:
+            assert isinstance(icl_examples, list), type(icl_examples)
+
+            if len(icl_examples) > 0:
+                assert isinstance(icl_examples[0], list), f"Expected icl_examples to be a list of lists, got {type(icl_examples[0])}: {icl_examples[0]}"
+                assert len(icl_examples[0]) == 2, f"Expected each icl example to be a list of two elements, got {len(icl_examples[0])}: {icl_examples[0]}"
+                assert isinstance(icl_examples[0][0], str) and isinstance(icl_examples[0][1], str), f"Expected each icl example to be a list of two strings, got {type(icl_examples[0][0])} and {type(icl_examples[0][1])}: {icl_examples[0]}"
 
         assert isinstance(src_sentence, list), f"Expected src_sentence to be a list, got {type(src_sentence)}: {src_sentence}"
         assert isinstance(reference, list), f"Expected reference to be a list, got {type(reference)}: {reference}"
 
-        if translation is None:
+        eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
+
+        if translation is None and eval_strategy not in self.multi_step_eval_strategies:
             reward = 0.0
             normalized_reward = 0.0
         else:
-            if self.eval_strategy == "api-eval":
+            if eval_strategy == "api-eval":
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
                 reward = avg_eval_values * 100.0
                 normalized_reward = avg_eval_values
-            elif self.eval_strategy == "chrf2":
+            elif eval_strategy == "chrf2":
                 assert len(translation) == 1, len(translation)
                 assert len(reference) == 1, len(reference)
                 assert isinstance(translation[0], str), type(translation[0])
@@ -990,8 +1012,10 @@ class MTICLEnv(gym.Env):
                 score = CHRF().sentence_score(translation[0], reference) # expected format: (hypothesis, [reference]) (string, list of strings)
                 reward = score.score
                 normalized_reward = reward / 100.0
+            elif eval_strategy == "actions-bm25":
+                reward, normalized_reward = self.get_score_from_icl_example_bm25()
             else:
-                raise Exception(f"Unknown eval_strategy: {self.eval_strategy}")
+                raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
 
             assert 0.0 <= normalized_reward <= 1.0, f"Invalid reward value: {reward}"
 
@@ -1892,12 +1916,23 @@ class MTICLEnv(gym.Env):
         else:
             self.current_state_window[self.time_step] = observation
 
-        if terminated or truncated:
-            # Compute reward
-            src_sentence, reference = self.data[self.translation_candidate]
-            translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
-            reward, normalized_reward = self.get_reward(src_sentence, reference, translation=translation)
+        translation = None
+        src_sentence, reference = self.data[self.translation_candidate]
+        eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
 
+        if terminated or truncated:
+            # Generate translation
+            if eval_strategy == "actions-bm25":
+                translation = ["none"]
+
+                self.logger_wrapper(gym.logger.debug, "Translation not generated: eval_strategy == 'actions-bm25'")
+            else:
+                translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
+
+        # Compute reward
+        reward, normalized_reward = self.get_reward(src_sentence, reference, translation=translation, icl_examples=list(self.current_icl_examples))
+
+        if terminated or truncated:
             if self.translation_candidate not in self.best_reward_seen:
                 self.best_reward_seen[self.translation_candidate] = reward
             else:
@@ -1913,12 +1948,44 @@ class MTICLEnv(gym.Env):
 
         # Return
         terminated, truncated = self.is_done()
-        reward = 0.0
-        translation = None
 
         assert not terminated and not truncated, "Step should not terminate or truncate immediately after applying an action"
 
         return terminated, truncated, reward, translation
+
+    def get_score_from_icl_example_bm25(self, remove_overlapping_actions=True):
+        assert 0 < self.time_step <= self.current_max_icl_examples, self.time_step
+        assert isinstance(self.translation_candidate, int), type(self.translation_candidate)
+        assert isinstance(self.current_icl_examples, list), type(self.current_icl_examples)
+        assert isinstance(self.data[self.translation_candidate][0], str), type(self.data[self.translation_candidate][0])
+        assert isinstance(self.str2representation_valid_actions_k, list), type(self.str2representation_valid_actions_k)
+        assert len(self.current_icl_examples) == self.time_step
+        assert len(self.current_icl_examples[-1]) == 2, len(self.current_icl_examples[-1])
+        assert isinstance(self.current_icl_examples[-1][0], str), type(self.current_icl_examples[-1][0])
+
+        src_translation_candidate = str(self.data[self.translation_candidate][0])
+        focus_icl_example = str(self.current_icl_examples[-1][0])
+
+        if remove_overlapping_actions:
+            assert focus_icl_example != src_translation_candidate
+
+        # BM25
+        #bm25 = BM25Okapi(self.data_icl_examples_bm25_corpus_tokenized)
+
+        assert len(self.data_icl_examples_bm25_corpus) >= self.current_max_icl_examples
+        assert focus_icl_example in self.data_icl_examples_bm25_corpus
+
+        tokenized_query = src_translation_candidate.split()
+        scores = self.data_icl_examples_bm25.get_scores(tokenized_query).tolist()
+        #top_n = self.data_icl_examples_bm25.get_top_n(tokenized_query, corpus, n=len(scores)) # debug
+
+        assert len(scores) == len(self.data_icl_examples_bm25_corpus) == len(self.data_icl_examples_bm25_corpus_tokenized), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples_bm25_corpus_tokenized)}"
+
+        focus_icl_example_idx = self.data_icl_examples_bm25_corpus.index(focus_icl_example)
+        focus_icl_example_score = scores[focus_icl_example_idx]
+        focus_icl_example_score_normalized = focus_icl_example_score / max(scores) if max(scores) > 0.0 else 0.0
+
+        return focus_icl_example_score, focus_icl_example_score_normalized
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]

@@ -266,7 +266,7 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = max(1, parsed_kwargs.pop("num_envs", 3))
+    num_envs = max(1, parsed_kwargs.pop("num_envs", 8))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
@@ -315,9 +315,10 @@ if __name__ == "__main__":
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["state_representation"] = state_representation
-    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "chrf2")
+    parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "chrf2")
+    parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", True)
-    parsed_kwargs["repeat_translation_candidates_times"] = parsed_kwargs.get("repeat_translation_candidates_times", 3)
+    parsed_kwargs["repeat_translation_candidates_times"] = parsed_kwargs.get("repeat_translation_candidates_times", 1)
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
     parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
@@ -375,13 +376,14 @@ if __name__ == "__main__":
     #eval_freq = 500 # steps
     #eval_freq = 1000 # steps
     #eval_freq = 2000 # steps
-    eval_freq = 5000 # steps
+    #eval_freq = 5000 # steps
+    eval_freq = 10000 # steps
     #eval_freq = 50 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
-    max_episodes_epochs = 10000 # repeat N times (patience-driven environment, so this value might not be used at all)
+    max_episodes_epochs = 100000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     #patience = 6 # early stopping patience (number of evals with no improvement)
     #patience = 20 # TODO remove
@@ -416,7 +418,8 @@ if __name__ == "__main__":
         #"qf": [512, 256]
         #"qf": [512, 512]
         #"qf": [1024, 512]
-        "qf": [400, 300]
+        #"qf": [400, 300]
+        "qf": [512, 256, 128]
     } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
@@ -437,9 +440,11 @@ if __name__ == "__main__":
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
 #    max_steps_training = 10000 # steps while training
     #max_steps_training = 20000 # steps while training
-    max_steps_training = 50000 # steps while training
+    #max_steps_training = 50000 # steps while training
+    max_steps_training = 100000 # steps while training
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    init_training_steps = 5000
+    #init_training_steps = 5000
+    init_training_steps = 10000
 #    init_training_steps = 1000
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
@@ -665,6 +670,10 @@ if __name__ == "__main__":
             **transformer_common_kwargs
         }
 
+    #critic_action_linear_layer_projection = 256
+    #critic_features_linear_layer_projection = 256
+    critic_action_linear_layer_projection = 512
+    critic_features_linear_layer_projection = 512
     model = model_class(
         "WolpertingerPolicy",
         env,
@@ -700,8 +709,8 @@ if __name__ == "__main__":
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
             "critic_action_layer_dropout": critic_dropout_p,
-            "critic_action_linear_layer_projection": 256,
-            "critic_features_linear_layer_projection": 256,
+            "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
+            "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
             "activation_fn": torch.nn.GELU,
         },
         gamma=gamma,
@@ -776,7 +785,8 @@ if __name__ == "__main__":
     assert utils.file_exists(best_model_path), f"Best model not found: {best_model_path}"
 
     ## dev: load model
-    logger.info("Loading best model (dev): %s", best_model_path)
+    #logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", best_model_path)
+    logger.info("Loading last-step model (dev): %s", best_model_path)
 
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
@@ -797,6 +807,12 @@ if __name__ == "__main__":
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
+            "critic_action_layer_norm_input": True,
+            "critic_features_layer_norm_input": True,
+            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
+            "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
+            "activation_fn": torch.nn.GELU,
         },
     )
 
@@ -835,6 +851,12 @@ if __name__ == "__main__":
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
+            "critic_action_layer_norm_input": True,
+            "critic_features_layer_norm_input": True,
+            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
+            "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
+            "activation_fn": torch.nn.GELU,
         },
     )
 
