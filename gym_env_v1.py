@@ -355,7 +355,7 @@ class MTICLEnv(gym.Env):
 
         assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_training
         assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_eval
-        assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "UCB-like", "choice_with_replacement"), self.translation_candidate_strategy
+        assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "choice_with_replacement"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
 
@@ -519,7 +519,6 @@ class MTICLEnv(gym.Env):
         self.translation_candidate = -1 # dummy value in order to skip repetition of current ICL example the first time
         self.translation_candidates_selected_episode = np.array([0] * len(self.data)) # N_episode
         self.translation_candidates_selected_consecutive_episode = np.array([0] * len(self.data)) # N'_episode
-        self.translation_candidates_reward_mean_exponential_decay_episode = np.array([0.0] * len(self.data)) # Q_episode
 
         # Other
         self.translation_candidates_reward_mean_episode = []
@@ -564,15 +563,6 @@ class MTICLEnv(gym.Env):
                                 "Given that ICL examples source sentences overlap with the source sentences of the data set, self.get_closest_neighbors_urls will add as "
                                 "many additional EoS embeddings as overlapping sentences found, after removing the embedding of the overlapping ICL example source sentences, so "
                                 "that the model does not cheat in the translation")
-
-        # Shuffle data in order to avoid model memorization
-        if options.get("shuffle_all_data", False):
-            self.logger_wrapper(gym.logger.info, "Data shuffled")
-
-            random.shuffle(self.data)
-            random.shuffle(self.data_icl_examples)
-        else:
-            self.logger_wrapper(gym.logger.info, "Data NOT shuffled")
 
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
@@ -680,7 +670,7 @@ class MTICLEnv(gym.Env):
         ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
         representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
 
-        self.src_sentences_index.add(np.array(representations_emb).astype(np.float32)) # TODO does shuffle=True affect to the multiple environments running in parallel and doing retrieval in the dummy training environment?
+        self.src_sentences_index.add(np.array(representations_emb).astype(np.float32))
 
         time.sleep(self.initial_time_sleep)
 
@@ -1001,8 +991,7 @@ class MTICLEnv(gym.Env):
         else:
             if eval_strategy == "api-eval":
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
-                reward = avg_eval_values * 100.0
-                normalized_reward = avg_eval_values
+                reward = avg_eval_values * 100.0 # scale to 0--100
             elif eval_strategy == "chrf2":
                 assert len(translation) == 1, len(translation)
                 assert len(reference) == 1, len(reference)
@@ -1010,16 +999,13 @@ class MTICLEnv(gym.Env):
                 assert isinstance(reference[0], str), type(reference[0])
 
                 score = CHRF().sentence_score(translation[0], reference) # expected format: (hypothesis, [reference]) (string, list of strings)
-                reward = score.score
-                normalized_reward = reward / 100.0
+                reward = score.score # scale is 0--100
             elif eval_strategy == "actions-bm25":
-                reward, normalized_reward = self.get_score_from_icl_example_bm25()
+                reward = self.get_score_from_icl_example_bm25()
             else:
                 raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
 
-            assert 0.0 <= normalized_reward <= 1.0, f"Invalid reward value: {reward}"
-
-        return reward, normalized_reward
+        return reward
 
     def api_eval(self, src, mt, ref):
         assert isinstance(src, list), "Source should be a list"
@@ -1715,14 +1701,6 @@ class MTICLEnv(gym.Env):
         # Repeat current translation candidate?
         if self.repeat_translation_candidates and self.translation_candidate >= 0:
             idx = self.translation_candidate
-
-            assert 0.0 <= self.translation_candidates_reward_mean_exponential_decay_episode[idx] <= 1.0, f"Reward mean exponential decay must be in [0, 1], got {self.translation_candidates_reward_mean_exponential_decay_episode[idx]} for idx {idx}"
-
-            p = (1.0 - self.translation_candidates_reward_mean_exponential_decay_episode[idx]) / (1 + self.translation_candidates_selected_consecutive_episode[idx])
-            #p = ((1.0 - self.translation_candidates_reward_mean_exponential_decay_episode[idx]) * np.exp(-1.0 * self.translation_candidates_selected_consecutive_episode[idx])).item()
-
-            assert 0.0 <= p <= 1.0, f"Probability p must be in [0, 1], got {p} for idx {idx}: {self.translation_candidates_reward_mean_exponential_decay_episode} / {self.translation_candidates_selected_consecutive_episode}"
-
             if_stm = False
 
             if self.repeat_translation_candidates_times > 0:
@@ -1730,13 +1708,11 @@ class MTICLEnv(gym.Env):
 
                 if_stm = self.repeat_translation_candidates_times_counter > 0
                 self.repeat_translation_candidates_times_counter -= 1
-            else:
-                if_stm = random.random() < p
 
             if if_stm:
                 src_translation_candidate = self.data[self.translation_candidate][0]
 
-                self.logger_wrapper(gym.logger.info, "Translation candidate (repeating) #%d (p: %.4f): %s", idx, p, src_translation_candidate)
+                self.logger_wrapper(gym.logger.info, "Translation candidate (repeating) #%d: %s", idx, src_translation_candidate)
 
                 self.translation_candidates_selected_consecutive_episode[idx] += 1
                 repeat = True
@@ -1761,21 +1737,6 @@ class MTICLEnv(gym.Env):
                 src_translation_candidate = self.data[translation_candidate][0]
 
                 self.logger_wrapper(gym.logger.info, "Translation candidate #%d: %s", translation_candidate, src_translation_candidate)
-            elif self.translation_candidate_strategy == "UCB-like":
-                # UCB exploration modification
-                weights = -1.0 * self.translation_candidates_reward_mean_exponential_decay_episode + \
-                            self.translation_candidates_exploration_rate * np.sqrt(np.log(self.episode) / (self.translation_candidates_selected_episode + 1))
-
-                if self.episode == 1:
-                    assert np.all(weights == 0.0), f"Weights must be zero at the first episode, got {weights}"
-
-                    # utils.softmax will return uniform distribution when all values are the same, even if they are zero
-
-                prob_dist = utils.softmax(weights)
-                translation_candidate = np.random.choice(n, p=prob_dist)
-                src_translation_candidate = self.data[translation_candidate][0]
-
-                self.logger_wrapper(gym.logger.info, "Translation candidate #%d (p: %.4f): %s", translation_candidate, prob_dist[translation_candidate], src_translation_candidate)
             elif self.translation_candidate_strategy == "choice_with_replacement":
                 translation_candidate = random.choice(range(n))
                 src_translation_candidate = self.data[translation_candidate][0]
@@ -1930,7 +1891,7 @@ class MTICLEnv(gym.Env):
                 translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
         # Compute reward
-        reward, normalized_reward = self.get_reward(src_sentence, reference, translation=translation, icl_examples=list(self.current_icl_examples))
+        reward = self.get_reward(src_sentence, reference, translation=translation, icl_examples=list(self.current_icl_examples))
 
         if terminated or truncated:
             if self.translation_candidate not in self.best_reward_seen:
@@ -1938,10 +1899,6 @@ class MTICLEnv(gym.Env):
             else:
                 self.best_reward_seen[self.translation_candidate] = max(self.best_reward_seen[self.translation_candidate], reward)
 
-            # Update translation candidate mean reward
-            previous_value = self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate]
-            self.translation_candidates_reward_mean_exponential_decay_episode[self.translation_candidate] = \
-                previous_value + self.translation_candidates_reward_mean_exponential_decay_alpha * (normalized_reward - previous_value)
             self.translation_candidates_reward_mean_episode.append(reward)
 
             return terminated, truncated, reward, translation
@@ -1983,9 +1940,8 @@ class MTICLEnv(gym.Env):
 
         focus_icl_example_idx = self.data_icl_examples_bm25_corpus.index(focus_icl_example)
         focus_icl_example_score = scores[focus_icl_example_idx]
-        focus_icl_example_score_normalized = focus_icl_example_score / max(scores) if max(scores) > 0.0 else 0.0
 
-        return focus_icl_example_score, focus_icl_example_score_normalized
+        return focus_icl_example_score
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]
