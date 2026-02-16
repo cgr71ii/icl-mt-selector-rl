@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 import requests
 from requests.adapters import HTTPAdapter
+import transformers
 
 def use_cuda(force_cpu=False):
     use_cuda = torch.cuda.is_available()
@@ -302,3 +303,131 @@ def _requests(url, method, max_retries=5, backoff_factor=1.0, **kwargs):
 
 def requests_post(url, max_retries=5, backoff_factor=1.0, **kwargs):
     return _requests(url, method="post", max_retries=max_retries, backoff_factor=backoff_factor, **kwargs)
+
+def get_lr_scheduler(scheduler, optimizer, *args, **kwargs):
+    scheduler_instance = None
+    mandatory_args = ""
+
+    def check_args(num_args, str_args):
+        if len(args) != num_args:
+            raise Exception(f"LR scheduler: '{scheduler}' mandatory args: {str_args}")
+
+    if scheduler == "none":
+        pass
+    elif scheduler == "linear":
+        mandatory_args = "num_warmup_steps, num_training_steps"
+
+        check_args(2, mandatory_args)
+
+        scheduler_instance = transformers.get_linear_schedule_with_warmup(optimizer, *args, **kwargs)
+    elif scheduler == "CLR": # CyclicLR
+        mandatory_args = "base_lr, max_lr"
+
+        check_args(2, mandatory_args)
+
+        scheduler_instance = torch.optim.lr_scheduler.CyclicLR(optimizer, *args, **kwargs)
+    elif scheduler in ("inverse_sqrt", "inverse_sqrt_chichirau_et_al"):
+        mandatory_args = "num_warmup_steps"
+
+        check_args(1, mandatory_args)
+
+        if optimizer is None:
+            raise Exception(f"Optimizer not provided, so the selected LR scheduler can't be configured: {scheduler}")
+
+        scheduler_instance = transformers.get_inverse_sqrt_schedule(optimizer, *args, **kwargs)
+    else:
+        raise Exception(f"Unknown LR scheduler: {scheduler}")
+
+    return scheduler_instance, mandatory_args
+
+def get_lr_scheduler_and_optimizer_using_argparse_values(optimizer_str, scheduler_str, optimizer_args, lr_scheduler_args, optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger):
+    # Expected: optimizer_args and lr_scheduler_args have been processed through argparse using argparse_pytorch_conf
+    # learning_rate: "used when a parameter group doesn't specify them" (class Optimizer: https://pytorch.org/docs/stable/_modules/torch/optim/optimizer.html)
+
+    # Get optimizer
+    logger.debug("Optimizer args: %s", optimizer_args)
+
+    if optimizer_str == "none":
+        optimizer = None
+
+        logger.debug("Be aware that even with the optimizer disabled minor changes might be observed while training since the model is "
+                    "not in inference mode, so layers like Dropout have a random component which is enabled")
+    elif optimizer_str == "adam":
+        optimizer_kwargs = {
+            "betas": tuple(optimizer_args[0:2]),
+            "eps": optimizer_args[2],
+            "weight_decay": optimizer_args[3],
+        }
+        optimizer = torch.optim.Adam(optimizer_args_params, lr=learning_rate, **optimizer_kwargs)
+    elif optimizer_str in ("adamw", "adamw_no_wd", "adamw_amsgrad_no_wd"):
+        optimizer_kwargs = {
+            "betas": tuple(optimizer_args[0:2]),
+            "eps": optimizer_args[2],
+            "weight_decay": optimizer_args[3],
+        }
+
+        if optimizer_str == "adamw_amsgrad_no_wd":
+            optimizer_kwargs["amsgrad"] = optimizer_args[4]
+
+        optimizer = torch.optim.AdamW(optimizer_args_params, lr=learning_rate, **optimizer_kwargs)
+    elif optimizer_str == "sgd":
+        optimizer_kwargs = {
+            "momentum": optimizer_args[0],
+            "weight_decay": optimizer_args[1],
+        }
+        optimizer = torch.optim.SGD(optimizer_args_params, lr=learning_rate, **optimizer_kwargs)
+    else:
+        raise Exception(f"Unknown optimizer: {optimizer_str}")
+
+
+    # Get LR scheduler args
+    scheduler_args = []
+    scheduler_kwargs = {}
+
+    logger.debug("LR scheduler args: %s", lr_scheduler_args)
+
+    if scheduler_str == "none":
+        pass
+    elif scheduler_str == "linear":
+        if lr_scheduler_args[0][-1] == '%':
+            scheduler_args = [int((float(lr_scheduler_args[0][:-1]) / 100.0) * training_steps), training_steps]
+        else:
+            scheduler_args = [int(lr_scheduler_args[0]), training_steps]
+    elif scheduler_str == "CLR":
+        scheduler_max_lr, scheduler_step_size, scheduler_mode, scheduler_gamma, scheduler_max_lr_factor, scheduler_step_size_factor \
+            = lr_scheduler_args
+
+        if learning_rate > scheduler_max_lr:
+            new_scheduler_max_lr = learning_rate * scheduler_max_lr_factor # Based on the CLR paper (possible values are [3.0, 4.0])
+
+            logger.warning("LR scheduler: '%s': provided LR (%f) is greater than provided max. LR (%f): setting max. LR to %f",
+                        scheduler_str, learning_rate, scheduler_max_lr, new_scheduler_max_lr)
+
+            scheduler_max_lr = new_scheduler_max_lr
+        if scheduler_step_size <= 0:
+            scheduler_step_size = scheduler_step_size_factor * training_steps_per_epoch # Based on the CLR paper (possible values are [2, ..., 8])
+
+            logger.warning("LR scheduler: '%s': provided step size is 0 or negative: setting value to %d", scheduler_str, scheduler_step_size)
+
+        scheduler_args = [learning_rate, scheduler_max_lr]
+        scheduler_kwargs = {
+            "step_size_up": scheduler_step_size,
+            "step_size_down": scheduler_step_size,
+            "mode": scheduler_mode,
+            "gamma": scheduler_gamma,
+            "cycle_momentum": False, # https://github.com/pytorch/pytorch/issues/73910
+        }
+    elif scheduler_str in ("inverse_sqrt", "inverse_sqrt_chichirau_et_al"):
+        if lr_scheduler_args[0][-1] == '%':
+            scheduler_args = [int((float(lr_scheduler_args[0][:-1]) / 100.0) * training_steps)]
+        else:
+            scheduler_args = [int(lr_scheduler_args[0])]
+    else:
+        raise Exception(f"Unknown LR scheduler: {scheduler}")
+
+    scheduler, mandatory_args = get_lr_scheduler(scheduler_str, optimizer, *scheduler_args, **scheduler_kwargs)
+
+    logger.debug("LR scheduler: '%s' mandatory args: %s: %s", scheduler_str, mandatory_args, str(scheduler_args))
+    logger.debug("LR scheduler: '%s' optional args: %s", scheduler_str, str(scheduler_kwargs))
+
+    return optimizer, scheduler
