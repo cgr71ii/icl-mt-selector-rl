@@ -158,18 +158,9 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples = []
         self.data_icl_examples_bm25_corpus = []
         self.data_icl_examples_bm25_corpus_tokenized = []
-        self.knn_api_retrieve = utils.dict_or_default(kwargs, "knn_api_retrieve", None)
-        self.knn_api_insert = utils.dict_or_default(kwargs, "knn_api_insert", None)
         self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
 
-        assert self.knn_api_retrieve is None and self.knn_api_insert is None, "Many features in the kNN server have not been implemented: feature disabled"
-
-        if self.knn_api_retrieve is not None or self.knn_api_insert is not None:
-            assert self.knn_api_retrieve is not None
-            assert self.knn_api_insert is not None
-
-            self.logger_wrapper(gym.logger.info, "Embeddings retrieved from API kNN (%s) and added to a different kNN (%s)", self.knn_api_retrieve, self.knn_api_insert)
-
+        # Log args
         initial_sample_list_actions = utils.dict_or_default(kwargs, "initial_sample_list_actions", None)
 
         if "initial_sample_list_actions" in kwargs:
@@ -331,7 +322,9 @@ class MTICLEnv(gym.Env):
         self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
+        self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
+        self.observation_skip_first_n = utils.dict_or_default(kwargs, "observation_skip_first_n", 0)
 
         if self.select_max_icl_examples_randomly and self.is_eval_env:
             self.select_max_icl_examples_randomly = False
@@ -413,7 +406,7 @@ class MTICLEnv(gym.Env):
         translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
         translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
         translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
-        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False)
+        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement)
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
@@ -425,10 +418,8 @@ class MTICLEnv(gym.Env):
         action_url_idx = np.array([[action_url_idx[0,0]]])
 
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
-
-        if self.knn_api_insert is None and self.knn_api_retrieve is None:
-            assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
-            assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
+        assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
+        assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
 
         return action_url, action_url_idx, action_url_distance
 
@@ -444,6 +435,13 @@ class MTICLEnv(gym.Env):
 
         if terminated or truncated:
             self.logger_wrapper(gym.logger.error, "Episode was finished but the reward is not being calculated again...")
+
+            for idx in range(self.observation_skip_first_n):
+                if idx == 0:
+                    # action (for removing the overlapping action, if needed)
+                    self.current_state_window.append(np.zeros(self.action_dim))
+                else:
+                    self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
             observation = self.state_window_type_callback(self.current_state_window).copy()
             reward = 0.0
@@ -482,6 +480,13 @@ class MTICLEnv(gym.Env):
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
+        for idx in range(self.observation_skip_first_n):
+            if idx == 0:
+                # action (for removing the overlapping action, if needed)
+                self.current_state_window.append(np.zeros(self.action_dim))
+            else:
+                self.current_state_window.append(np.zeros(self.state_dim_per_token))
+
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
         assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
@@ -801,6 +806,13 @@ class MTICLEnv(gym.Env):
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
 
+        for idx in range(self.observation_skip_first_n):
+            if idx == 0:
+                # action (for removing the overlapping action, if needed)
+                self.current_state_window.append(np.zeros(self.action_dim))
+            else:
+                self.current_state_window.append(np.zeros(self.state_dim_per_token))
+
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
         return observation, info
@@ -928,34 +940,6 @@ class MTICLEnv(gym.Env):
         assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
 
         embeddings = utils.embeddings_index_sanity_check(embeddings, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
-
-        if self.knn_api_insert is not None:
-            assert _index is None
-            assert _urls_representation is None
-            assert _urls_representation_url2idx is None
-            assert update_representation
-
-            payload = []
-
-            for v_str, v_emb in zip(urls, embeddings):
-                v_emb_str = pickle.dumps(v_emb)
-                v_emb_str = base64.b64encode(v_emb_str).decode() # base64 tensor
-
-                payload.append(('src_sentence', v_str))
-                payload.append(('embedding', v_emb_str))
-                payload.append(('check_l2_norm', '1' if check_l2_norm else '0'))
-
-            response = utils.requests_post(self.knn_api_insert, data=payload)
-
-            assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty"
-
-            response_text = json.loads(response.text)
-
-            assert response_text["err"] == "null", f"Response error: {response_text['err']}"
-
-            return
-
         index = self.embeddings_index if _index is None else _index
         urls_representation = self.icl_example_representation if _urls_representation is None else _urls_representation
         urls_representation_url2idx = self.icl_example_representation_icl2idx if _urls_representation_url2idx is None else _urls_representation_url2idx
@@ -987,7 +971,6 @@ class MTICLEnv(gym.Env):
 
         if translation is None and eval_strategy not in self.multi_step_eval_strategies:
             reward = 0.0
-            normalized_reward = 0.0
         else:
             if eval_strategy == "api-eval":
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
@@ -1269,7 +1252,7 @@ class MTICLEnv(gym.Env):
 
         return self.get_translations(*args, only_representation=True, **kwargs)
 
-    def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True):
+    def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True, api_idx=None):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
         ## len(icl_examples) must be equal to len(src_sentences)
 
@@ -1278,7 +1261,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(src_sentences[0], str), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
 
         url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
-        url_idx = self.get_int_env_id()
+        url_idx = self.get_int_env_id() if api_idx is None else api_idx
         url_idx = 0 if url_idx is None else url_idx % len(url)
         url = url[url_idx]
         batch_size = self.batch_size
@@ -1361,7 +1344,7 @@ class MTICLEnv(gym.Env):
                 translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
                 new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
                 max_dim = min(translations.shape[-1], self.state_dim)
-                new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal
+                new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
                 translations = new_translations
 
             assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
@@ -1376,13 +1359,13 @@ class MTICLEnv(gym.Env):
         terminated = limit_examples or early_stopping_terminated
         truncated = False # we have not defined an artificial termination of the environment
 
-        if self.knn_api_insert is None and self.knn_api_retrieve is None:
-            assert len(self.icl_example_representation) == self.embeddings_index.ntotal
+        assert len(self.icl_example_representation) == self.embeddings_index.ntotal
 
         return terminated, truncated
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
-                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False, return_all_neighbors=False):
+                                   _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False, return_all_neighbors=False,
+                                   actions_without_replacement=False):
         """
             observations: states from which proto_actions were generated
         """
@@ -1395,7 +1378,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(k, int), k
         assert k > 0, "k must be greater than 0"
 
-        if return_all_neighbors:
+        if return_all_neighbors and not actions_without_replacement:
             results = [list(self.str2representation_valid_actions_k) for _ in range(proto_actions.shape[0])]
 
             if not get_representations_instead_of_embeddings:
@@ -1466,42 +1449,6 @@ class MTICLEnv(gym.Env):
                 translation_candidate.append(src_sentence)
 
                 #self.logger_wrapper(gym.logger.debug, "Translation candidate kNN #%d: %s", idx, translation_candidate[-1])
-
-        if self.knn_api_retrieve is not None:
-            _action = pickle.dumps(proto_actions)
-            _action = base64.b64encode(_action).decode() # base64 tensor
-            payload = [
-                ("embedding", _action),
-                ("get_representations_instead_of_embeddings", '1' if get_representations_instead_of_embeddings else '0'),
-                ("k", str(k)),
-                ("check_l2_norm", '1' if check_l2_norm else '0'),
-                ("knn_always_add_eos_action", '1' if self.knn_always_add_eos_action else '0'),
-            ]
-
-            if translation_candidate is not None:
-                assert len(translation_candidate) == 1, translation_candidate # I'm not sure
-
-                payload.append(("translation_candidate", translation_candidate[0]))
-
-            response = utils.requests_post(self.knn_api_retrieve, data=payload)
-
-            assert response.status_code == 200, f"Response status code is not 200: {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty"
-
-            response_text = json.loads(response.text)
-
-            assert response_text["err"] == "null", f"Response error: {response_text['err']}"
-
-            response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
-            response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
-            results = response_result["results"]
-            D = response_result["D"]
-            I = response_result["I"]
-
-            if not get_representations_instead_of_embeddings:
-                results = results.to(self.device)
-
-            return results, D, I
 
         results = []
         index = self.embeddings_index if _index is None else _index
@@ -1583,8 +1530,77 @@ class MTICLEnv(gym.Env):
             assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
             assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
 
+            if actions_without_replacement:
+                assert k == 1, k
+                assert len(results[-1]) == 1, len(results[-1])
+                assert len(D[idx1]) == 1, len(D[idx1])
+                assert len(I[idx1]) == 1, len(I[idx1])
+                assert 2 + len(self.current_icl_examples) <= index.ntotal, f"Not enough entries in the index to perform search without replacement: {index.ntotal} entries vs {2 + len(self.current_icl_examples)} required (1 for the hit and 1 for the replacement if needed, plus the number of ICL examples to remove if needed)"
+
+                dist_idxs = np.flip(d.argsort())
+                longest_dist_idx = dist_idxs[0]
+
+                assert longest_dist_idx == 0, f"Expected longest_dist_idx to be 0 since k=1, got {longest_dist_idx}"
+
+                if overlapping_hits == 1:
+                    assert len(dist_idxs) == k, f"{len(dist_idxs)} vs {k}"
+                    assert I[idx1][longest_dist_idx] == -2, I[idx1][longest_dist_idx]
+                    assert D[idx1][longest_dist_idx] == np.finfo(np.float32).max, D[idx1][longest_dist_idx]
+
+                new_search = False
+                current_result = results[-1][0].split('\t')[0]
+
+                for src_icl_example, trg_icl_example in self.current_icl_examples:
+                    if src_icl_example == current_result: # source part of the hit
+                        new_search = True
+
+                        break
+
+                if new_search or overlapping_hits == 1:
+                    self.logger_wrapper(gym.logger.info, "Removing actions that were previously selected (%s, %s)", new_search, overlapping_hits)
+
+                    D_aux, I_aux = index.search(np.expand_dims(proto_actions[idx1], axis=0), 2 + len(self.current_icl_examples))
+
+                    assert len(I_aux) == 1, len(I_aux)
+                    assert len(D_aux) == 1, len(D_aux)
+
+                    for i_aux in I_aux[0]:
+                        assert i_aux >= 0, i_aux
+
+                    src_icl_example_aux = [urls_representation[I_aux[0][_idx]].split('\t')[0] for _idx in range(len(I_aux[0]))]
+                    D_aux_min = np.finfo(np.float32).max
+                    D_aux_min_idx = None
+
+                    for _idx, src_icl_example in enumerate(src_icl_example_aux):
+                        if remove_overlapping_actions and _translation_candidate == src_icl_example:
+                            D_aux[0][_idx] = np.finfo(np.float32).max
+                        elif src_icl_example in [src for src, trg in self.current_icl_examples]: # source part of the ICL examples to remove
+                            D_aux[0][_idx] = np.finfo(np.float32).max
+                        elif D_aux[0][_idx] < D_aux_min:
+                            D_aux_min = D_aux[0][_idx]
+                            D_aux_min_idx = _idx
+
+                    assert D_aux_min_idx is not None, "Expected to find a valid replacement entry in the index for search without replacement"
+
+                    I_aux = I_aux[0][D_aux_min_idx] # take closest
+                    results_aux = urls_representation[I_aux]
+                    D_aux_repr = self.str2representation[results_aux].copy()
+                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+
+                    assert np.isclose(dist, D_aux[0][D_aux_min_idx]), f"{dist} vs {D_aux[0][D_aux_min_idx]}" # should work as long as euclidean distance is used
+                    assert I_aux >= 0, I_aux
+                    assert isinstance(results_aux, str), f"Expected results_aux to be a string, got {type(results_aux)}: {results_aux}"
+                    assert len(D_aux_repr.shape) == 1 and D_aux_repr.shape[0] == self.action_dim, f"Expected D_aux_repr shape to be ({self.action_dim},), got {D_aux_repr.shape}"
+
+                    D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+                    I[idx1][longest_dist_idx] = I_aux
+                    results[-1][longest_dist_idx] = results_aux
+                    overlapping_hits = 0
+
             if (_add_eos_action and not eos_found) or overlapping_hits == 1:
                 # Replace the value with longest distance with EoS (or duplicate if EoS is disabled)
+                self.logger_wrapper(gym.logger.info, "Adding EoS action (%s)/Removing overlapping action (%s): %s", _add_eos_action and not eos_found, overlapping_hits, src_icl_example)
+
                 dist_idxs = np.flip(d.argsort())
                 longest_dist_idx = dist_idxs[0]
 
@@ -1617,7 +1633,7 @@ class MTICLEnv(gym.Env):
                     I_aux = I_aux[0][1] # take second closest
                     results_aux = urls_representation[I_aux]
                     D_aux_repr = self.str2representation[results_aux].copy()
-                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2# we assume euclidean distance
+                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
 
                     assert np.isclose(dist, D_aux[0][1]), f"{dist} vs {D_aux[0][1]}" # should work as long as euclidean distance is used
 
@@ -1764,7 +1780,7 @@ class MTICLEnv(gym.Env):
 
             self.early_stopping = True
         else:
-            self.current_icl_examples.append(current_action.split('\t'))
+            self.current_icl_examples.insert(0, current_action.split('\t')) # the new example is added at the beginning, so the prompt left-to-right is new-to-old
 
             assert len(self.current_icl_examples[-1]) == 2, f"Expected current ICL example to have two elements (source and target), got {len(self.current_icl_examples[-1])}: {self.current_icl_examples[-1]}"
 

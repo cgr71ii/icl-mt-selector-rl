@@ -319,22 +319,18 @@ if __name__ == "__main__":
     parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", True)
     parsed_kwargs["repeat_translation_candidates_times"] = parsed_kwargs.get("repeat_translation_candidates_times", 1)
-    parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
-    parsed_kwargs["knn_api_insert"] = parsed_kwargs.get("knn_api_insert", None)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 3
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
+    parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
-
-    #assert parsed_kwargs["knn_api_retrieve"] is not None
-    #assert parsed_kwargs["knn_api_insert"] is not None
 
     # Some values
     pre_k_is_float = '.' in pre_k
@@ -357,16 +353,9 @@ if __name__ == "__main__":
     # Other kwargs
     parsed_kwargs_training = {}
     #parsed_kwargs_training["initial_time_sleep"] = num_envs * 2 # sleep to synchronize all environments
-    parsed_kwargs_training["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
-    parsed_kwargs_training["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
     parsed_kwargs_training_dummy = {}
-    parsed_kwargs_training_dummy["knn_api_retrieve"] = parsed_kwargs["knn_api_retrieve"]
-    parsed_kwargs_training_dummy["knn_api_insert"] = parsed_kwargs["knn_api_insert"]
 
     logger.info("parsed_kwargs: %s", parsed_kwargs)
-
-    del parsed_kwargs["knn_api_retrieve"]
-    del parsed_kwargs["knn_api_insert"]
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
@@ -469,15 +458,15 @@ if __name__ == "__main__":
     #env = env_class(src_lang, trg_lang, file_data_training, file_data_icl_examples_training, gym_logger_level=gym.logger.DEBUG, **parsed_kwargs)
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
-    env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy})) # WARN: each vectorized environments receives a copy of this environment
+    env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy}))
 
-    env_training_dummy._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_training_dummy.get_closest_neighbors_urls() is available
+    env_training_dummy._init_load_data_and_populate_knn_pool(options={}) # env_training_dummy.get_closest_neighbors_urls() is available
 
     parsed_kwargs_training["initial_sample_list_actions"] = [(k, env_training_dummy.str2representation[k]) for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
 
-    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False}) # env_eval_dev.get_closest_neighbors_urls() is available
+    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 
     retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_training)[0] # Get only the result, not I or D
     retrieve_embeddings_training_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=k_training, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_training)[0] # Get only the result, not I or D
@@ -538,7 +527,8 @@ if __name__ == "__main__":
     critic_dropout_p = 0.0
     #warmup_steps = 200
     #warmup_steps = 1000
-    warmup_steps = 2000
+    #warmup_steps = 2000
+    warmup_steps = 5000
     #warmup_steps = 10 # TODO remove
     exploration_rate_steps_percentage = 0.5
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
@@ -640,7 +630,7 @@ if __name__ == "__main__":
             "nlayers": 2,
             "projection_in": state_dim_per_token,
             #"projection_out": action_dim,
-            #"projection_out": 256,
+            #"projection_out": 512,
             "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
             #"projection_out": 64,
             #"activation": "relu",
@@ -829,7 +819,7 @@ if __name__ == "__main__":
 
     env_eval_test = env_eval_test_class(src_lang_test, trg_lang_test, file_data_test, file_data_icl_examples_test, gym_logger_level=gym.logger.INFO, custom_env_id="eval_test", is_eval_env=True, **parsed_kwargs)
 
-    env_eval_test._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
+    env_eval_test._init_load_data_and_populate_knn_pool(options={})
 
     retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_test)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable

@@ -244,7 +244,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
         assert pooled_embeddings.shape == (hidden_states.shape[0], *expected_shape), f"pooled_embeddings expected shape (except batch_size): {(hidden_states.shape[0], *expected_shape)}; got: {pooled_embeddings.shape}"
 
-        # Remove padding tokens with attention mask
+        # Remove padding tokens with attention mask (also flip sequence to be right-to-left, so the first non-padding tokens are the last ones from the prompt, which are more likely to be relevant, and the padding tokens are at the end, which makes it easier for removing them)
         for idx in range(hidden_states.shape[0]):
             n_non_padded_tokens = _attention_mask[idx].sum().item()
             n_padded_tokens = _attention_mask.shape[1] - n_non_padded_tokens
@@ -253,7 +253,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
             assert torch.all(_attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
 
             tmp = torch.zeros(expected_shape, device=pooled_embeddings.device)
-            tmp[:n_non_padded_tokens, :] = pooled_embeddings[idx, n_padded_tokens:, :] # shift left to remove padding
+            tmp[:n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
             pooled_embeddings[idx] = tmp
     else:
         assert len(pooled_embeddings.shape) == 2, f"pooled_embeddings expected shape: (batch_size, dim); got: {pooled_embeddings.shape}"
