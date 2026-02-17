@@ -254,6 +254,9 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
             tmp = torch.zeros(expected_shape, device=pooled_embeddings.device)
             tmp[:n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
+
+            assert torch.allclose(torch.flip(pooled_embeddings[idx], dims=(0,)), tmp), f"Flipped pooled_embeddings does not match expected for input idx {idx}: {torch.flip(pooled_embeddings[idx])} vs {tmp}"
+
             pooled_embeddings[idx] = tmp
     else:
         assert len(pooled_embeddings.shape) == 2, f"pooled_embeddings expected shape: (batch_size, dim); got: {pooled_embeddings.shape}"

@@ -1,5 +1,5 @@
 
-def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False, num_beams=4, max_new_tokens=256):
+def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/Llama-2-7b-chat-hf", use_all_gpus=False, num_beams=4, max_new_tokens=256, lazy_load=True):
     import os
     import sys
     import logging
@@ -35,6 +35,9 @@ def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/L
         "--max-new-tokens", str(max_new_tokens),
         "--debug",
     ])
+
+    if not lazy_load:
+        sys.argv.append("--do-not-lazy-load")
 
     flask_server.cli()
 

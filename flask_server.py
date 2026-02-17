@@ -1134,6 +1134,9 @@ def main(args):
     logger.info("Examples might not work if you are not using Flask (e.g., you are using gunicorn) and you may be necesasry to adapt them to the used configuration")
     logger.info("Sentences are expected to be provided in BASE64 format")
 
+    if args.do_not_lazy_load:
+        lazy_load_llm()
+
     if run_flask_server:
         # Run flask server
         app.run(debug=args.flask_debug, port=flask_port)
@@ -1154,6 +1157,7 @@ def initialization():
     parser.add_argument('--do-not-run-flask-server', action="store_true", help="Do not run app.run")
     parser.add_argument('--num-beams', type=int, default=4, help="Number of beams for beam search")
     parser.add_argument('--store-translations', action="store_true", help="Store in memory translations")
+    parser.add_argument('--do-not-lazy-load', action="store_true", help="Do not lazy load the model")
     parser.add_argument('--debug', action="store_true", help="Debug mode")
 
     parser.add_argument('-v', '--verbose', action="store_true", help="Verbose logging mode")

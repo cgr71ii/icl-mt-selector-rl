@@ -56,6 +56,8 @@ def evaluate_policy_custom(
 
     training = model.training
     is_monitor_wrapped = False
+    env_skip = env.action_dim + env.state_dim_per_token + env.state_dim_per_token
+    env_state_dim = env.state_dim
 
     model.eval()
 
@@ -86,10 +88,20 @@ def evaluate_policy_custom(
     current_rewards = np.zeros(n_envs)
     current_lengths = np.zeros(n_envs, dtype="int")
     observations = env.reset() # TODO this returns the state of the environment, not just the representation from the LLM
-    observations = torch.from_numpy(observations).to(device) if isinstance(observations, np.ndarray) else observations.to(device)
+    observations = torch.from_numpy(observations) if isinstance(observations, np.ndarray) else observations
     episode_starts = np.ones((env.num_envs,), dtype=bool)
 
     while (episode_counts < episode_count_targets).any():
+        assert len(observations.shape) == 2, observations.shape
+        assert observations.shape[1] == 1024 + 1024 # TODO fix
+        observations[:, :env_skip] = torch.zeros_like(observations[:, :env_skip]) # TODO fix. Remove source sentence representation and additional info in 2 first tokens
+        observations[:, :env_state_dim - env_skip] = observations[:, env_skip:] # TODO fix
+        observations[:, env_skip:] = torch.zeros_like(observations[:, env_skip:]) # TODO fix
+
+        observations = observations.to(device)
+
+        #logger.debug("debug: %s: %s: %s)", observations.shape, torch.sum((observations.reshape(1, -1, 4) == 0).all(dim=2)), observations.reshape(1, -1, 4))
+
         actions = model(observations, additional_embedding_idxs=additional_embedding_idxs)
         actions = actions.cpu().detach().numpy() if isinstance(actions, torch.Tensor) else actions
         new_observations, rewards, dones, infos = env.step(actions) # TODO this returns the state of the environment, not just the representation from the LLM
@@ -127,7 +139,7 @@ def evaluate_policy_custom(
                     current_lengths[i] = 0
 
         observations = new_observations
-        observations = torch.from_numpy(observations).to(device) if isinstance(observations, np.ndarray) else observations.to(device)
+        observations = torch.from_numpy(observations) if isinstance(observations, np.ndarray) else observations
 
         if render:
             env.render()
@@ -170,7 +182,7 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
     rollout_actions = []
     rollout_rewards = []
     icl_examples = []
-    state = env_training_dummy.get_state_representation([src_sentence])[0]
+    state = env_training_dummy.get_state_representation([src_sentence], api_idx=api_idx)[0]
     idx_icl_example = 0
 
     assert isinstance(k, int)
@@ -254,7 +266,7 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
 
         rollout_rewards.append(reward) # r_t
 
-        state = env_training_dummy.get_state_representation([src_sentence], icl_examples=[icl_examples])[0]
+        state = env_training_dummy.get_state_representation([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0]
 
         rollout_states.append(state) # s_{t+1}
 
@@ -440,7 +452,7 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 7 # TODO remove
+    #max_data_entries = 4 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
@@ -458,7 +470,6 @@ def main():
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
-    parsed_kwargs["observation_skip_first_n"] = int(parsed_kwargs.get("observation_skip_first_n", 3))
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
@@ -472,8 +483,7 @@ def main():
     logger.info("k=%d", k_training)
 
     assert parsed_kwargs["enable_eos_action"] is False, "This script assumes no EoS so far"
-
-    assert parsed_kwargs["observation_skip_first_n"] == 3, "hot fix to address 'representation_per_token_with_features'" # TODO fix
+    assert state_representation == "representation_per_token_with_features", f"This script assumes state_representation: representation_per_token_with_features, but got: {state_representation}"
 
     # Other kwargs
     parsed_kwargs_training = {}
@@ -564,6 +574,9 @@ def main():
     training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
     training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
     # END generate training set
+
+    #for t in training_dataset: # TODO remove
+    #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
 
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token

@@ -324,7 +324,6 @@ class MTICLEnv(gym.Env):
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
         self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
-        self.observation_skip_first_n = utils.dict_or_default(kwargs, "observation_skip_first_n", 0)
 
         if self.select_max_icl_examples_randomly and self.is_eval_env:
             self.select_max_icl_examples_randomly = False
@@ -436,13 +435,6 @@ class MTICLEnv(gym.Env):
         if terminated or truncated:
             self.logger_wrapper(gym.logger.error, "Episode was finished but the reward is not being calculated again...")
 
-            for idx in range(self.observation_skip_first_n):
-                if idx == 0:
-                    # action (for removing the overlapping action, if needed)
-                    self.current_state_window.append(np.zeros(self.action_dim))
-                else:
-                    self.current_state_window.append(np.zeros(self.state_dim_per_token))
-
             observation = self.state_window_type_callback(self.current_state_window).copy()
             reward = 0.0
 
@@ -480,13 +472,6 @@ class MTICLEnv(gym.Env):
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
-        for idx in range(self.observation_skip_first_n):
-            if idx == 0:
-                # action (for removing the overlapping action, if needed)
-                self.current_state_window.append(np.zeros(self.action_dim))
-            else:
-                self.current_state_window.append(np.zeros(self.state_dim_per_token))
-
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
         assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
@@ -770,7 +755,7 @@ class MTICLEnv(gym.Env):
 
             # Fill the rest of the state window with the token representations of the source sentence
 
-            token_representations = self.get_state_representation([src_sentence])[0]
+            token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
             assert len(token_representations.shape) == 1, f"Expected token_representations to be a 1D numpy array, got shape {token_representations.shape}: {token_representations}"
@@ -791,10 +776,10 @@ class MTICLEnv(gym.Env):
                 assert (token_representations[0] != 0).any(axis=0)
                 assert (token_representations[:used_tokens] != 0).any(axis=1).all(axis=0), f"{sum_zero}: {token_representations[:used_tokens]} ... {token_representations[used_tokens:used_tokens + 5]}"
 
-            initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
+            initial_idx = used_tokens - num_tokens
 
             for i in range(num_tokens):
-                self.current_state_window[i + 1 + 1 + 1] = token_representations[i + initial_idx] # +1 for the action and +1 for self.current_max_icl_examples and +1 for the current step
+                self.current_state_window[i + 1 + 1 + 1] = token_representations[i] # +1 for the action and +1 for self.current_max_icl_examples and +1 for the current step
 
             assert (token_representations[i + initial_idx] != 0).any(axis=0)
 
@@ -805,13 +790,6 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
-
-        for idx in range(self.observation_skip_first_n):
-            if idx == 0:
-                # action (for removing the overlapping action, if needed)
-                self.current_state_window.append(np.zeros(self.action_dim))
-            else:
-                self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
 
@@ -1344,6 +1322,7 @@ class MTICLEnv(gym.Env):
                 translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
                 new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
                 max_dim = min(translations.shape[-1], self.state_dim)
+                max_dim = min(max_dim, (self.state_window_length - 1 - 1 - 1) * self.state_dim_per_token)
                 new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
                 translations = new_translations
 
@@ -1876,10 +1855,10 @@ class MTICLEnv(gym.Env):
                 self.current_state_window[idx] = np.zeros(self.state_dim_per_token)
 
             # Update
-            initial_idx = used_tokens - num_tokens # use the last embeddings instead of the first ones (they are more relevant, as last embeddings in the LLM have information of all the previous ones)
+            initial_idx = used_tokens - num_tokens
 
             for idx in range(num_tokens):
-                self.current_state_window[idx + 1 + 1 + 1] = observation[idx + initial_idx]
+                self.current_state_window[idx + 1 + 1 + 1] = observation[idx]
 
             assert (observation[idx + initial_idx] != 0).any(axis=0)
 
