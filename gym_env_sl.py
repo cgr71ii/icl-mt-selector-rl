@@ -3,7 +3,7 @@
 # 1.1. state: LLM representation of the source sentence and the list of selected ICL examples. Store also the strings, not just the LLM representations
 # 1.2. action: SONAR representation of the ICL example
 # 1.3. reward: the specific metric (e.g., CHRF), but also the discretization of the reward to N values so we can generate a token for each reward value
-# 1.3.1. The reward of a trajectory that has not finished (i.e., not all the ICL examples have been selected) is not 0, but the reward of the whole trajectory (i.e., return value, monte carlo return)
+# 1.3.1. The reward of a trajectory (=rollout) that has not finished (i.e., not all the ICL examples have been selected) is not 0, but the reward of the whole trajectory (i.e., return value, monte carlo return)
 # 1.4. Although we can store the trajectories, we will store the transitions (s, a, r) to train the supervised encoder-only model
 # 2. Train the supervised encoder-only model with the offline dataset for a certain number of epochs, with early stopping based on the validation set
 # 3. Evaluate the best trained model with a greedy policy (i.e., select the ICL example with the highest reward value) on the validation and test sets
@@ -54,7 +54,10 @@ def evaluate_policy_custom(
 
     logger.info("Evaluating policy for %d episodes with reward_idx: %d", n_eval_episodes, reward_idx)
 
+    training = model.training
     is_monitor_wrapped = False
+
+    model.eval()
 
     if not isinstance(env, VecEnv):
         env = DummyVecEnv([lambda: env])  # type: ignore[list-item, return-value]
@@ -131,6 +134,12 @@ def evaluate_policy_custom(
 
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
+
+    if training:
+        model.train()
+
+    logger.info("Eval finished (training: %s)", training)
+
     if reward_threshold is not None:
         assert mean_reward > reward_threshold, "Mean reward below threshold: " f"{mean_reward:.2f} < {reward_threshold:.2f}"
     if return_episode_rewards:
@@ -155,25 +164,82 @@ def make_batches(training_dataset, batch_size):
     for i in range(0, len(training_dataset), batch_size):
         yield training_dataset[i:i + batch_size]
 
-def get_random_action(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None):
+def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None, model=None, k=1, device="cpu"):
     src_sentence, reference = data_entry.split('\t')
-    trajectory_states = []
-    trajectory_actions = []
-    trajectory_rewards = []
+    rollout_states = []
+    rollout_actions = []
+    rollout_rewards = []
     icl_examples = []
     state = env_training_dummy.get_state_representation([src_sentence])[0]
     idx_icl_example = 0
 
-    trajectory_states.append(state) # s_t
+    assert isinstance(k, int)
+    assert k > 0, k
+
+    rollout_states.append(state) # s_t
 
     while idx_icl_example < max_icl_examples:
-        icl_example = random.choice(data_icl_examples_training)
+        if model is not None:
+            observation = np.array(rollout_states[-1])
+            observation = torch.from_numpy(observation).unsqueeze(0).to(device)
+            proto_action = model(observation, additional_embedding_idxs=[num_labels_reward - 1])
+            _icl_examples = env_training_dummy.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=True, debug=False)[0]
+
+            assert len(_icl_examples) == 1, len(_icl_examples)
+            assert len(_icl_examples[0]) == k, len(_icl_examples[0])
+
+            _icl_examples = _icl_examples[0]
+            remove_idx = None
+
+            for idx, icl_example in enumerate(_icl_examples):
+                src_icl_example, trg_icl_example = icl_example.split('\t')
+
+                if src_icl_example == src_sentence:
+                    assert remove_idx is None
+
+                    remove_idx = idx
+
+            if remove_idx is not None:
+                del _icl_examples[remove_idx]
+
+            if len(_icl_examples) == 0:
+                logger.debug("kNN again to look for a different NN")
+
+                assert k == 1, k
+
+                _icl_examples = env_training_dummy.get_closest_neighbors_urls(proto_action, k=k + 1, get_representations_instead_of_embeddings=True, debug=False)[0]
+                _icl_examples = _icl_examples[0]
+
+                assert len(_icl_examples) == 2, len(_icl_examples)
+
+                src_icl_example, trg_icl_example = _icl_examples[0].split('\t')
+
+                assert src_icl_example == src_sentence
+
+                del _icl_examples[0]
+
+                src_icl_example, trg_icl_example = _icl_examples[1].split('\t')
+
+                assert src_icl_example != src_sentence
+
+            # The result action will be randomly sampled
+        else:
+            # Random sampling from the training set of ICL examples
+            _icl_examples = data_icl_examples_training
+
+        assert isinstance(_icl_examples, list), type(_icl_examples)
+        assert len(_icl_examples) > 0
+        assert isinstance(_icl_examples[0], str), type(_icl_examples[0])
+
+        icl_example = random.choice(_icl_examples)
 
         assert icl_example in env_training_dummy.str2representation, icl_example
 
         src_icl_example, trg_icl_example = icl_example.split('\t')
 
         if src_icl_example == src_sentence:
+            assert model is None
+
             logger.debug("Skipping ICL example with the same source sentence as the data entry: %s", icl_example)
 
             continue
@@ -181,48 +247,128 @@ def get_random_action(data_entry, env_training_dummy, max_icl_examples, data_icl
         action = env_training_dummy.str2representation[icl_example] # a_t
 
         icl_examples.append(icl_example.split('\t'))
-        trajectory_actions.append(action)
+        rollout_actions.append(action)
 
         translation = None if idx_icl_example < max_icl_examples - 1 else env_training_dummy.get_translations([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0] # only get the translation for the last state, to save time
         reward = env_training_dummy.get_reward(src_sentence, reference, translation=translation, icl_examples=icl_examples) # TODO something might not work as intended as it assumes that environment is being used...
 
-        trajectory_rewards.append(reward) # r_t
+        rollout_rewards.append(reward) # r_t
 
         state = env_training_dummy.get_state_representation([src_sentence], icl_examples=[icl_examples])[0]
 
-        trajectory_states.append(state) # s_{t+1}
+        rollout_states.append(state) # s_{t+1}
 
         idx_icl_example += 1
 
     assert len(icl_examples) == max_icl_examples
-    assert len(trajectory_states) - 1 == len(trajectory_actions) == len(trajectory_rewards) == max_icl_examples
+    assert len(rollout_states) - 1 == len(rollout_actions) == len(rollout_rewards) == max_icl_examples
 
-    trajectory_states.pop() # remove the last state, that we do not need for training the supervised model (we only need the transitions with (s, a, r), and the last state doesn't have an action)
+    rollout_states.pop() # remove the last state, that we do not need for training the supervised model (we only need the transitions with (s, a, r), and the last state doesn't have an action)
 
-    return_value = sum(trajectory_rewards)
+    return_value = sum(rollout_rewards)
 
     # TODO we assume r_0, r_1, ..., r_{t-1} = 0, and r_T = return_value
 
-    for r in trajectory_rewards[:-1]:
+    for r in rollout_rewards[:-1]:
         assert r == 0.0
 
     assert return_value >= 0 and return_value <= 100, f"Reward out of expected range [0, 100]: {return_value}"
 
     reward_label_position = min(int((return_value / 100) * num_labels_reward), num_labels_reward - 1) # discretize the reward into num_labels_reward values; lower is worse, higher is better
 
-    logger.debug("Trajectory states: %s, actions: %s, return_value: %s, reward_label: %s", trajectory_states[-1].shape, trajectory_actions[-1].shape, return_value, reward_label_position)
-    logger.debug("Trajectory icl_examples: %s", icl_examples)
+    logger.debug("rollout states: %s, actions: %s, return_value: %s, reward_label: %s", rollout_states[-1].shape, rollout_actions[-1].shape, return_value, reward_label_position)
+    logger.debug("rollout icl_examples: %s", icl_examples)
 
     return {
         "src_sentence": src_sentence,
         "reference": reference,
-        "trajectory_states": trajectory_states,
-        "trajectory_actions": trajectory_actions,
-        "trajectory_rewards": trajectory_rewards,
+        "rollout_states": rollout_states,
+        "rollout_actions": rollout_actions,
+        "rollout_rewards": rollout_rewards,
         "icl_examples": icl_examples,
         "return_value": return_value,
         "reward_label_position": reward_label_position,
     }
+
+def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards, model=None, k=1, device="cpu"):
+    # TODO we assume reward in the range [0, 100]
+    training_dataset = []
+    seen_data = set()
+    training = model.training if model is not None else False
+
+    logger.info("Generationg random rollouts for training dataset with %d parallel jobs", n_jobs)
+
+    for rollout_idx in range(dataset_rollouts_per_data_entry):
+        result = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(generate_rollouts)(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
+
+        assert len(result) == len(data_to_be_translated_training)
+
+        for action_data, data_entry in zip(result, data_to_be_translated_training): # "The order of the outputs always matches the order the inputs have been submitted with"
+            src_sentence, reference = data_entry.split('\t')
+            _src_sentence = action_data["src_sentence"]
+            _reference = action_data["reference"]
+            rollout_states = action_data["rollout_states"]
+            rollout_actions = action_data["rollout_actions"]
+            rollout_rewards = action_data["rollout_rewards"]
+            icl_examples = action_data["icl_examples"]
+            return_value = action_data["return_value"]
+            icl_examples_str = '\t'.join(['\t'.join(icl_example) for icl_example in icl_examples])
+            seen_key = hash(f"{src_sentence}\t{reference}\t{icl_examples_str}")
+
+            assert src_sentence == _src_sentence, f"Expected src_sentence: {src_sentence}, but got: {_src_sentence}" # check order is correct
+            assert reference == _reference, f"Expected reference: {reference}, but got: {_reference}"
+
+            if seen_key in seen_data:
+                continue
+
+            seen_data.add(seen_key)
+
+            # We store the transitions (s, a, r) for supervised learning
+            for s, a, r, icl_example in zip(rollout_states, rollout_actions, rollout_rewards, icl_examples):
+                training_dataset.append({
+                    "src_sentence": src_sentence,
+                    "reference": reference,
+                    "state": s,
+                    "action": a,
+                    "reward": r,
+                    "icl_example": icl_example,
+                    "return_value": return_value,
+                    "reward_label": None, # we will assign the reward labels later, after we have generated all the trajectories and we can analyze the distribution of return values to assign the reward labels in a more informed way (e.g., using quantiles)
+                })
+
+            best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
+
+        logger.info("Iteration %d: Best rewards observed (mean for %d entries): %s", rollout_idx + 1, len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
+
+    if model is not None:
+        if training:
+            model.train()
+
+        logger.info("Model training: %s", training)
+
+    return training_dataset
+
+def update_training_dataset(training_dataset, data_to_be_translated_training, dataset_rollouts_per_data_entry, max_icl_examples, best_rewards, num_labels_reward, epoch, logger):
+    assert isinstance(epoch, int)
+    assert epoch > 0, epoch
+
+    # We remove duplicated steps, so it is not trivial to anticipate the expected length for the training set
+    #assert len(training_dataset) == len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples * epoch, f"Expected training dataset size: {len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples}, but got {len(training_dataset)}"
+
+    logger.info("Best rewards observed (mean for %d entries): %s", len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
+    logger.info("Training dataset length: %d transitions (s, a, r)", len(training_dataset))
+
+    reward_intervals = pd.qcut([d["return_value"] for d in training_dataset], num_labels_reward, duplicates='drop')
+    reward_intervals_codes = reward_intervals.codes.tolist()
+
+    logger.info("Reward label description (total: %d):\n%s", len(reward_intervals), reward_intervals.describe())
+
+    assert len(reward_intervals_codes) == len(training_dataset)
+
+    for idx in range(len(training_dataset)):
+        training_dataset[idx]["reward_label"] = reward_intervals_codes[idx]
+
+    random.shuffle(training_dataset)
 
 def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
@@ -266,6 +412,7 @@ def main():
     max_icl_examples = max(int(parsed_kwargs.get("max_icl_examples", 5)), 1)
     dataset_rollouts_per_data_entry = max(1, int(parsed_kwargs.pop("dataset_rollouts_per_data_entry", 1)))
     num_labels_reward = max(int(parsed_kwargs.get("num_labels_reward", 5)), 2) # number of discrete reward labels (e.g., 5 means we discretize the reward into 5 values, and we can represent each value with a token)
+    pre_k = parsed_kwargs.pop("k", "2")
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
@@ -318,8 +465,11 @@ def main():
     data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
+    pre_k_is_float = '.' in pre_k
+    k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
 
     logger.info("For each data entry, we generate %d training rollouts: %d entries * %d rollouts * %d ICL examples = %d total training size", dataset_rollouts_per_data_entry, len(data_to_be_translated_training), dataset_rollouts_per_data_entry, max_icl_examples, len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples)
+    logger.info("k=%d", k_training)
 
     assert parsed_kwargs["enable_eos_action"] is False, "This script assumes no EoS so far"
 
@@ -361,6 +511,7 @@ def main():
     batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
     learning_rate = 1e-5
     n_jobs = num_envs # TODO fix
+    epochs = 1000
 
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
@@ -379,109 +530,40 @@ def main():
     # Generate trainig set rollouts with a random policy and store the transitions (s, a, r) for supervised learning
     # dataset_rollouts_per_data_entry
     training_dataset = []
-
-    # TODO we assume reward in the range [0, 100]
     best_rewards = {data_entry: 0.0 for data_entry in data_to_be_translated_training} # best reward observed for each reward label, to monitor the training progress
-    seen_data = set()
 
-    logger.info("Generationg random rollouts for training dataset with %d parallel jobs", n_jobs)
+    # BEGIN generate training set
+    _training_dataset = do_generate_rollouts(
+        data_to_be_translated_training,
+        dataset_rollouts_per_data_entry,
+        env_training_dummy,
+        max_icl_examples,
+        data_icl_examples_training,
+        num_labels_reward,
+        logger,
+        n_jobs,
+        best_rewards,
+        model=None,
+        k=k_training,
+        device=device,
+    )
 
-    for rollout_idx in range(dataset_rollouts_per_data_entry):
-#        for idx, data_entry in enumerate(data_to_be_translated_training):
-#            src_sentence, reference = data_entry.split('\t')
-#            action_data = get_random_action(data_entry, api_idx=idx)
-#
-#            # In case we need the trajectories:
-#            #training_dataset.append({
-#            #    "src_sentence": src_sentence,
-#            #    "reference": reference,
-#            #    "states": trajectory_states,
-#            #    "actions": trajectory_actions,
-#            #    "rewards": trajectory_rewards,
-#            #    "icl_examples": icl_examples,
-#            #    "return_value": return_value,
-#            #    "reward_label": reward_label_position,
-#            #})
-#
-#            trajectory_states = action_data["trajectory_states"]
-#            trajectory_actions = action_data["trajectory_actions"]
-#            trajectory_rewards = action_data["trajectory_rewards"]
-#            icl_examples = action_data["icl_examples"]
-#            return_value = action_data["return_value"]
-#            reward_label_position = action_data["reward_label_position"]
-#
-#            # We store the transitions (s, a, r) for supervised learning
-#            for s, a, r, icl_example in zip(trajectory_states, trajectory_actions, trajectory_rewards, icl_examples):
-#                training_dataset.append({
-#                    "src_sentence": src_sentence,
-#                    "reference": reference,
-#                    "state": s,
-#                    "action": a,
-#                    "reward": r,
-#                    "icl_example": icl_example,
-#                    "return_value": return_value,
-#                    "reward_label": reward_label_position,
-#                })
-        result = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(get_random_action)(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx) for idx, data_entry in enumerate(data_to_be_translated_training))
+    training_dataset.extend(_training_dataset)
 
-        assert len(result) == len(data_to_be_translated_training)
+    update_training_dataset(
+        training_dataset,
+        data_to_be_translated_training,
+        dataset_rollouts_per_data_entry,
+        max_icl_examples,
+        best_rewards,
+        num_labels_reward,
+        1,
+        logger
+    )
 
-        for action_data, data_entry in zip(result, data_to_be_translated_training): # "The order of the outputs always matches the order the inputs have been submitted with"
-            src_sentence, reference = data_entry.split('\t')
-            _src_sentence = action_data["src_sentence"]
-            _reference = action_data["reference"]
-            trajectory_states = action_data["trajectory_states"]
-            trajectory_actions = action_data["trajectory_actions"]
-            trajectory_rewards = action_data["trajectory_rewards"]
-            icl_examples = action_data["icl_examples"]
-            return_value = action_data["return_value"]
-            reward_label_position = action_data["reward_label_position"]
-            icl_examples_str = '\t'.join(['\t'.join(icl_example) for icl_example in icl_examples])
-            seen_key = hash(f"{src_sentence}\t{reference}\t{icl_examples_str}")
-
-            assert src_sentence == _src_sentence, f"Expected src_sentence: {src_sentence}, but got: {_src_sentence}" # check order is correct
-            assert reference == _reference, f"Expected reference: {reference}, but got: {_reference}"
-
-            if seen_key in seen_data:
-                continue
-
-            seen_data.add(seen_key)
-
-            # We store the transitions (s, a, r) for supervised learning
-            for s, a, r, icl_example in zip(trajectory_states, trajectory_actions, trajectory_rewards, icl_examples):
-                training_dataset.append({
-                    "src_sentence": src_sentence,
-                    "reference": reference,
-                    "state": s,
-                    "action": a,
-                    "reward": r,
-                    "icl_example": icl_example,
-                    "return_value": return_value,
-                    "reward_label": None, # we will assign the reward labels later, after we have generated all the trajectories and we can analyze the distribution of return values to assign the reward labels in a more informed way (e.g., using quantiles)
-                })
-
-            best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
-
-        logger.info("Rollout %d: Best rewards observed (mean for %d entries): %s", rollout_idx + 1, len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
-
-    #assert len(training_dataset) == len(data_to_be_translated_training) * dataset_rollouts_per_data_entry
-    assert len(training_dataset) == len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples, f"Expected training dataset size: {len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples}, but got {len(training_dataset)}"
-
-    logger.info("Generated training dataset with %d transitions (s, a, r)", len(training_dataset))
-    logger.info("Best rewards observed (mean for %d entries): %s", len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
-
-    #reward_intervals = {i: f"[{i * (100 / num_labels_reward)}, {(i + 1) * (100 / num_labels_reward)}]" for i in range(num_labels_reward)} # intervals for each reward label
-    reward_intervals = pd.qcut([d["return_value"] for d in training_dataset], num_labels_reward, duplicates='drop')
-    reward_intervals_codes = reward_intervals.codes.tolist()
-
-    logger.info("Reward label description (total: %d):\n%s", len(reward_intervals), reward_intervals.describe())
-
-    assert len(reward_intervals_codes) == len(training_dataset)
-
-    for idx in range(len(training_dataset)):
-        training_dataset[idx]["reward_label"] = reward_intervals_codes[idx]
-
-    random.shuffle(training_dataset)
+    training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
+    training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
+    # END generate training set
 
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
@@ -519,9 +601,6 @@ def main():
         p.requires_grad_(True)
 
     train_until_patience = True
-    epochs = 1000
-    training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
-    training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
     model_parameters = list(filter(lambda d: d.requires_grad, [p for k, p in model.named_parameters()]))
     optimizer_args_params = [{"params": model_parameters, "lr": learning_rate}]
 
@@ -556,6 +635,42 @@ def main():
             early_stopping_metric_dev = mean_reward
 
             logger.info("Dev eval: %s +- %s", mean_reward, std_reward)
+
+            # Generate new samples for the training set using the model
+            logger.info("Generating new samples for the training set. Recomputing the label rewards")
+
+            # BEGIN generate training set
+            _training_dataset = do_generate_rollouts(
+                data_to_be_translated_training,
+                dataset_rollouts_per_data_entry,
+                env_training_dummy,
+                max_icl_examples,
+                data_icl_examples_training,
+                num_labels_reward,
+                logger,
+                n_jobs,
+                best_rewards,
+                model=model,
+                k=k_training,
+                device=device,
+            )
+
+            training_dataset.extend(_training_dataset)
+
+            update_training_dataset(
+                training_dataset,
+                data_to_be_translated_training,
+                dataset_rollouts_per_data_entry,
+                max_icl_examples,
+                best_rewards,
+                num_labels_reward,
+                epoch + 1,
+                logger
+            )
+
+            training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
+            training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
+            # END generate training set
 
         if len(epoch_loss) > 0 and sum_epoch_loss < early_stopping_best_loss:
             logger.info("Better loss result: %s -> %s", early_stopping_best_loss, sum_epoch_loss)
