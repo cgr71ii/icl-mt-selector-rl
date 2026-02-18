@@ -308,10 +308,13 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
     seen_data = set()
     training = model.training if model is not None else False
 
+    if model is not None:
+        model.eval()
+
     logger.info("Generationg random rollouts for training dataset with %d parallel jobs", n_jobs)
 
     for rollout_idx in range(dataset_rollouts_per_data_entry):
-        result = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(generate_rollouts)(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
+        result = joblib.Parallel(n_jobs=n_jobs, timeout=99999)(joblib.delayed(generate_rollouts)(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
 
         assert len(result) == len(data_to_be_translated_training)
 
@@ -452,7 +455,7 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 4 # TODO remove
+    #max_data_entries = 10 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
@@ -537,47 +540,6 @@ def main():
 
     #retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=1, get_representations_instead_of_embeddings=False, observations=observations, debug=False)[0]
 
-    # Generate trainig set rollouts with a random policy and store the transitions (s, a, r) for supervised learning
-    # dataset_rollouts_per_data_entry
-    training_dataset = []
-    best_rewards = {data_entry: 0.0 for data_entry in data_to_be_translated_training} # best reward observed for each reward label, to monitor the training progress
-
-    # BEGIN generate training set
-    _training_dataset = do_generate_rollouts(
-        data_to_be_translated_training,
-        dataset_rollouts_per_data_entry,
-        env_training_dummy,
-        max_icl_examples,
-        data_icl_examples_training,
-        num_labels_reward,
-        logger,
-        n_jobs,
-        best_rewards,
-        model=None,
-        k=k_training,
-        device=device,
-    )
-
-    training_dataset.extend(_training_dataset)
-
-    update_training_dataset(
-        training_dataset,
-        data_to_be_translated_training,
-        dataset_rollouts_per_data_entry,
-        max_icl_examples,
-        best_rewards,
-        num_labels_reward,
-        1,
-        logger
-    )
-
-    training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
-    training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
-    # END generate training set
-
-    #for t in training_dataset: # TODO remove
-    #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
-
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
     state_window_length = env_training_dummy.state_window_length
@@ -618,6 +580,49 @@ def main():
     optimizer_args_params = [{"params": model_parameters, "lr": learning_rate}]
 
     logger.info("Parameters with requires_grad=True: %d", len(model_parameters))
+
+    # Generate trainig set rollouts with a random policy and store the transitions (s, a, r) for supervised learning
+    # dataset_rollouts_per_data_entry
+    training_dataset = []
+    best_rewards = {data_entry: 0.0 for data_entry in data_to_be_translated_training} # best reward observed for each reward label, to monitor the training progress
+
+    # BEGIN generate training set
+    _training_dataset = do_generate_rollouts(
+        data_to_be_translated_training,
+        dataset_rollouts_per_data_entry,
+        env_training_dummy,
+        max_icl_examples,
+        data_icl_examples_training,
+        num_labels_reward,
+        logger,
+        n_jobs,
+        best_rewards,
+        model=None,
+        #model=model, # TODO remove. debug
+        k=k_training,
+        device=device,
+    )
+
+    training_dataset.extend(_training_dataset)
+    #training_dataset *= 10 # TODO remove. debug
+
+    update_training_dataset(
+        training_dataset,
+        data_to_be_translated_training,
+        dataset_rollouts_per_data_entry,
+        max_icl_examples,
+        best_rewards,
+        num_labels_reward,
+        1,
+        logger
+    )
+
+    training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
+    training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
+    # END generate training set
+
+    #for t in training_dataset: # TODO remove
+    #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
 
     optimizer, scheduler =\
         utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", "inverse_sqrt", [0.9, 0.999, 1e-08, 0.01], ["400"], optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger)
