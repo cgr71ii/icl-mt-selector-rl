@@ -181,12 +181,26 @@ def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False
 
     return _init
 
-def make_batches(training_dataset, batch_size):
+def make_batches(training_dataset, batch_size, sample=False, replacement=False):
     assert batch_size > 0, f"Invalid batch size: {batch_size}"
     assert isinstance(training_dataset, list), f"Expected training_dataset to be a list, but got {type(training_dataset)}"
 
-    for i in range(0, len(training_dataset), batch_size):
-        yield training_dataset[i:i + batch_size]
+    if not sample:
+        for i in range(0, len(training_dataset), batch_size):
+            yield training_dataset[i:i + batch_size]
+    else:
+        indices = list(range(len(training_dataset)))
+
+        if replacement:
+            for _ in range(0, len(training_dataset), batch_size):
+                yield random.choices(training_dataset, k=batch_size)
+        else:
+            random.shuffle(indices)
+
+            for i in range(0, len(training_dataset), batch_size):
+                batch_indices = indices[i:i + batch_size]
+
+                yield [training_dataset[i] for i in batch_indices]
 
 def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None, model=None, k=1, device="cpu"):
     src_sentence, reference = data_entry.split('\t')
@@ -482,6 +496,7 @@ def main():
     dataset_rollouts_per_data_entry = max(1, int(parsed_kwargs.pop("dataset_rollouts_per_data_entry", 1)))
     num_labels_reward = max(int(parsed_kwargs.get("num_labels_reward", 5)), 2) # number of discrete reward labels (e.g., 5 means we discretize the reward into 5 values, and we can represent each value with a token)
     pre_k = parsed_kwargs.pop("k", "2")
+    additional_parsed_kwargs_dev = {}
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
@@ -512,6 +527,8 @@ def main():
     #max_data_entries = 1 # TODO remove
     #max_data_entries = 20 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
+    max_data_entries_dev = max_data_entries
+    #max_data_entries_dev = 20 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -528,14 +545,19 @@ def main():
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
+    parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
-    data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
+    data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     pre_k_is_float = '.' in pre_k
     k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
+    knn_distance_ip = parsed_kwargs["knn_distance_ip"]
+
+    if knn_distance_ip:
+        logger.warning("Using inner product as distance for kNN: using l2-normalization in the model and cosine similarity for kNN. The MSE loss will be computed on the l2-normalized representations")
 
     logger.info("For each data entry, we generate %d training rollouts: %d entries * %d rollouts * %d ICL examples = %d total training size", dataset_rollouts_per_data_entry, len(data_to_be_translated_training), dataset_rollouts_per_data_entry, max_icl_examples, len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples)
     logger.info("k=%d", k_training)
@@ -564,8 +586,9 @@ def main():
     eval_freq_epochs = 5  # TODO remove
     #generate_new_samples_for_training_set_every_epochs = 1
     generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
-    initial_epochs_without_eval_nor_generation = 50 # TODO "- eval_freq_epochs"?
-    #initial_epochs_without_eval_nor_generation = 2000 # TODO remove
+    #initial_epochs_without_eval_nor_generation = 0
+    initial_epochs_without_eval_nor_generation = 100
+    #initial_epochs_without_eval_nor_generation = 200 # TODO remove
 
     assert eval_freq_epochs > 0
     assert generate_new_samples_for_training_set_every_epochs >= 0
@@ -601,9 +624,14 @@ def main():
 
     env_training_dummy._init_load_data_and_populate_knn_pool(options={}) # env_training_dummy.get_closest_neighbors_urls() is available
 
+    additional_parsed_kwargs_dev["max_data_entries"] = max_data_entries_dev
+    parsed_kwargs.pop("max_data_entries")
+
+    logger.info("additional_parsed_kwargs_dev: %s", additional_parsed_kwargs_dev)
+
     #parsed_kwargs_training["initial_sample_list_actions"] = [(k, env_training_dummy.str2representation[k]) for k in env_training_dummy.str2representation_valid_actions_k] # initial random action sampling
     #env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs, **parsed_kwargs_training}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
-    env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
+    env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples_dev, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs, **additional_parsed_kwargs_dev), filename=monitor_filename, override_existing=True)
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 
@@ -631,7 +659,8 @@ def main():
         "bias": True,
         #"norm_first": True, # TODO watch out: when enabled, the model seems to be stuck generating the same output regardless the input
         "norm_first": False,
-        "l2_norm": False,
+        #"l2_norm": False,
+        "l2_norm": True if knn_distance_ip else False,
         "skip_n_word_embeddings_from_observation": "0:0",
         "str_id": "none",
         "expected_seq_len": None,
@@ -853,7 +882,7 @@ def main():
         final_loss = None
         loss_elements1 = 0
 
-        for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size), 1):
+        for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size, sample=True, replacement=True), 1):
             icl_examples = [item["icl_example"] for item in batch]
             reward_labels = [item["reward_label"] for item in batch]
             states = [item["state"] for item in batch]

@@ -127,6 +127,9 @@ def tokenize_prompts(prompts, tokenizer, lock=None):
     if lock is not None:
         lock.release()
 
+    assert inputs.input_ids.shape[0] == len(prompts)
+    assert len(inputs.input_ids.shape) == 2 # batch_size, seq_len
+
     return inputs
 
 def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None):
@@ -198,6 +201,8 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
             type=probs.dtype
         ).smallest_normal
         probs[probs == 0] = smallest_normal
+
+        assert len(probs.shape) == 3, f"probs expected shape: (batch_size, seq_len - 1, vocab_size); got: {probs.shape}"
 
         # Compute features
         features = ["constant", "observed", "most_likely", "entropy"]

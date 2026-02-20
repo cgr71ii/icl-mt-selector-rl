@@ -12,7 +12,7 @@ global_bm25 = None
 def encode_base64(s):
     return base64.b64encode(s.encode('utf-8')).decode('utf-8')
 
-def batchify(lst, batch_size, icl_examples_pool_aligned_with_bm25=None, icl_num_examples=0, avoid_icl_example_equal_to_src=True):
+def batchify(lst, batch_size, icl_examples_pool_aligned_with_bm25=None, icl_num_examples=0, avoid_icl_example_equal_to_src=True, repeat_most_similar_icl_example=False):
     assert global_bm25 is not None, "global_bm25 is not initialized"
     assert len(icl_examples_pool_aligned_with_bm25) > icl_num_examples, f"icl_examples_pool_aligned_with_bm25 must contain more examples than icl_num_examples (at least, one more) to guarantee that is possible to sample a different src sentence: {len(icl_examples_pool_aligned_with_bm25)} vs {icl_num_examples}"
 
@@ -44,6 +44,19 @@ def batchify(lst, batch_size, icl_examples_pool_aligned_with_bm25=None, icl_num_
 
                     _icl_examples.append(icl_examples_pool_aligned_with_bm25[idx])
 
+            if repeat_most_similar_icl_example:
+                most_similar_example = _icl_examples[0]
+
+                assert isinstance(most_similar_example, tuple)
+
+                most_similar_example = tuple(most_similar_example)
+
+                for idx in range(len(_icl_examples)):
+                    _icl_examples[idx] = most_similar_example
+
+                assert _icl_examples[0] == most_similar_example, f"Most similar example mismatch: {_icl_examples[0]} vs {most_similar_example}"
+                assert len(set(_icl_examples)) == 1, f"All icl examples must be the same when repeat_most_similar_icl_example is True, got: {set(_icl_examples)}"
+
             assert len(_icl_examples) == icl_num_examples, f"Each icl example must have exactly {icl_num_examples} elements, got {len(_icl_examples)}"
 
             icl_examples.append(_icl_examples)
@@ -62,6 +75,8 @@ def main():
     batch_size = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     seed = sys.argv[6] if len(sys.argv) > 6 else None # default random seed
     server_port = sys.argv[7] if len(sys.argv) > 7 else "8000"
+    server_name = sys.argv[8] if len(sys.argv) > 8 else "127.0.0.1"
+    repeat_most_similar_icl_example = bool(int(sys.argv[9])) if len(sys.argv) > 9 else False
 
     assert icl_num_examples >= 0, f"icl_num_examples must be non-negative, got: {icl_num_examples}"
 
@@ -99,10 +114,10 @@ def main():
     global_bm25 = BM25Okapi(corpus_bm25)
 
     # Encode each sentence in base64
-    url = f"http://127.0.0.1:{server_port}/translate"
+    url = f"http://{server_name}:{server_port}/translate"
     src_sentences_idx = 0
 
-    for batch, batch_icl_examples in batchify(sentences, batch_size, icl_examples_pool_aligned_with_bm25=icl_examples_pool_aligned_with_bm25, icl_num_examples=icl_num_examples):
+    for batch, batch_icl_examples in batchify(sentences, batch_size, icl_examples_pool_aligned_with_bm25=icl_examples_pool_aligned_with_bm25, icl_num_examples=icl_num_examples, repeat_most_similar_icl_example=repeat_most_similar_icl_example):
         assert len(batch) == len(batch_icl_examples), f"Batch size mismatch: {len(batch)} vs {len(batch_icl_examples)}"
 
         payload = []

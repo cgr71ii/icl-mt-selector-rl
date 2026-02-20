@@ -159,6 +159,12 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples_bm25_corpus = []
         self.data_icl_examples_bm25_corpus_tokenized = []
         self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
+        self.knn_distance_ip = utils.dict_or_default(kwargs, "knn_distance_ip", False) # if True, inner product (IP) will be used as distance metric for kNN search; if False, L2 distance will be used
+
+        if self.knn_distance_ip:
+            self.logger_wrapper(gym.logger.info, "Using inner product (IP) as distance metric for kNN search. This is equivalent to using cosine similarity if L2 normalization is applied to embeddings.")
+        else:
+            self.logger_wrapper(gym.logger.info, "Using L2 distance as distance metric for kNN search.")
 
         # Log args
         initial_sample_list_actions = utils.dict_or_default(kwargs, "initial_sample_list_actions", None)
@@ -324,6 +330,9 @@ class MTICLEnv(gym.Env):
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
         self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
+
+        if self.knn_distance_ip:
+            assert self.apply_l2_normalization_action, "L2 normalization of action embeddings should be enabled when using inner product (IP) as distance metric for kNN search (cosine similarity)."
 
         if self.select_max_icl_examples_randomly and self.is_eval_env:
             self.select_max_icl_examples_randomly = False
@@ -556,8 +565,11 @@ class MTICLEnv(gym.Env):
 
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
-        self.embeddings_index = faiss.IndexFlatL2(self.action_dim)
-        #self.embeddings_index = faiss.IndexFlatIP(self.action_dim)
+        if self.knn_distance_ip:
+            self.embeddings_index = faiss.IndexFlatIP(self.action_dim)
+        else:
+            self.embeddings_index = faiss.IndexFlatL2(self.action_dim)
+
         self.icl_example_representation = {} # former self.active_urls_representation # idx (insertion order) to icl example
         self.icl_example_representation_icl2idx = {} # former self.active_urls_representation_url2idx
 
@@ -1564,14 +1576,22 @@ class MTICLEnv(gym.Env):
                     I_aux = I_aux[0][D_aux_min_idx] # take closest
                     results_aux = urls_representation[I_aux]
                     D_aux_repr = self.str2representation[results_aux].copy()
-                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+
+                    if self.knn_distance_ip:
+                        dist = np.dot(proto_actions[idx1], D_aux_repr) # inner product distance
+                    else:
+                        dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
 
                     assert np.isclose(dist, D_aux[0][D_aux_min_idx]), f"{dist} vs {D_aux[0][D_aux_min_idx]}" # should work as long as euclidean distance is used
                     assert I_aux >= 0, I_aux
                     assert isinstance(results_aux, str), f"Expected results_aux to be a string, got {type(results_aux)}: {results_aux}"
                     assert len(D_aux_repr.shape) == 1 and D_aux_repr.shape[0] == self.action_dim, f"Expected D_aux_repr shape to be ({self.action_dim},), got {D_aux_repr.shape}"
 
-                    D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+                    if self.knn_distance_ip:
+                        D[idx1][longest_dist_idx] = np.dot(proto_actions[idx1], D_aux_repr) # inner product distance
+                    else:
+                        D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+
                     I[idx1][longest_dist_idx] = I_aux
                     results[-1][longest_dist_idx] = results_aux
                     overlapping_hits = 0
@@ -1612,7 +1632,11 @@ class MTICLEnv(gym.Env):
                     I_aux = I_aux[0][1] # take second closest
                     results_aux = urls_representation[I_aux]
                     D_aux_repr = self.str2representation[results_aux].copy()
-                    dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+
+                    if self.knn_distance_ip:
+                        dist = np.dot(proto_actions[idx1], D_aux_repr) # inner product distance
+                    else:
+                        dist = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
 
                     assert np.isclose(dist, D_aux[0][1]), f"{dist} vs {D_aux[0][1]}" # should work as long as euclidean distance is used
 
@@ -1620,7 +1644,11 @@ class MTICLEnv(gym.Env):
                 assert isinstance(results_aux, str), f"Expected results_aux to be a string, got {type(results_aux)}: {results_aux}"
                 assert len(D_aux_repr.shape) == 1 and D_aux_repr.shape[0] == self.action_dim, f"Expected D_aux_repr shape to be ({self.action_dim},), got {D_aux_repr.shape}"
 
-                D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+                if self.knn_distance_ip:
+                    D[idx1][longest_dist_idx] = np.dot(proto_actions[idx1], D_aux_repr) # inner product distance
+                else:
+                    D[idx1][longest_dist_idx] = np.linalg.norm(proto_actions[idx1] - D_aux_repr, axis=0) ** 2 # we assume euclidean distance
+
                 I[idx1][longest_dist_idx] = I_aux
                 results[-1][longest_dist_idx] = results_aux
 
