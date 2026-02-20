@@ -14,6 +14,7 @@ import random
 import logging
 from datetime import datetime
 import warnings
+import pickle
 
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -45,19 +46,21 @@ def evaluate_policy_custom(
     device="cpu",
     reward_idx=None,
     logger=None,
+    max_icl_examples=None,
 ):
     # Code adapter from stable-baselines3/stable_baselines3/common/evaluation.py
 
     assert reward_idx is not None
     assert isinstance(reward_idx, int) and reward_idx >= 0, f"reward_idx must be a non-negative integer, got {reward_idx}"
     assert logger is not None
+    assert max_icl_examples is not None
 
     logger.info("Evaluating policy for %d episodes with reward_idx: %d", n_eval_episodes, reward_idx)
 
     training = model.training
     is_monitor_wrapped = False
-    env_skip = env.action_dim + env.state_dim_per_token + env.state_dim_per_token
-    env_state_dim = env.state_dim
+    env_skip = env.unwrapped.action_dim + env.unwrapped.state_dim_per_token + env.unwrapped.state_dim_per_token
+    env_state_dim = env.unwrapped.state_dim
 
     model.eval()
 
@@ -77,8 +80,9 @@ def evaluate_policy_custom(
     n_envs = env.num_envs
     episode_rewards = []
     episode_lengths = []
-    additional_embedding_idxs = [reward_idx] if reward_idx is not None else None
+    reward_embedding_idxs = [reward_idx] if reward_idx is not None else None
 
+    assert reward_embedding_idxs is not None
     assert n_envs == 1, n_envs # we assume only one environment for evaluation, to simplify the evaluation loop
 
     episode_counts = np.zeros(n_envs, dtype="int")
@@ -87,24 +91,31 @@ def evaluate_policy_custom(
 
     current_rewards = np.zeros(n_envs)
     current_lengths = np.zeros(n_envs, dtype="int")
-    observations = env.reset() # TODO this returns the state of the environment, not just the representation from the LLM
+    observations = env.reset()
     observations = torch.from_numpy(observations) if isinstance(observations, np.ndarray) else observations
     episode_starts = np.ones((env.num_envs,), dtype=bool)
+    idx = 0
 
     while (episode_counts < episode_count_targets).any():
         assert len(observations.shape) == 2, observations.shape
-        assert observations.shape[1] == 1024 + 1024 # TODO fix
-        observations[:, :env_skip] = torch.zeros_like(observations[:, :env_skip]) # TODO fix. Remove source sentence representation and additional info in 2 first tokens
-        observations[:, :env_state_dim - env_skip] = observations[:, env_skip:] # TODO fix
-        observations[:, env_skip:] = torch.zeros_like(observations[:, env_skip:]) # TODO fix
-
+        #assert observations.shape[1] == 1024 + 1024 # TODO fix
+        # Since the environment returns the state of the environment, not just the representation from the LLM, we need to fix it:
+        #logger.error("debug: %s %s %s", observations.shape, env_skip, env_state_dim)
+        _observations = torch.zeros_like(observations)
+        _observations[:, :env_state_dim - env_skip] = observations[:, env_skip:] # TODO fix. Remove source sentence representation and reward info in 2 first tokens
+        #_observations[:, 4:] = _observations[:, :-4].clone() # TODO remove
+        #_observations[:, :4] = torch.ones_like(_observations[:, :4]) * (idx + 1) / 10 # TODO remove
+        #_observations[:, 0] = 0.0 # TODO remove
+        #_observations[:, 4:] = 0.0 # TODO remove
+        #_observations[...] = 0.0 # TODO remove
+        observations = _observations
         observations = observations.to(device)
 
         #logger.debug("debug: %s: %s: %s)", observations.shape, torch.sum((observations.reshape(1, -1, 4) == 0).all(dim=2)), observations.reshape(1, -1, 4))
 
-        actions = model(observations, additional_embedding_idxs=additional_embedding_idxs)
+        actions = model(observations, reward_embedding_idxs=reward_embedding_idxs, step_embedding_idxs=[idx % max_icl_examples])
         actions = actions.cpu().detach().numpy() if isinstance(actions, torch.Tensor) else actions
-        new_observations, rewards, dones, infos = env.step(actions) # TODO this returns the state of the environment, not just the representation from the LLM
+        new_observations, rewards, dones, infos = env.step(actions)
         current_rewards += rewards
         current_lengths += 1
         for i in range(n_envs):
@@ -140,6 +151,7 @@ def evaluate_policy_custom(
 
         observations = new_observations
         observations = torch.from_numpy(observations) if isinstance(observations, np.ndarray) else observations
+        idx += 1
 
         if render:
             env.render()
@@ -176,25 +188,31 @@ def make_batches(training_dataset, batch_size):
     for i in range(0, len(training_dataset), batch_size):
         yield training_dataset[i:i + batch_size]
 
-def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None, model=None, k=1, device="cpu"):
+def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None, model=None, k=1, device="cpu"):
     src_sentence, reference = data_entry.split('\t')
     rollout_states = []
     rollout_actions = []
     rollout_rewards = []
     icl_examples = []
+    rollout_steps = []
     state = env_training_dummy.get_state_representation([src_sentence], api_idx=api_idx)[0]
     idx_icl_example = 0
 
     assert isinstance(k, int)
     assert k > 0, k
 
+    #state[4:] = state[:-4] # TODO remove
+    #state[:4] = np.ones_like(state[:4]) * (idx_icl_example + 1) / 10 # TODO remove
+    #state[0] = 0.0 # TODO remove
+    #state[4:] = 0.0 # TODO remove
+    #state[...] = 0.0 # TODO remove
     rollout_states.append(state) # s_t
 
     while idx_icl_example < max_icl_examples:
         if model is not None:
             observation = np.array(rollout_states[-1])
             observation = torch.from_numpy(observation).unsqueeze(0).to(device)
-            proto_action = model(observation, additional_embedding_idxs=[num_labels_reward - 1])
+            proto_action = model(observation, reward_embedding_idxs=[num_labels_reward - 1], step_embedding_idxs=[idx_icl_example]).cpu().detach().numpy()
             _icl_examples = env_training_dummy.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=True, debug=False)[0]
 
             assert len(_icl_examples) == 1, len(_icl_examples)
@@ -258,7 +276,7 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
 
         action = env_training_dummy.str2representation[icl_example] # a_t
 
-        icl_examples.append(icl_example.split('\t'))
+        icl_examples.insert(0, icl_example.split('\t'))
         rollout_actions.append(action)
 
         translation = None if idx_icl_example < max_icl_examples - 1 else env_training_dummy.get_translations([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0] # only get the translation for the last state, to save time
@@ -268,12 +286,18 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
 
         state = env_training_dummy.get_state_representation([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0]
 
+        #state[4:] = state[:-4] # TODO remove
+        #state[:4] = np.ones_like(state[:4]) * (idx_icl_example + 2) / 10 # TODO remove
+        #state[0] = 0.0 # TODO remove
+        #state[4:] = 0.0 # TODO remove
+        #state[...] = 0.0 # TODO remove
         rollout_states.append(state) # s_{t+1}
+        rollout_steps.append(idx_icl_example)
 
         idx_icl_example += 1
 
     assert len(icl_examples) == max_icl_examples
-    assert len(rollout_states) - 1 == len(rollout_actions) == len(rollout_rewards) == max_icl_examples
+    assert len(rollout_states) - 1 == len(rollout_actions) == len(rollout_rewards) == max_icl_examples == len(rollout_steps), f"Expected lengths: {max_icl_examples}, but got: {len(rollout_states) - 1}, {len(rollout_actions)}, {len(rollout_rewards)}, {len(rollout_steps)}"
 
     rollout_states.pop() # remove the last state, that we do not need for training the supervised model (we only need the transitions with (s, a, r), and the last state doesn't have an action)
 
@@ -288,10 +312,11 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
 
     reward_label_position = min(int((return_value / 100) * num_labels_reward), num_labels_reward - 1) # discretize the reward into num_labels_reward values; lower is worse, higher is better
 
-    logger.debug("rollout states: %s, actions: %s, return_value: %s, reward_label: %s", rollout_states[-1].shape, rollout_actions[-1].shape, return_value, reward_label_position)
-    logger.debug("rollout icl_examples: %s", icl_examples)
+    icl_examples = list(reversed(icl_examples)) # reverse to have the order of the ICL examples in the same order as they are selected
 
-    return {
+    logger.debug("rollout states: %s, actions: %s, return_value: %s, reward_label: %s, icl_examples: %s", rollout_states[-1].shape, rollout_actions[-1].shape, return_value, reward_label_position, icl_examples)
+
+    return joblib_idx, {
         "src_sentence": src_sentence,
         "reference": reference,
         "rollout_states": rollout_states,
@@ -300,6 +325,7 @@ def generate_rollouts(data_entry, env_training_dummy, max_icl_examples, data_icl
         "icl_examples": icl_examples,
         "return_value": return_value,
         "reward_label_position": reward_label_position,
+        "rollout_steps": rollout_steps,
     }
 
 def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards, model=None, k=1, device="cpu"):
@@ -311,14 +337,20 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
     if model is not None:
         model.eval()
 
-    logger.info("Generationg random rollouts for training dataset with %d parallel jobs", n_jobs)
+    logger.info("Generating random rollouts for training dataset with %d parallel jobs", n_jobs)
 
     for rollout_idx in range(dataset_rollouts_per_data_entry):
-        result = joblib.Parallel(n_jobs=n_jobs, timeout=99999)(joblib.delayed(generate_rollouts)(data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
+        # prefer="threads" is better in this case due to API calls and model usage that can raise exceptions when using multiprocessing, since these use cases release the GIL, and using threads allows to avoid some of these exceptions while still providing parallelism (not really need to use multiprocessing)
+        with torch.no_grad():
+            result = joblib.Parallel(n_jobs=n_jobs, timeout=999999, prefer="threads")(joblib.delayed(generate_rollouts)(idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
 
         assert len(result) == len(data_to_be_translated_training)
 
-        for action_data, data_entry in zip(result, data_to_be_translated_training): # "The order of the outputs always matches the order the inputs have been submitted with"
+        for action_idx, (_action_data, data_entry) in enumerate(zip(result, data_to_be_translated_training)): # "The order of the outputs always matches the order the inputs have been submitted with"
+            joblib_idx, action_data = _action_data # unpack the joblib_idx that was returned by generate_rollouts
+
+            assert joblib_idx == action_idx, f"Expected joblib_idx: {action_idx}, but got: {joblib_idx}" # check order is correct
+
             src_sentence, reference = data_entry.split('\t')
             _src_sentence = action_data["src_sentence"]
             _reference = action_data["reference"]
@@ -327,6 +359,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
             rollout_rewards = action_data["rollout_rewards"]
             icl_examples = action_data["icl_examples"]
             return_value = action_data["return_value"]
+            rollout_steps = action_data["rollout_steps"]
             icl_examples_str = '\t'.join(['\t'.join(icl_example) for icl_example in icl_examples])
             seen_key = hash(f"{src_sentence}\t{reference}\t{icl_examples_str}")
 
@@ -339,7 +372,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
             seen_data.add(seen_key)
 
             # We store the transitions (s, a, r) for supervised learning
-            for s, a, r, icl_example in zip(rollout_states, rollout_actions, rollout_rewards, icl_examples):
+            for s, a, r, icl_example, step in zip(rollout_states, rollout_actions, rollout_rewards, icl_examples, rollout_steps):
                 training_dataset.append({
                     "src_sentence": src_sentence,
                     "reference": reference,
@@ -349,6 +382,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
                     "icl_example": icl_example,
                     "return_value": return_value,
                     "reward_label": None, # we will assign the reward labels later, after we have generated all the trajectories and we can analyze the distribution of return values to assign the reward labels in a more informed way (e.g., using quantiles)
+                    "step": step,
                 })
 
             best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
@@ -363,7 +397,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
 
     return training_dataset
 
-def update_training_dataset(training_dataset, data_to_be_translated_training, dataset_rollouts_per_data_entry, max_icl_examples, best_rewards, num_labels_reward, epoch, logger):
+def update_training_dataset(training_dataset, best_rewards, num_labels_reward, epoch, logger):
     assert isinstance(epoch, int)
     assert epoch > 0, epoch
 
@@ -381,7 +415,27 @@ def update_training_dataset(training_dataset, data_to_be_translated_training, da
     assert len(reward_intervals_codes) == len(training_dataset)
 
     for idx in range(len(training_dataset)):
-        training_dataset[idx]["reward_label"] = reward_intervals_codes[idx]
+        _training_dataset = training_dataset[idx]
+
+        if epoch == 1:
+            assert _training_dataset["reward_label"] is None, _training_dataset["reward_label"]
+        else:
+            assert isinstance(_training_dataset["reward_label"], int), type(_training_dataset["reward_label"])
+
+        _training_dataset["reward_label"] = reward_intervals_codes[idx]
+
+        assert isinstance(training_dataset[idx]["reward_label"], int), type(training_dataset[idx]["reward_label"])
+
+        #logger.error("debug (label: %s): %s\n%s\n%s\n%s\n%s\n%s\n%s",
+        #             _training_dataset["reward_label"],
+        #             _training_dataset["src_sentence"],
+        #             _training_dataset["icl_example"],
+        #             torch.sum((torch.from_numpy(_training_dataset["state"]).reshape(1, -1, 4) == 0).all(dim=2)),
+        #             torch.from_numpy(_training_dataset["state"]).reshape(-1, 4),
+        #             torch.sum(torch.from_numpy(_training_dataset["state"]).reshape(-1, 4), dim=(0, 1)),
+        #             _training_dataset["action"],
+        #             torch.sum(torch.from_numpy(_training_dataset["action"]), dim=0)
+        #            )
 
     random.shuffle(training_dataset)
 
@@ -455,7 +509,8 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 10 # TODO remove
+    #max_data_entries = 1 # TODO remove
+    #max_data_entries = 20 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
@@ -502,8 +557,19 @@ def main():
     best_model_path = f"{name_prefix}_best_model.pt"
     save_model_path = os.path.join(save_path, best_model_path)
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
-    patience = 6 # early stopping patience (number of evals with no improvement)
+    training_dataset_path = parsed_kwargs.pop("training_dataset_path", None)
+    #patience = 6 # early stopping patience (number of evals with no improvement)
+    patience = 100 # TODO remove
+    #eval_freq_epochs = 1
+    eval_freq_epochs = 5  # TODO remove
+    #generate_new_samples_for_training_set_every_epochs = 1
+    generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
+    initial_epochs_without_eval_nor_generation = 50 # TODO "- eval_freq_epochs"?
+    #initial_epochs_without_eval_nor_generation = 2000 # TODO remove
 
+    assert eval_freq_epochs > 0
+    assert generate_new_samples_for_training_set_every_epochs >= 0
+    assert initial_epochs_without_eval_nor_generation >= 0
     assert not os.path.exists(save_path), f"Save path already exists: {save_path}"
 
     os.makedirs(save_path, exist_ok=False)
@@ -521,11 +587,14 @@ def main():
     env_eval_test_class = MTICLEvalEnv
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
-    batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
-    learning_rate = 1e-5
+    #batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
+    batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 256)))
+    #learning_rate = 1e-5
+    learning_rate = 1e-4
     n_jobs = num_envs # TODO fix
     epochs = 1000
 
+    ## create environments
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
     env_training_dummy = env_class(*list(env_args), **dict({"custom_env_id": "training_dummy", **env_kwargs, **parsed_kwargs_training_dummy}))
@@ -554,11 +623,14 @@ def main():
         "embedding_dropout": 0.1,
         "dropout_p": 0.1,
         "projection_out_dropout_p": 0.1,
-        "initial_layer_norm": False,
+        #"initial_layer_norm": False,
+        "initial_layer_norm": True, # needed for stable training
         "initial_layer_norm_first": False,
-        "activation": "relu",
+        #"activation": "relu",
+        "activation": "gelu",
         "bias": True,
-        "norm_first": True,
+        #"norm_first": True, # TODO watch out: when enabled, the model seems to be stuck generating the same output regardless the input
+        "norm_first": False,
         "l2_norm": False,
         "skip_n_word_embeddings_from_observation": "0:0",
         "str_id": "none",
@@ -566,11 +638,15 @@ def main():
         "last_layer_norm": False,
         "mean_pooling": False,
         "last_linear_layer": True,
-        "additional_embeddings": num_labels_reward,
+        "reward_embeddings": num_labels_reward,
+        "assert_embedding_idxs": True,
+        "remove_first_column_of_zeros": True,
+        "step_embeddings": max_icl_examples, # we can also use learnable step embeddings to represent the position in the trajectory
     }
     model = TransformerModel(**model_kwargs)
-    model = model.train()
     model = model.to(device)
+
+    model.train()
 
     for p in model.parameters():
         p.requires_grad_(True)
@@ -585,32 +661,88 @@ def main():
     # dataset_rollouts_per_data_entry
     training_dataset = []
     best_rewards = {data_entry: 0.0 for data_entry in data_to_be_translated_training} # best reward observed for each reward label, to monitor the training progress
+    load_initial_training_dataset = False
+
+    if training_dataset_path is not None and os.path.exists(training_dataset_path):
+        load_initial_training_dataset = True
+
+    #load_initial_training_dataset = False # TODO remove?
 
     # BEGIN generate training set
-    _training_dataset = do_generate_rollouts(
-        data_to_be_translated_training,
-        dataset_rollouts_per_data_entry,
-        env_training_dummy,
-        max_icl_examples,
-        data_icl_examples_training,
-        num_labels_reward,
-        logger,
-        n_jobs,
-        best_rewards,
-        model=None,
-        #model=model, # TODO remove. debug
-        k=k_training,
-        device=device,
-    )
+    if not load_initial_training_dataset:
+        training_dataset_path_store = os.path.join(save_path, f"training_dataset_initial.pkl")
 
-    training_dataset.extend(_training_dataset)
-    #training_dataset *= 10 # TODO remove. debug
+        assert not os.path.exists(training_dataset_path_store), f"Training dataset path already exists: {training_dataset_path_store}"
+
+        _training_dataset = do_generate_rollouts(
+            data_to_be_translated_training,
+            dataset_rollouts_per_data_entry,
+            env_training_dummy,
+            max_icl_examples,
+            data_icl_examples_training,
+            num_labels_reward,
+            logger,
+            n_jobs,
+            best_rewards,
+            model=None,
+            #model=model, # TODO remove. debug
+            k=k_training,
+            device=device,
+        )
+
+        training_dataset.extend(_training_dataset)
+
+        logger.info("Storing training dataset (length: %d): %s", len(training_dataset), training_dataset_path_store)
+
+        with open(training_dataset_path_store, "wb") as fd:
+            pickle.dump(training_dataset, fd)
+    else:
+        logger.info("Loading training dataset: %s", training_dataset_path)
+
+        with open(training_dataset_path, "rb") as fd:
+            training_dataset = pickle.load(fd)
+
+        trajectory = {
+            "rollout_states": [],
+            "rollout_actions": [],
+            "rollout_rewards": [],
+            "icl_examples": [],
+        }
+
+        assert len(training_dataset) % max_icl_examples == 0, f"Expected training dataset size to be a multiple of max_icl_examples: {max_icl_examples}, but got: {len(training_dataset)}"
+
+        for action_idx, action_data in enumerate(training_dataset):
+            src_sentence = action_data["src_sentence"]
+            reference = action_data["reference"]
+            data_entry = f"{src_sentence}\t{reference}"
+            step = action_data["step"]
+
+            trajectory["rollout_states"].append(action_data["state"])
+            trajectory["rollout_actions"].append(action_data["action"])
+            trajectory["rollout_rewards"].append(action_data["reward"])
+            trajectory["icl_examples"].append(action_data["icl_example"])
+
+            assert action_idx % max_icl_examples == step, f"Expected step: {action_idx % max_icl_examples}, but got: {step}"
+
+            if step + 1 == max_icl_examples:
+                logger.debug("rollout states: %s, actions: %s, return_value: %s, reward_label: %s, icl_examples: %s", trajectory["rollout_states"][-1].shape, trajectory["rollout_actions"][-1].shape, action_data["return_value"], action_data["reward_label"], trajectory["icl_examples"][-1])
+
+                best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
+                trajectory = {
+                    "rollout_states": [],
+                    "rollout_actions": [],
+                    "rollout_rewards": [],
+                    "icl_examples": [],
+                }
+
+        assert len(trajectory["rollout_states"]) == 0, f"Expected trajectory to be empty after processing the training dataset, but got: {len(trajectory['rollout_states'])}"
+
+        logger.info("Iteration -: Best rewards observed (mean for %d entries): %s", len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
+
+    #training_dataset *= 20 # TODO remove. debug
 
     update_training_dataset(
         training_dataset,
-        data_to_be_translated_training,
-        dataset_rollouts_per_data_entry,
-        max_icl_examples,
         best_rewards,
         num_labels_reward,
         1,
@@ -632,6 +764,7 @@ def main():
     epoch = 0
     do_training = epoch < epochs or train_until_patience
     loss_function = nn.MSELoss(reduction="none")
+    #loss_function = nn.MSELoss()
     log_steps = 100 # TODO argument
     sum_epoch_loss = np.inf
     early_stopping_best_loss = np.inf
@@ -642,93 +775,97 @@ def main():
 
     while do_training:
         epoch_loss = []
-        epoch_loss1 = []
+
+        # Eval and generate new samples
+        epoch_number_fix_eval = epoch - initial_epochs_without_eval_nor_generation
+
+        if epoch_number_fix_eval > 0:
+            if eval_freq_epochs > 0 and epoch_number_fix_eval % eval_freq_epochs == 0:
+                # Eval dev set
+
+                with torch.no_grad():
+                    mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device, reward_idx=num_labels_reward - 1, logger=logger, max_icl_examples=max_icl_examples)
+
+                early_stopping_metric_dev = mean_reward
+
+                logger.info("Dev eval: %s +- %s", mean_reward, std_reward)
+
+                if early_stopping_metric_dev > early_stopping_best_result_dev:
+                    logger.info("Patience better dev result: %s -> %s", early_stopping_best_result_dev, early_stopping_metric_dev)
+
+                    current_patience = 0
+                    early_stopping_best_result_dev = early_stopping_metric_dev
+
+                    if save_model_path:
+                        logger.info("Saving best model: %s", save_model_path)
+
+                        torch.save(model.state_dict(), save_model_path)
+                elif patience > 0:
+                    current_patience += 1
+
+                    logger.info("Exhausting patience... %d / %d", current_patience, patience)
+
+                if patience > 0 and current_patience >= patience:
+                    logger.info("Patience is over ...")
+
+                    do_training = False
+
+                    break # we need to force the break to avoid the training of the current epoch
+
+            if generate_new_samples_for_training_set_every_epochs > 0 and epoch_number_fix_eval % generate_new_samples_for_training_set_every_epochs == 0:
+                # Generate new samples for the training set using the model trained so far, to have more informative samples in the training set as the training progresses
+
+                logger.info("Generating new samples for the training set with the current model (epoch: %d). Recomputing the label rewards", epoch + 1)
+                # BEGIN generate training set
+                _training_dataset = do_generate_rollouts(
+                    data_to_be_translated_training,
+                    1, # we generate 1 rollout per data entry at each epoch after the random rolldouts generated at the beginning of the training
+                    env_training_dummy,
+                    max_icl_examples,
+                    data_icl_examples_training,
+                    num_labels_reward,
+                    logger,
+                    n_jobs,
+                    best_rewards,
+                    model=model,
+                    k=k_training,
+                    device=device,
+                )
+
+                training_dataset.extend(_training_dataset)
+
+                update_training_dataset(
+                    training_dataset,
+                    best_rewards,
+                    num_labels_reward,
+                    epoch + 1,
+                    logger
+                )
+
+                training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
+                training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
+                # END generate training set
 
         logger.info("Epoch #%d", epoch + 1)
-
-        # Eval
-        if epoch > 0:
-            # dev_results = eval(model, # TODO
-            mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device, reward_idx=num_labels_reward - 1, logger=logger)
-            early_stopping_metric_dev = mean_reward
-
-            logger.info("Dev eval: %s +- %s", mean_reward, std_reward)
-
-            # Generate new samples for the training set using the model
-            logger.info("Generating new samples for the training set. Recomputing the label rewards")
-
-            # BEGIN generate training set
-            _training_dataset = do_generate_rollouts(
-                data_to_be_translated_training,
-                dataset_rollouts_per_data_entry,
-                env_training_dummy,
-                max_icl_examples,
-                data_icl_examples_training,
-                num_labels_reward,
-                logger,
-                n_jobs,
-                best_rewards,
-                model=model,
-                k=k_training,
-                device=device,
-            )
-
-            training_dataset.extend(_training_dataset)
-
-            update_training_dataset(
-                training_dataset,
-                data_to_be_translated_training,
-                dataset_rollouts_per_data_entry,
-                max_icl_examples,
-                best_rewards,
-                num_labels_reward,
-                epoch + 1,
-                logger
-            )
-
-            training_steps_per_epoch = len(training_dataset) // batch_size + (0 if len(training_dataset) % batch_size == 0 else 1)
-            training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
-            # END generate training set
-
-        if len(epoch_loss) > 0 and sum_epoch_loss < early_stopping_best_loss:
-            logger.info("Better loss result: %s -> %s", early_stopping_best_loss, sum_epoch_loss)
-
-            early_stopping_best_loss = sum_epoch_loss
-
-        if early_stopping_metric_dev > early_stopping_best_result_dev:
-            logger.info("Patience better dev result: %s -> %s", early_stopping_best_result_dev, early_stopping_metric_dev)
-
-            current_patience = 0
-            early_stopping_best_result_dev = early_stopping_metric_dev
-
-            if save_model_path:
-                logger.info("Saving best model: %s", save_model_path)
-
-                torch.save(model.state_dict(), save_model_path)
-        elif epoch > 0 and patience > 0:
-            current_patience += 1
-
-            logger.info("Exhausting patience... %d / %d", current_patience, patience)
-
-        if patience > 0 and current_patience >= patience:
-            logger.info("Patience is over ...")
-
-            do_training = False
-
-            break # we need to force the break to avoid the training of the current epoch
 
         # Training loop
         model.zero_grad()
         final_loss = None
-        final_loss1 = 0.0
         loss_elements1 = 0
 
         for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size), 1):
+            icl_examples = [item["icl_example"] for item in batch]
             reward_labels = [item["reward_label"] for item in batch]
             states = [item["state"] for item in batch]
             actions = [item["action"] for item in batch]
+            steps = [item["step"] for item in batch]
 
-            assert len(states) == len(reward_labels) == len(batch), f"{len(states)} vs {len(reward_labels)} vs {len(batch)}"
+            #for idx, icl_example in enumerate(icl_examples):
+            #    if "visit involves flying into Orlando International" in icl_example[0]:
+            #        logger.error("debug (%s): %s\n%s\n%s", reward_labels[idx], icl_example,
+            #                     torch.from_numpy(states[idx]).reshape(-1, 4), actions[idx])
+
+            assert len(states) == len(reward_labels) == len(steps) == len(batch), f"{len(states)} vs {len(reward_labels)} vs {len(steps)} vs {len(batch)}"
 
             states = np.array(states)
             states = torch.from_numpy(states).to(device) # input
@@ -738,7 +875,18 @@ def main():
             assert len(states.shape) == 2, states.shape
             assert len(actions.shape) == 2, actions.shape
 
-            model_output = model(states, additional_embedding_idxs=reward_labels) # logits
+            # TODO remove
+#            model.eval()
+#            with torch.no_grad():
+#                model_output = model(states, reward_embedding_idxs=reward_labels, step_embedding_idxs=steps).cpu().detach().numpy() # logits
+#                _icl_examples = env_training_dummy.get_closest_neighbors_urls(model_output, k=1, get_representations_instead_of_embeddings=True, debug=False)[0]
+#
+#                for reward_label, icl_example, actual_icl_example, state, action in zip(reward_labels, _icl_examples, icl_examples, states, actions):
+#                    logger.error("debug (label: %s): %s | %s\n%s\n%s", reward_label, icl_example, actual_icl_example, state.reshape(-1, 4), action)
+#            model.train()
+            # TODO remove
+
+            model_output = model(states, reward_embedding_idxs=reward_labels, step_embedding_idxs=steps) # logits
 
             assert len(model_output.shape) == 2, model_output.shape
             assert model_output.shape[0] == len(batch), model_output.shape
@@ -755,27 +903,25 @@ def main():
             assert len(_loss.shape) == 1, _loss.shape
             assert _loss.shape == (len(batch),), f"{_loss.shape} vs {(len(batch),)}"
 
-            final_loss1 += torch.sum(_loss).cpu().detach().item()
-
             assert len(_loss.shape) == 1, _loss.shape
 
             if final_loss is None:
                 final_loss = torch.sum(_loss)
+                #final_loss = _loss
             else:
                 final_loss += torch.sum(_loss)
+                #final_loss += _loss
 
             # loss
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
                 assert final_loss is not None
 
                 loss = final_loss / loss_elements1
-                loss1 = final_loss1 / (loss_elements1 if loss_elements1 > 0. else 1.)
+                #loss = final_loss
                 final_loss = None
                 loss_elements1 = 0
-                final_loss1 = 0.0
 
                 epoch_loss.append(loss.cpu().detach().item())
-                epoch_loss1.append(loss1)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -799,6 +945,7 @@ def main():
                 logger.info("Batch #%d: %s (last %d steps: %s)", batch_idx, sum_loss, log_steps * gradient_accumulation, sum_partial_loss)
 
                 sys.stdout.flush()
+                sys.stderr.flush()
 
         assert batch_idx == training_steps_per_epoch, f"{batch_idx} vs {training_steps_per_epoch}"
 
@@ -808,7 +955,15 @@ def main():
 
         assert str(sum_epoch_loss) != "nan", "Some values in the input data are NaN"
 
+        if sum_epoch_loss < early_stopping_best_loss:
+            logger.info("Better loss result: %s -> %s", early_stopping_best_loss, sum_epoch_loss)
+
+            early_stopping_best_loss = sum_epoch_loss
+        else:
+            logger.info("No improvement in loss (best: %s): %s", early_stopping_best_loss, sum_epoch_loss)
+
         sys.stdout.flush()
+        sys.stderr.flush()
 
         epoch += 1
         do_training = epoch < epochs or train_until_patience
