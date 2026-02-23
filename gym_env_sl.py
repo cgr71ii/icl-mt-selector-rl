@@ -202,7 +202,8 @@ def make_batches(training_dataset, batch_size, sample=False, replacement=False):
 
                 yield [training_dataset[i] for i in batch_indices]
 
-def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=None, model=None, k=1, device="cpu"):
+def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger,
+                      api_idx=None, model=None, k=1, device="cpu", icl_examples_prepend=True):
     src_sentence, reference = data_entry.split('\t')
     rollout_states = []
     rollout_actions = []
@@ -290,7 +291,11 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
 
         action = env_training_dummy.str2representation[icl_example] # a_t
 
-        icl_examples.insert(0, icl_example.split('\t'))
+        if icl_examples_prepend:
+            icl_examples.insert(0, icl_example.split('\t'))
+        else:
+            icl_examples.append(icl_example.split('\t'))
+
         rollout_actions.append(action)
 
         translation = None if idx_icl_example < max_icl_examples - 1 else env_training_dummy.get_translations([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0] # only get the translation for the last state, to save time
@@ -342,7 +347,8 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
         "rollout_steps": rollout_steps,
     }
 
-def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards, model=None, k=1, device="cpu"):
+def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards,
+                         model=None, k=1, device="cpu", icl_examples_prepend=True):
     # TODO we assume reward in the range [0, 100]
     training_dataset = []
     seen_data = set()
@@ -356,7 +362,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
     for rollout_idx in range(dataset_rollouts_per_data_entry):
         # prefer="threads" is better in this case due to API calls and model usage that can raise exceptions when using multiprocessing, since these use cases release the GIL, and using threads allows to avoid some of these exceptions while still providing parallelism (not really need to use multiprocessing)
         with torch.no_grad():
-            result = joblib.Parallel(n_jobs=n_jobs, timeout=999999, prefer="threads")(joblib.delayed(generate_rollouts)(idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device) for idx, data_entry in enumerate(data_to_be_translated_training))
+            result = joblib.Parallel(n_jobs=n_jobs, timeout=999999, prefer="threads")(joblib.delayed(generate_rollouts)(idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device, icl_examples_prepend=icl_examples_prepend) for idx, data_entry in enumerate(data_to_be_translated_training))
 
         assert len(result) == len(data_to_be_translated_training)
 
@@ -397,6 +403,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
                     "return_value": return_value,
                     "reward_label": None, # we will assign the reward labels later, after we have generated all the trajectories and we can analyze the distribution of return values to assign the reward labels in a more informed way (e.g., using quantiles)
                     "step": step,
+                    "icl_examples_prepend": icl_examples_prepend,
                 })
 
             best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
@@ -546,6 +553,7 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
     parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
+    parsed_kwargs["current_icl_examples_prepend"] = parsed_kwargs.get("current_icl_examples_prepend", True)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
@@ -555,6 +563,7 @@ def main():
     pre_k_is_float = '.' in pre_k
     k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
+    current_icl_examples_prepend = parsed_kwargs["current_icl_examples_prepend"]
 
     if knn_distance_ip:
         logger.warning("Using inner product as distance for kNN: using l2-normalization in the model and cosine similarity for kNN. The MSE loss will be computed on the l2-normalized representations")
@@ -587,8 +596,20 @@ def main():
     #generate_new_samples_for_training_set_every_epochs = 1
     generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
     #initial_epochs_without_eval_nor_generation = 0
-    initial_epochs_without_eval_nor_generation = 100
-    #initial_epochs_without_eval_nor_generation = 200 # TODO remove
+    initial_epochs_without_eval_nor_generation = 200
+    #initial_epochs_without_eval_nor_generation = 1000 # TODO remove
+    #min_loss_start_training = -1.0 # negative is disabled
+    #min_loss_start_training = 0.001
+    min_loss_start_training = 0.01
+    min_loss_start_training = float(min_loss_start_training)
+
+    if min_loss_start_training >= 0:
+        logger.info("Minimum loss threshold for starting training: %f", min_loss_start_training)
+
+        if initial_epochs_without_eval_nor_generation > 0:
+            logger.warning("Minimum loss threshold for starting training is enabled, but initial_epochs_without_eval_nor_generation > 0: initial_epochs_without_eval_nor_generation = 0")
+
+            initial_epochs_without_eval_nor_generation = 0
 
     assert eval_freq_epochs > 0
     assert generate_new_samples_for_training_set_every_epochs >= 0
@@ -611,7 +632,7 @@ def main():
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
-    batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 256)))
+    batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 512)))
     #learning_rate = 1e-5
     learning_rate = 1e-4
     n_jobs = num_envs # TODO fix
@@ -641,9 +662,11 @@ def main():
     state_dim_per_token = env_training_dummy.state_dim_per_token
     state_window_length = env_training_dummy.state_window_length
     model_kwargs = {
-        "d_model": 512,
+        #"d_model": 512,
+        "d_model": 128,
         "nhead": 4,
-        "dim_feedforward": 2048,
+        #"dim_feedforward": 2048,
+        "dim_feedforward": 512,
         "nlayers": 3,
         "projection_in": state_dim_per_token,
         "projection_out": action_dim,
@@ -653,19 +676,21 @@ def main():
         "projection_out_dropout_p": 0.1,
         #"initial_layer_norm": False,
         "initial_layer_norm": True, # needed for stable training
-        "initial_layer_norm_first": False,
+        #"initial_layer_norm_first": False,
+        "initial_layer_norm_first": True,
         #"activation": "relu",
         "activation": "gelu",
         "bias": True,
-        #"norm_first": True, # TODO watch out: when enabled, the model seems to be stuck generating the same output regardless the input
-        "norm_first": False,
+        "norm_first": True,
+        #"norm_first": False,
         #"l2_norm": False,
         "l2_norm": True if knn_distance_ip else False,
         "skip_n_word_embeddings_from_observation": "0:0",
         "str_id": "none",
         "expected_seq_len": None,
         "last_layer_norm": False,
-        "mean_pooling": False,
+        #"mean_pooling": False,
+        "mean_pooling": True,
         "last_linear_layer": True,
         "reward_embeddings": num_labels_reward,
         "assert_embedding_idxs": True,
@@ -717,6 +742,7 @@ def main():
             #model=model, # TODO remove. debug
             k=k_training,
             device=device,
+            icl_examples_prepend=current_icl_examples_prepend,
         )
 
         training_dataset.extend(_training_dataset)
@@ -740,11 +766,24 @@ def main():
 
         assert len(training_dataset) % max_icl_examples == 0, f"Expected training dataset size to be a multiple of max_icl_examples: {max_icl_examples}, but got: {len(training_dataset)}"
 
+        icl_examples_prepend = None
+
         for action_idx, action_data in enumerate(training_dataset):
             src_sentence = action_data["src_sentence"]
             reference = action_data["reference"]
             data_entry = f"{src_sentence}\t{reference}"
             step = action_data["step"]
+
+            if icl_examples_prepend is None:
+                if "icl_examples_prepend" in action_data:
+                    icl_examples_prepend = action_data["icl_examples_prepend"]
+                else:
+                    icl_examples_prepend = current_icl_examples_prepend
+
+            if "icl_examples_prepend" in action_data:
+                assert action_data["icl_examples_prepend"] == icl_examples_prepend, f"Expected icl_examples_prepend to be the same for all transitions in the training dataset, but got both True and False"
+
+            assert icl_examples_prepend == current_icl_examples_prepend, f"Expected icl_examples_prepend in the training dataset to be the same as the current_icl_examples_prepend used for generating the rollouts, but got: {icl_examples_prepend} vs {current_icl_examples_prepend}"
 
             trajectory["rollout_states"].append(action_data["state"])
             trajectory["rollout_actions"].append(action_data["action"])
@@ -808,7 +847,7 @@ def main():
         # Eval and generate new samples
         epoch_number_fix_eval = epoch - initial_epochs_without_eval_nor_generation
 
-        if epoch_number_fix_eval > 0:
+        if (min_loss_start_training < 0.0 and epoch_number_fix_eval > 0) or (min_loss_start_training >= 0.0 and early_stopping_best_loss <= min_loss_start_training):
             if eval_freq_epochs > 0 and epoch_number_fix_eval % eval_freq_epochs == 0:
                 # Eval dev set
 
@@ -859,6 +898,7 @@ def main():
                     model=model,
                     k=k_training,
                     device=device,
+                    icl_examples_prepend=current_icl_examples_prepend,
                 )
 
                 training_dataset.extend(_training_dataset)

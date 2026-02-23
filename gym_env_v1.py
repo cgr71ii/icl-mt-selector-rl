@@ -312,6 +312,8 @@ class MTICLEnv(gym.Env):
             assert self.action_dim % self.state_dim_per_token == 0, f"{self.action_dim} % {self.state_dim_per_token} != 0" # we need to be sure that action can be split into tokens of state_dim size
             assert self.state_dim % self.state_dim_per_token == 0, f"{self.state_dim} % {self.state_dim_per_token} != 0"
 
+            #self.state_dim -= self.state_window_length - 1 # TODO fix this. Is for removing the constant of 0s in the representation
+
         # Other
         self.data_already_loaded = False
         self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
@@ -330,6 +332,7 @@ class MTICLEnv(gym.Env):
         self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
         self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
+        self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", True) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
 
         if self.knn_distance_ip:
             assert self.apply_l2_normalization_action, "L2 normalization of action embeddings should be enabled when using inner product (IP) as distance metric for kNN search (cosine similarity)."
@@ -445,6 +448,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.error, "Episode was finished but the reward is not being calculated again...")
 
             observation = self.state_window_type_callback(self.current_state_window).copy()
+            observation = self.postprocessing_observation(observation)
             reward = 0.0
 
             assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
@@ -482,6 +486,7 @@ class MTICLEnv(gym.Env):
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
         observation = self.state_window_type_callback(self.current_state_window).copy()
+        observation = self.postprocessing_observation(observation)
 
         assert observation.shape == (self.state_dim,), f"{observation.shape} vs {(self.state_dim,)}"
 
@@ -512,6 +517,31 @@ class MTICLEnv(gym.Env):
         sys.stderr.flush()
 
         return observation, reward ** self.reward_power, terminated, truncated, info
+
+    def postprocessing_observation(self, observation):
+        assert len(observation.shape) == 1, observation.shape
+        assert isinstance(observation, np.ndarray), type(observation)
+
+        return observation
+
+        if self.state_representation == "representation_per_token_with_features": # TODO tmp
+            observation_action = observation[:self.action_dim]
+            observation_state = observation[self.action_dim:]
+
+            assert len(observation_state) == (self.state_window_length - 1) * 4, f"{len(observation_state)} vs {(self.state_window_length - 1)} * 4"
+
+            observation_state = observation_state.reshape(-1, 4)
+
+            assert np.allclose(observation_state[:, 0], np.zeros_like(observation_state[:, 0])), f"{np.sum(observation_state, axis=(0, 1))}:\n{observation_state}"
+
+            # Remove the zeros (first column)
+            observation_state = observation_state[:, 1:]
+            observation_state = observation_state.reshape(-1)
+
+            # Concat
+            observation = np.concatenate((observation_action, observation_state), axis=0, dtype=observation.dtype)
+
+        return observation
 
     def _init_translation_candidate_variables(self):
         # Variables for selecting the translation sentences for the episodes
@@ -709,6 +739,9 @@ class MTICLEnv(gym.Env):
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
+                #if self.state_representation == "representation_per_token_with_features": # TODO tmp
+                #    sum_dim -= 1
+
             sum_dim += self.current_state_window[-1].shape[0]
 
         assert len(self.current_state_window) == self.current_state_window.maxlen
@@ -764,6 +797,8 @@ class MTICLEnv(gym.Env):
         if self.state_representation == "representation_per_token_with_features":
             self.current_state_window[1] = np.ones(self.state_dim_per_token) * self.current_max_icl_examples / 10 # state representing the number of maximum examples that will be selected. 10 as constant so the value is less than 1 (as long as self.max_icl_examples is less than 10)
             self.current_state_window[2] = np.ones(self.state_dim_per_token) * (self.time_step + 1) / 10 # state representing the current step. 10 as constant so the value is less than 1 (as long as the current step is less than 10)
+            self.current_state_window[1][0] = 0.0 # TODO tmp
+            self.current_state_window[2][0] = 0.0 # TODO tmp
 
             # Fill the rest of the state window with the token representations of the source sentence
 
@@ -804,6 +839,7 @@ class MTICLEnv(gym.Env):
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
+        observation = self.postprocessing_observation(observation)
 
         return observation, info
 
@@ -936,7 +972,7 @@ class MTICLEnv(gym.Env):
 
         utils.insert_embeddings(urls, embeddings, index, urls_representation, urls_representation_url2idx, self.action_dim, update_representation=update_representation, check_l2_norm=check_l2_norm)
 
-    def get_reward(self, src_sentence, reference, translation=None, icl_examples=None):
+    def get_reward(self, src_sentence, reference, translation=None):
         if isinstance(src_sentence, str):
             src_sentence = [src_sentence]
         if isinstance(reference, str):
@@ -946,13 +982,6 @@ class MTICLEnv(gym.Env):
                 translation = [translation]
 
             assert isinstance(translation, list), f"Expected translation to be a list, got {type(translation)}: {translation}"
-        if icl_examples is not None:
-            assert isinstance(icl_examples, list), type(icl_examples)
-
-            if len(icl_examples) > 0:
-                assert isinstance(icl_examples[0], list), f"Expected icl_examples to be a list of lists, got {type(icl_examples[0])}: {icl_examples[0]}"
-                assert len(icl_examples[0]) == 2, f"Expected each icl example to be a list of two elements, got {len(icl_examples[0])}: {icl_examples[0]}"
-                assert isinstance(icl_examples[0][0], str) and isinstance(icl_examples[0][1], str), f"Expected each icl example to be a list of two strings, got {type(icl_examples[0][0])} and {type(icl_examples[0][1])}: {icl_examples[0]}"
 
         assert isinstance(src_sentence, list), f"Expected src_sentence to be a list, got {type(src_sentence)}: {src_sentence}"
         assert isinstance(reference, list), f"Expected reference to be a list, got {type(reference)}: {reference}"
@@ -1787,9 +1816,12 @@ class MTICLEnv(gym.Env):
 
             self.early_stopping = True
         else:
-            self.current_icl_examples.insert(0, current_action.split('\t')) # the new example is added at the beginning, so the prompt left-to-right is new-to-old
+            if self.current_icl_examples_prepend:
+                self.current_icl_examples.insert(0, current_action.split('\t')) # the new example is added at the beginning, so the prompt left-to-right is new-to-old
+            else:
+                self.current_icl_examples.append(current_action.split('\t')) # the new example is added at the end, so the prompt left-to-right is old-to-new
 
-            assert len(self.current_icl_examples[-1]) == 2, f"Expected current ICL example to have two elements (source and target), got {len(self.current_icl_examples[-1])}: {self.current_icl_examples[-1]}"
+            assert len(self.current_icl_examples[-1]) == 2, f"Expected current ICL example to have two elements (source and target), got {len(self.current_icl_examples[-1])}: {self.current_icl_examples[0 if self.current_icl_examples_prepend else -1]}"
 
         terminated, truncated = self.is_done()
         reward = 0.0
@@ -1823,7 +1855,7 @@ class MTICLEnv(gym.Env):
 
                 assert observation.shape[0] % self.state_dim_per_token == 0, f"Observation shape mismatch: {observation.shape[0]} vs {self.state_dim_per_token}"
             elif self.state_representation in ("sentence_and_actions", "model_single_representation+sentence_and_actions"):
-                icl_example = '\t'.join(self.current_icl_examples[-1])
+                icl_example = '\t'.join(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1])
 
                 assert icl_example in self.str2representation, icl_example
 
@@ -1877,6 +1909,7 @@ class MTICLEnv(gym.Env):
                 assert (observation[:used_tokens] != 0).any(axis=1).all(axis=0)
 
             self.current_state_window[2] = np.ones(self.state_dim_per_token) * (self.time_step + 1) / 10 # state representing the current step. 10 as constant so the value is less than 1 (as long as the current step is less than 10)
+            self.current_state_window[2][0] = 0.0 # TODO tmp
 
             # Clean (do not remove the first position, which is reserved for the source sentence representation; do not remove the second position, which is reserved for the information regardin the max. number of ICL examples)
             for idx in range(3, self.state_window_length):
@@ -1914,7 +1947,7 @@ class MTICLEnv(gym.Env):
                 translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
         # Compute reward
-        reward = self.get_reward(src_sentence, reference, translation=translation, icl_examples=list(self.current_icl_examples))
+        reward = self.get_reward(src_sentence, reference, translation=translation)
 
         if terminated or truncated:
             if self.translation_candidate not in self.best_reward_seen:
@@ -1944,7 +1977,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(self.current_icl_examples[-1][0], str), type(self.current_icl_examples[-1][0])
 
         src_translation_candidate = str(self.data[self.translation_candidate][0])
-        focus_icl_example = str(self.current_icl_examples[-1][0])
+        focus_icl_example = str(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1][0])
 
         if remove_overlapping_actions:
             assert focus_icl_example != src_translation_candidate
