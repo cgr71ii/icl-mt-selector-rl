@@ -331,7 +331,8 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
 
     reward_label_position = min(int((return_value / 100) * num_labels_reward), num_labels_reward - 1) # discretize the reward into num_labels_reward values; lower is worse, higher is better
 
-    icl_examples = list(reversed(icl_examples)) # reverse to have the order of the ICL examples in the same order as they are selected
+    if icl_examples_prepend:
+        icl_examples = list(reversed(icl_examples)) # reverse to have the order of the ICL examples in the same order as they are selected
 
     logger.debug("rollout states: %s, actions: %s, return_value: %s, reward_label: %s, icl_examples: %s", rollout_states[-1].shape, rollout_actions[-1].shape, return_value, reward_label_position, icl_examples)
 
@@ -348,11 +349,12 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
     }
 
 def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards,
-                         model=None, k=1, device="cpu", icl_examples_prepend=True):
+                         model=None, k=1, device="cpu", icl_examples_prepend=True, initial_rollout_idx=0):
     # TODO we assume reward in the range [0, 100]
     training_dataset = []
     seen_data = set()
     training = model.training if model is not None else False
+    rollout_unique_idx = initial_rollout_idx
 
     if model is not None:
         model.eval()
@@ -404,9 +406,11 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
                     "reward_label": None, # we will assign the reward labels later, after we have generated all the trajectories and we can analyze the distribution of return values to assign the reward labels in a more informed way (e.g., using quantiles)
                     "step": step,
                     "icl_examples_prepend": icl_examples_prepend,
+                    "rollout_id": rollout_unique_idx,
                 })
 
             best_rewards[data_entry] = max(best_rewards[data_entry], action_data["return_value"])
+            rollout_unique_idx += 1
 
         logger.info("Iteration %d: Best rewards observed (mean for %d entries): %s", rollout_idx + 1, len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
 
@@ -435,6 +439,9 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
     assert len(reward_intervals_codes) == len(training_dataset)
 
+    translation2reward_label2rollout_id_and_return = {}
+    rollout_id2remove = set()
+
     for idx in range(len(training_dataset)):
         _training_dataset = training_dataset[idx]
 
@@ -447,6 +454,30 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
         assert isinstance(training_dataset[idx]["reward_label"], int), type(training_dataset[idx]["reward_label"])
 
+        # Update translation2reward_label2rollout_id_and_return mapping
+        translation = f"{_training_dataset['src_sentence']}\t{_training_dataset['reference']}"
+        reward_label = _training_dataset["reward_label"]
+        rollout_id = _training_dataset["rollout_id"]
+        return_value = _training_dataset["return_value"]
+
+        if translation not in translation2reward_label2rollout_id_and_return:
+            translation2reward_label2rollout_id_and_return[translation] = {}
+
+        if reward_label not in translation2reward_label2rollout_id_and_return[translation]:
+            translation2reward_label2rollout_id_and_return[translation][reward_label] = (rollout_id, return_value)
+
+        _rollout_id, _return_value = translation2reward_label2rollout_id_and_return[translation][reward_label]
+
+        if rollout_id != _rollout_id:
+            logger.debug("Found different rollout_id for the same translation and reward label: reward_label: %s, rollout_id: %s, return_value: %s vs rollout_id: %s, return_value: %s. Removing rollout with lower return value", reward_label, rollout_id, return_value, _rollout_id, _return_value)
+
+            if return_value > _return_value:
+                translation2reward_label2rollout_id_and_return[translation][reward_label] = (rollout_id, return_value)
+
+                rollout_id2remove.add(_rollout_id)
+            else:
+                rollout_id2remove.add(rollout_id)
+
         #logger.error("debug (label: %s): %s\n%s\n%s\n%s\n%s\n%s\n%s",
         #             _training_dataset["reward_label"],
         #             _training_dataset["src_sentence"],
@@ -458,7 +489,17 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
         #             torch.sum(torch.from_numpy(_training_dataset["action"]), dim=0)
         #            )
 
+    if len(rollout_id2remove) > 0:
+        # Remove transitions from the training dataset that correspond to rollouts that have a different rollout with the same translation and reward label
+        _training_dataset = [d for d in training_dataset if d["rollout_id"] not in rollout_id2remove]
+
+        logger.info("Removing transitions from the training dataset that correspond to rollouts that have a different rollout with the same translation and reward label: %d -> %d training transitions (%s %% removed from the original training set)", len(training_dataset), len(_training_dataset), 100 * (len(training_dataset) - len(_training_dataset)) / len(training_dataset))
+
+        training_dataset = _training_dataset
+
     random.shuffle(training_dataset)
+
+    return training_dataset
 
 def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
@@ -596,11 +637,11 @@ def main():
     #generate_new_samples_for_training_set_every_epochs = 1
     generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
     #initial_epochs_without_eval_nor_generation = 0
-    initial_epochs_without_eval_nor_generation = 200
+    initial_epochs_without_eval_nor_generation = 50
     #initial_epochs_without_eval_nor_generation = 1000 # TODO remove
-    #min_loss_start_training = -1.0 # negative is disabled
-    #min_loss_start_training = 0.001
-    min_loss_start_training = 0.01
+    min_loss_start_training = -1.0 # negative is disabled
+    min_loss_start_training = 0.001
+    #min_loss_start_training = 0.01
     min_loss_start_training = float(min_loss_start_training)
 
     if min_loss_start_training >= 0:
@@ -634,9 +675,12 @@ def main():
     #batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
     batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 512)))
     #learning_rate = 1e-5
-    learning_rate = 1e-4
+    #learning_rate = 1e-4
+    learning_rate = 1e-3
     n_jobs = num_envs # TODO fix
     epochs = 1000
+
+    logger.info("Batch size: %d, learning_rate: %s", batch_size, learning_rate)
 
     ## create environments
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples_training]
@@ -743,6 +787,7 @@ def main():
             k=k_training,
             device=device,
             icl_examples_prepend=current_icl_examples_prepend,
+            initial_rollout_idx=max([t["rollout_id"] for t in training_dataset]) + 1 if len(training_dataset) > 0 else 0,
         )
 
         training_dataset.extend(_training_dataset)
@@ -782,6 +827,11 @@ def main():
 
             if "icl_examples_prepend" in action_data:
                 assert action_data["icl_examples_prepend"] == icl_examples_prepend, f"Expected icl_examples_prepend to be the same for all transitions in the training dataset, but got both True and False"
+            else:
+                action_data["icl_examples_prepend"] = icl_examples_prepend
+
+            if "rollout_id" not in action_data:
+                action_data["rollout_id"] = action_idx // max_icl_examples
 
             assert icl_examples_prepend == current_icl_examples_prepend, f"Expected icl_examples_prepend in the training dataset to be the same as the current_icl_examples_prepend used for generating the rollouts, but got: {icl_examples_prepend} vs {current_icl_examples_prepend}"
 
@@ -809,7 +859,7 @@ def main():
 
     #training_dataset *= 20 # TODO remove. debug
 
-    update_training_dataset(
+    training_dataset = update_training_dataset(
         training_dataset,
         best_rewards,
         num_labels_reward,
@@ -824,20 +874,22 @@ def main():
     #for t in training_dataset: # TODO remove
     #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
 
+    warmup_steps = 5000
     optimizer, scheduler =\
-        utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", "inverse_sqrt", [0.9, 0.999, 1e-08, 0.01], ["400"], optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger)
+        utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", "inverse_sqrt", [0.9, 0.999, 1e-08, 0.01], [str(warmup_steps)], optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger)
 
     # training args
     current_patience = 0
     epoch = 0
     do_training = epoch < epochs or train_until_patience
-    loss_function = nn.MSELoss(reduction="none")
-    #loss_function = nn.MSELoss()
+    #loss_function = nn.MSELoss(reduction="none")
+    loss_function = nn.MSELoss(reduction="mean")
     log_steps = 100 # TODO argument
     sum_epoch_loss = np.inf
     early_stopping_best_loss = np.inf
     early_stopping_best_result_dev = -np.inf # higher is better
-    gradient_accumulation = 1
+    #gradient_accumulation = 1
+    gradient_accumulation = 8 # TODO remove
     debug = True
     early_stopping_metric_dev = early_stopping_best_result_dev
 
@@ -899,11 +951,12 @@ def main():
                     k=k_training,
                     device=device,
                     icl_examples_prepend=current_icl_examples_prepend,
+                    initial_rollout_idx=max([t["rollout_id"] for t in training_dataset]) + 1 if len(training_dataset) > 0 else 0,
                 )
 
                 training_dataset.extend(_training_dataset)
 
-                update_training_dataset(
+                training_dataset = update_training_dataset(
                     training_dataset,
                     best_rewards,
                     num_labels_reward,
@@ -919,8 +972,6 @@ def main():
 
         # Training loop
         model.zero_grad()
-        final_loss = None
-        loss_elements1 = 0
 
         for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size, sample=True, replacement=True), 1):
             icl_examples = [item["icl_example"] for item in batch]
@@ -963,36 +1014,14 @@ def main():
             assert model_output.shape == actions.shape, f"{model_output.shape} vs {actions.shape}"
 
             _loss = loss_function(model_output, actions)
-            loss_elements1 += _loss.numel()
+            loss = _loss / gradient_accumulation
 
-            assert len(_loss.shape) == 2, _loss.shape
+            loss.backward()
 
-            _loss = _loss.sum(dim=1) # sum the loss for each element in the batch
-
-            assert len(_loss.shape) == 1, _loss.shape
-            assert _loss.shape == (len(batch),), f"{_loss.shape} vs {(len(batch),)}"
-
-            assert len(_loss.shape) == 1, _loss.shape
-
-            if final_loss is None:
-                final_loss = torch.sum(_loss)
-                #final_loss = _loss
-            else:
-                final_loss += torch.sum(_loss)
-                #final_loss += _loss
+            epoch_loss.append(loss.cpu().detach().item())
 
             # loss
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
-                assert final_loss is not None
-
-                loss = final_loss / loss_elements1
-                #loss = final_loss
-                final_loss = None
-                loss_elements1 = 0
-
-                epoch_loss.append(loss.cpu().detach().item())
-
-                loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
                 if debug and batch_idx % 50 == 0:
