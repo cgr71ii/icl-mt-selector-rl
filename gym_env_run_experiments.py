@@ -389,8 +389,6 @@ if __name__ == "__main__":
 
     logger.info("Save path: %s", save_path)
 
-    eval_freq = max(1, eval_freq // num_envs)
-
     # Environment
     env_class = MTICLEnv
     env_eval_dev_class = MTICLEvalEnv
@@ -448,6 +446,8 @@ if __name__ == "__main__":
     logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
     logger.info("actor_mlp_l2_norm: %s", actor_mlp_l2_norm)
     logger.info("Actual batch_size for running the critic with the observations and the kNN elements: %d * min(%d, k) = %d", batch_size, add_all_knn_to_batch, batch_size * add_all_knn_to_batch)
+
+    eval_freq = max(1, eval_freq // num_envs)
 
     if num_envs > 1:
         logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment (%d // %d = %d init. training steps) instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)",
@@ -597,8 +597,10 @@ if __name__ == "__main__":
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        "critic_dropout": True,
-        "critic_dropout_p": dropout_droq_p, # DroQ paper
+        #"critic_dropout": True,
+        #"critic_dropout_p": dropout_droq_p, # DroQ paper
+        "critic_dropout": False, # TODO remove
+        "critic_dropout_p": 0.0, # DroQ paper # TODO remove
         #"critic_transformer": use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,

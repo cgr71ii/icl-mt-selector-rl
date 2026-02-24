@@ -175,21 +175,30 @@ def softmax(x):
         raise Exception(f"Unsupported type for softmax: {type(x)}. Expected torch.Tensor, np.ndarray, or list")
 
 def l2_normalize(emb, eps=1e-6):
-    assert isinstance(emb, np.ndarray), "Input must be a numpy array"
+    assert isinstance(emb, (np.ndarray, torch.Tensor)), "Input must be a numpy array or a PyTorch tensor"
 
-    norms = np.linalg.norm(emb, axis=-1, keepdims=True)
-    #norms[norms == 0.0] = 1.0
-    result = emb / (norms + eps)
+    if isinstance(emb, np.ndarray):
+        norms = np.linalg.norm(emb, axis=-1, keepdims=True)
+        result = emb / (norms + eps)
 
-    assert np.all((-1 <= result) & (result <= 1)), f"L2 normalization failed: {result}"
+        assert np.all((-1 <= result) & (result <= 1)), f"L2 normalization failed: {result}"
+    else:
+        norms = torch.norm(emb, dim=-1, keepdim=True)
+        result = emb / (norms + eps)
+
+        assert torch.all((-1 <= result) & (result <= 1)), f"L2 normalization failed: {result}"
 
     return result
 
 def check_l2_normalized(emb, tol=1e-1):
-    assert isinstance(emb, np.ndarray), "Input must be a numpy array"
+    assert isinstance(emb, (np.ndarray, torch.Tensor)), "Input must be a numpy array or a PyTorch tensor"
 
-    norms = np.linalg.norm(emb, axis=-1)
-    v = np.abs(norms - 1)
+    if isinstance(emb, np.ndarray):
+        norms = np.linalg.norm(emb, axis=-1)
+    else:
+        norms = torch.norm(emb, dim=-1)
+
+    v = np.abs(norms.cpu().numpy() - 1) if isinstance(norms, torch.Tensor) else np.abs(norms - 1)
 
     return np.all(v <= tol), np.sum(v).item()
 

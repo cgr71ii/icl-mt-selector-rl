@@ -47,6 +47,7 @@ def evaluate_policy_custom(
     reward_idx=None,
     logger=None,
     max_icl_examples=None,
+    l2_norm_model_output=False,
 ):
     # Code adapter from stable-baselines3/stable_baselines3/common/evaluation.py
 
@@ -114,6 +115,10 @@ def evaluate_policy_custom(
         #logger.debug("debug: %s: %s: %s)", observations.shape, torch.sum((observations.reshape(1, -1, 4) == 0).all(dim=2)), observations.reshape(1, -1, 4))
 
         actions = model(observations, reward_embedding_idxs=reward_embedding_idxs, step_embedding_idxs=[idx % max_icl_examples])
+
+        if l2_norm_model_output:
+            actions = utils.l2_normalize(actions)
+
         actions = actions.cpu().detach().numpy() if isinstance(actions, torch.Tensor) else actions
         new_observations, rewards, dones, infos = env.step(actions)
         current_rewards += rewards
@@ -203,7 +208,7 @@ def make_batches(training_dataset, batch_size, sample=False, replacement=False):
                 yield [training_dataset[i] for i in batch_indices]
 
 def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger,
-                      api_idx=None, model=None, k=1, device="cpu", icl_examples_prepend=True):
+                      api_idx=None, model=None, k=1, device="cpu", icl_examples_prepend=True, l2_norm_model_output=False):
     src_sentence, reference = data_entry.split('\t')
     rollout_states = []
     rollout_actions = []
@@ -228,6 +233,10 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
             observation = np.array(rollout_states[-1])
             observation = torch.from_numpy(observation).unsqueeze(0).to(device)
             proto_action = model(observation, reward_embedding_idxs=[num_labels_reward - 1], step_embedding_idxs=[idx_icl_example]).cpu().detach().numpy()
+
+            if l2_norm_model_output:
+                proto_action = utils.l2_normalize(proto_action)
+
             _icl_examples = env_training_dummy.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=True, debug=False)[0]
 
             assert len(_icl_examples) == 1, len(_icl_examples)
@@ -299,7 +308,7 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
         rollout_actions.append(action)
 
         translation = None if idx_icl_example < max_icl_examples - 1 else env_training_dummy.get_translations([src_sentence], icl_examples=[icl_examples], api_idx=api_idx)[0] # only get the translation for the last state, to save time
-        reward = env_training_dummy.get_reward(src_sentence, reference, translation=translation, icl_examples=icl_examples) # TODO something might not work as intended as it assumes that environment is being used...
+        reward = env_training_dummy.get_reward(src_sentence, reference, translation=translation) # TODO something might not work as intended as it assumes that environment is being used...
 
         rollout_rewards.append(reward) # r_t
 
@@ -349,7 +358,7 @@ def generate_rollouts(joblib_idx, data_entry, env_training_dummy, max_icl_exampl
     }
 
 def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, n_jobs, best_rewards,
-                         model=None, k=1, device="cpu", icl_examples_prepend=True, initial_rollout_idx=0):
+                         model=None, k=1, device="cpu", icl_examples_prepend=True, initial_rollout_idx=0, l2_norm_model_output=False):
     # TODO we assume reward in the range [0, 100]
     training_dataset = []
     seen_data = set()
@@ -364,7 +373,7 @@ def do_generate_rollouts(data_to_be_translated_training, dataset_rollouts_per_da
     for rollout_idx in range(dataset_rollouts_per_data_entry):
         # prefer="threads" is better in this case due to API calls and model usage that can raise exceptions when using multiprocessing, since these use cases release the GIL, and using threads allows to avoid some of these exceptions while still providing parallelism (not really need to use multiprocessing)
         with torch.no_grad():
-            result = joblib.Parallel(n_jobs=n_jobs, timeout=999999, prefer="threads")(joblib.delayed(generate_rollouts)(idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device, icl_examples_prepend=icl_examples_prepend) for idx, data_entry in enumerate(data_to_be_translated_training))
+            result = joblib.Parallel(n_jobs=n_jobs, timeout=999999, prefer="threads")(joblib.delayed(generate_rollouts)(idx, data_entry, env_training_dummy, max_icl_examples, data_icl_examples_training, num_labels_reward, logger, api_idx=idx, model=model, k=k, device=device, icl_examples_prepend=icl_examples_prepend, l2_norm_model_output=l2_norm_model_output) for idx, data_entry in enumerate(data_to_be_translated_training))
 
         assert len(result) == len(data_to_be_translated_training)
 
@@ -572,7 +581,7 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 1 # TODO remove
+    #max_data_entries = 2 # TODO remove
     #max_data_entries = 20 # TODO remove
     #max_data_icl_examples_entries = 8 # TODO remove
     max_data_entries_dev = max_data_entries
@@ -605,9 +614,13 @@ def main():
     k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
     current_icl_examples_prepend = parsed_kwargs["current_icl_examples_prepend"]
+    disable_l2_norm_in_model = parsed_kwargs.pop("disable_l2_norm_in_model", False)
 
     if knn_distance_ip:
         logger.warning("Using inner product as distance for kNN: using l2-normalization in the model and cosine similarity for kNN. The MSE loss will be computed on the l2-normalized representations")
+
+        if disable_l2_norm_in_model:
+            logger.info("Disabling L2 normalization in the model, but using L2 normalization during inference")
 
     logger.info("For each data entry, we generate %d training rollouts: %d entries * %d rollouts * %d ICL examples = %d total training size", dataset_rollouts_per_data_entry, len(data_to_be_translated_training), dataset_rollouts_per_data_entry, max_icl_examples, len(data_to_be_translated_training) * dataset_rollouts_per_data_entry * max_icl_examples)
     logger.info("k=%d", k_training)
@@ -631,7 +644,8 @@ def main():
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     training_dataset_path = parsed_kwargs.pop("training_dataset_path", None)
     #patience = 6 # early stopping patience (number of evals with no improvement)
-    patience = 100 # TODO remove
+    #patience = 100 # TODO remove
+    patience = -1 # disable early stopping # TODO remove?
     #eval_freq_epochs = 1
     eval_freq_epochs = 5  # TODO remove
     #generate_new_samples_for_training_set_every_epochs = 1
@@ -675,10 +689,10 @@ def main():
     #batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
     batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 512)))
     #learning_rate = 1e-5
-    #learning_rate = 1e-4
-    learning_rate = 1e-3
+    learning_rate = 1e-4
+    #learning_rate = 1e-3
     n_jobs = num_envs # TODO fix
-    epochs = 1000
+    epochs = 200
 
     logger.info("Batch size: %d, learning_rate: %s", batch_size, learning_rate)
 
@@ -705,6 +719,11 @@ def main():
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
     state_window_length = env_training_dummy.state_window_length
+    use_first_n_tokens = -1 # -1 means use all tokens
+
+    if use_first_n_tokens > 0:
+        logger.info("Using only the first %d tokens of the state representation as input to the model", use_first_n_tokens)
+
     model_kwargs = {
         #"d_model": 512,
         "d_model": 128,
@@ -728,7 +747,7 @@ def main():
         "norm_first": True,
         #"norm_first": False,
         #"l2_norm": False,
-        "l2_norm": True if knn_distance_ip else False,
+        "l2_norm": True if knn_distance_ip and not disable_l2_norm_in_model else False,
         "skip_n_word_embeddings_from_observation": "0:0",
         "str_id": "none",
         "expected_seq_len": None,
@@ -740,6 +759,7 @@ def main():
         "assert_embedding_idxs": True,
         "remove_first_column_of_zeros": True,
         "step_embeddings": max_icl_examples, # we can also use learnable step embeddings to represent the position in the trajectory
+        "use_first_n_tokens": use_first_n_tokens,
     }
     model = TransformerModel(**model_kwargs)
     model = model.to(device)
@@ -749,7 +769,7 @@ def main():
     for p in model.parameters():
         p.requires_grad_(True)
 
-    train_until_patience = True
+    train_until_patience = True if patience >= 0 else False
     model_parameters = list(filter(lambda d: d.requires_grad, [p for k, p in model.named_parameters()]))
     optimizer_args_params = [{"params": model_parameters, "lr": learning_rate}]
 
@@ -788,6 +808,7 @@ def main():
             device=device,
             icl_examples_prepend=current_icl_examples_prepend,
             initial_rollout_idx=max([t["rollout_id"] for t in training_dataset]) + 1 if len(training_dataset) > 0 else 0,
+            l2_norm_model_output=knn_distance_ip and disable_l2_norm_in_model,
         )
 
         training_dataset.extend(_training_dataset)
@@ -871,12 +892,30 @@ def main():
     training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
     # END generate training set
 
+    #gradient_accumulation = 1
+    gradient_accumulation = 64
+
+    logger.info("Gradient accumulation steps: max(min(gradient_accumulation=%d, ((len(training_dataset)=%d + batch_size=%d - 1) // batch_size)=%d), 1) = %d",
+                gradient_accumulation, len(training_dataset), batch_size, (len(training_dataset) + batch_size - 1) // batch_size,
+                max(min(gradient_accumulation, (len(training_dataset) + batch_size - 1) // batch_size), 1))
+
+    gradient_accumulation = max(min(gradient_accumulation, (len(training_dataset) + batch_size - 1) // batch_size), 1) # + batch_size - 1 to round up (-1 to avoid counting an extra step when len(training_dataset) is divisible by batch_size)
+    training_steps_per_epoch_lr_scheduler = len(training_dataset) // (batch_size * gradient_accumulation) + (0 if len(training_dataset) % (batch_size * gradient_accumulation) == 0 else 1)
+    training_steps_lr_scheduler = training_steps_per_epoch_lr_scheduler * epochs
+
     #for t in training_dataset: # TODO remove
     #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
 
-    warmup_steps = 5000
+    warmup_steps = 10 if patience >= 0 else "10%"
+    lr_scheduler_str = "inverse_sqrt" if patience >= 0 else "linear"
+    lr_scheduler_args = [str(warmup_steps)]
     optimizer, scheduler =\
-        utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", "inverse_sqrt", [0.9, 0.999, 1e-08, 0.01], [str(warmup_steps)], optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger)
+        utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", lr_scheduler_str, [0.9, 0.999, 1e-08, 0.01], lr_scheduler_args, optimizer_args_params, learning_rate, training_steps_lr_scheduler, training_steps_per_epoch_lr_scheduler, logger)
+
+    if train_until_patience:
+        logger.info("Training until patience is exhausted, with patience: %d", patience)
+    else:
+        logger.info("Training for a fixed number of epochs: %d", epochs)
 
     # training args
     current_patience = 0
@@ -888,23 +927,37 @@ def main():
     sum_epoch_loss = np.inf
     early_stopping_best_loss = np.inf
     early_stopping_best_result_dev = -np.inf # higher is better
-    #gradient_accumulation = 1
-    gradient_accumulation = 8 # TODO remove
     debug = True
     early_stopping_metric_dev = early_stopping_best_result_dev
+    force_eval_msg = False
 
     while do_training:
         epoch_loss = []
+        times_optimizer_step = 0
+        loss_accumulated_steps = 0
 
         # Eval and generate new samples
         epoch_number_fix_eval = epoch - initial_epochs_without_eval_nor_generation
+        force_eval = os.path.exists("./bypass_eval")
 
-        if (min_loss_start_training < 0.0 and epoch_number_fix_eval > 0) or (min_loss_start_training >= 0.0 and early_stopping_best_loss <= min_loss_start_training):
+        if force_eval_msg and not force_eval:
+            logger.warning("Force eval disabled due to the absence of the ./bypass_eval file")
+
+            force_eval_msg = False
+
+        if not force_eval_msg and force_eval:
+            logger.warning("Force eval enabled due to the presence of the ./bypass_eval file")
+
+            force_eval_msg = True
+
+        if force_eval or (min_loss_start_training < 0.0 and epoch_number_fix_eval > 0) or (min_loss_start_training >= 0.0 and early_stopping_best_loss <= min_loss_start_training):
             if eval_freq_epochs > 0 and epoch_number_fix_eval % eval_freq_epochs == 0:
                 # Eval dev set
 
                 with torch.no_grad():
-                    mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device, reward_idx=num_labels_reward - 1, logger=logger, max_icl_examples=max_icl_examples)
+                    mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device,
+                                                                     reward_idx=num_labels_reward - 1, logger=logger, max_icl_examples=max_icl_examples,
+                                                                     l2_norm_model_output=knn_distance_ip and disable_l2_norm_in_model)
 
                 early_stopping_metric_dev = mean_reward
 
@@ -952,6 +1005,7 @@ def main():
                     device=device,
                     icl_examples_prepend=current_icl_examples_prepend,
                     initial_rollout_idx=max([t["rollout_id"] for t in training_dataset]) + 1 if len(training_dataset) > 0 else 0,
+                    l2_norm_model_output=knn_distance_ip and disable_l2_norm_in_model,
                 )
 
                 training_dataset.extend(_training_dataset)
@@ -1015,6 +1069,7 @@ def main():
 
             _loss = loss_function(model_output, actions)
             loss = _loss / gradient_accumulation
+            loss_accumulated_steps += 1
 
             loss.backward()
 
@@ -1024,12 +1079,17 @@ def main():
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-                if debug and batch_idx % 50 == 0:
+                times_optimizer_step += 1
+
+                if debug and batch_idx % 1 == 0 or batch_idx == training_steps_per_epoch:
                     # Grad
                     _model_grad_sum = sum([p.grad.sum().item() for p in model.parameters() if p.grad is not None])
                     _model_projection_grad_sum = sum([p.grad.sum().item() for p in model.projection.parameters() if model.projection is not None and p.grad is not None])
 
                     logger.debug("Grad sum (model, projection): %s %s", _model_grad_sum, _model_projection_grad_sum)
+                    logger.debug("Optimizer steps: %s (* gradient_accumulation = * %s = %s); Accumulated loss steps: %d", times_optimizer_step, gradient_accumulation, times_optimizer_step * gradient_accumulation, loss_accumulated_steps)
+
+                loss_accumulated_steps = 0
 
                 optimizer.step()
                 scheduler.step()
@@ -1065,6 +1125,13 @@ def main():
 
         epoch += 1
         do_training = epoch < epochs or train_until_patience
+
+    with torch.no_grad():
+        mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device,
+                                                         reward_idx=num_labels_reward - 1, logger=logger, max_icl_examples=max_icl_examples,
+                                                         l2_norm_model_output=knn_distance_ip and disable_l2_norm_in_model)
+
+        logger.info("Final dev eval: %s +- %s", mean_reward, std_reward)
 
 if __name__ == "__main__":
     main()
