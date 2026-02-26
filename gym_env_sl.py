@@ -1015,6 +1015,7 @@ def main():
     while do_training:
         epoch_loss = []
         epoch_cos_similarity = []
+        epoch_cos_similarity_per_label = {label: [] for label in range(num_labels_reward)}
         times_optimizer_step = 0
         loss_accumulated_steps = 0
 
@@ -1165,6 +1166,13 @@ def main():
                 cos_similarity = torch.nn.functional.cosine_similarity(model_output, actions, dim=1).cpu().detach().tolist()
                 epoch_cos_similarity.extend(cos_similarity)
 
+                assert len(cos_similarity) == len(reward_labels)
+
+                for label, cos_similarity_value in zip(reward_labels, cos_similarity):
+                    assert label in epoch_cos_similarity_per_label, label
+
+                    epoch_cos_similarity_per_label[label].append(cos_similarity_value)
+
             # loss
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1209,6 +1217,7 @@ def main():
         # CosineEmbeddingLoss: cos=1-loss, and range is [-1, 1], where -1 is opposite, and 1 is perfect alignment
         logger.info("Epoch loss (mean): %s%s", mean_epoch_loss, f" (cos = 1 - loss = {1.0 - mean_epoch_loss} )" if knn_distance_ip else '')
         logger.info("Epoch cosine similarity (mean): %s", np.mean(epoch_cos_similarity) if len(epoch_cos_similarity) > 0 else None)
+        logger.info("Epoch cosine similarity (mean per label): %s", {label: np.mean(epoch_cos_similarity_per_label[label]) if len(epoch_cos_similarity_per_label[label]) > 0 else None for label in range(num_labels_reward)})
 
         assert str(sum_epoch_loss) != "nan", "Some values in the input data are NaN"
         assert str(mean_epoch_loss) != "nan", "Some values in the input data are NaN"
