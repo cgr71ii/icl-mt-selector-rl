@@ -467,6 +467,7 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
     translation2reward_label2rollout_id_and_return = {}
     rollout_id2remove = set()
+    categories_count = {label: 0 for label in range(num_labels_reward)}
 
     for idx in range(len(training_dataset)):
         _training_dataset = training_dataset[idx]
@@ -504,6 +505,8 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
             else:
                 rollout_id2remove.add(rollout_id)
 
+        categories_count[reward_label] += 1
+
         #logger.error("debug (label: %s): %s\n%s\n%s\n%s\n%s\n%s\n%s",
         #             _training_dataset["reward_label"],
         #             _training_dataset["src_sentence"],
@@ -514,6 +517,12 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
         #             _training_dataset["action"],
         #             torch.sum(torch.from_numpy(_training_dataset["action"]), dim=0)
         #            )
+
+    logger.info("Categories count: %s", categories_count)
+
+    for k, v in categories_count.items():
+        if v == 0:
+            logger.warning("Category %s has 0 samples", k)
 
     if len(rollout_id2remove) > 0:
         # Remove transitions from the training dataset that correspond to rollouts that have a different rollout with the same translation and reward label
@@ -551,6 +560,10 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
     random.shuffle(training_dataset)
 
     logger.info("New categories count: %s", new_categories_count)
+
+    for k, v in new_categories_count.items():
+        if v == 0:
+            logger.warning("New category %s has 0 samples", k)
 
     return training_dataset
 
@@ -879,14 +892,23 @@ def main():
         }
 
         assert len(training_dataset) % max_icl_examples == 0, f"Expected training dataset size to be a multiple of max_icl_examples: {max_icl_examples}, but got: {len(training_dataset)}"
+        assert max_data_icl_examples_entries < 0, f"Expected max_data_icl_examples_entries to be negative (no limit) when loading the training dataset, but got: {max_data_icl_examples_entries}"
 
         icl_examples_prepend = None
+        seen_data_entries = set()
+        remove_idxs = set()
 
         for action_idx, action_data in enumerate(training_dataset):
             src_sentence = action_data["src_sentence"]
             reference = action_data["reference"]
             data_entry = f"{src_sentence}\t{reference}"
             step = action_data["step"]
+
+            if max_data_entries > 0 and len(seen_data_entries) >= max_data_entries and data_entry not in seen_data_entries:
+                remove_idxs.add(action_idx)
+                continue
+
+            seen_data_entries.add(data_entry)
 
             if icl_examples_prepend is None:
                 if "icl_examples_prepend" in action_data:
@@ -922,6 +944,9 @@ def main():
                     "icl_examples": [],
                 }
 
+        if len(remove_idxs) > 0:
+            training_dataset = [d for idx, d in enumerate(training_dataset) if idx not in remove_idxs]
+
         assert len(trajectory["rollout_states"]) == 0, f"Expected trajectory to be empty after processing the training dataset, but got: {len(trajectory['rollout_states'])}"
 
         logger.info("Iteration -: Best rewards observed (mean for %d entries): %s", len(best_rewards), sum(best_rewards.values()) / len(best_rewards) if len(best_rewards) > 0 else -1)
@@ -951,9 +976,9 @@ def main():
     training_steps_per_epoch_lr_scheduler = len(training_dataset) // (batch_size * gradient_accumulation) + (0 if len(training_dataset) % (batch_size * gradient_accumulation) == 0 else 1)
     training_steps_lr_scheduler = training_steps_per_epoch_lr_scheduler * epochs
 
-    if training_steps_per_epoch_lr_scheduler > 0:
+    if generate_new_samples_for_training_set_every_epochs > 0:
         # TODO fix
-        logger.warning("LR scheduler will be desynced with the training steps due to the growth of the training set (training_steps_per_epoch_lr_scheduler: %d) if generate_new_samples_for_training_set_every_epochs > 0: %d", training_steps_per_epoch_lr_scheduler, generate_new_samples_for_training_set_every_epochs)
+        logger.warning("LR scheduler will be desynced with the training steps due to the growth of the training set (training_steps_per_epoch_lr_scheduler=%d) if generate_new_samples_for_training_set_every_epochs=%d > 0", training_steps_per_epoch_lr_scheduler, generate_new_samples_for_training_set_every_epochs)
 
     #for t in training_dataset: # TODO remove
     #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
@@ -989,6 +1014,7 @@ def main():
 
     while do_training:
         epoch_loss = []
+        epoch_cos_similarity = []
         times_optimizer_step = 0
         loss_accumulated_steps = 0
 
@@ -1135,6 +1161,10 @@ def main():
 
             epoch_loss.append(loss.cpu().detach().item() * gradient_accumulation) # we multiply by gradient_accumulation to log the actual loss value before the division for gradient accumulation
 
+            with torch.no_grad():
+                cos_similarity = torch.nn.functional.cosine_similarity(model_output, actions, dim=1).cpu().detach().tolist()
+                epoch_cos_similarity.extend(cos_similarity)
+
             # loss
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1177,7 +1207,8 @@ def main():
         logger.info("Epoch loss: %s", sum_epoch_loss)
         # CosineEmbeddingLoss: mean loss range is [0, 2], without negative pairs
         # CosineEmbeddingLoss: cos=1-loss, and range is [-1, 1], where -1 is opposite, and 1 is perfect alignment
-        logger.info("Epoch loss (mean): %s%s", mean_epoch_loss, f" (cos=1-loss={1.0 - mean_epoch_loss})" if knn_distance_ip else '')
+        logger.info("Epoch loss (mean): %s%s", mean_epoch_loss, f" (cos = 1 - loss = {1.0 - mean_epoch_loss} )" if knn_distance_ip else '')
+        logger.info("Epoch cosine similarity (mean): %s", np.mean(epoch_cos_similarity) if len(epoch_cos_similarity) > 0 else None)
 
         assert str(sum_epoch_loss) != "nan", "Some values in the input data are NaN"
         assert str(mean_epoch_loss) != "nan", "Some values in the input data are NaN"
