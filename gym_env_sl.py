@@ -97,6 +97,8 @@ def evaluate_policy_custom(
     episode_starts = np.ones((env.num_envs,), dtype=bool)
     idx = 0
 
+    assert observations.shape[-1] == env_state_dim, f"Expected observation shape: (*, {env_state_dim}), but got: {observations.shape}"
+
     while (episode_counts < episode_count_targets).any():
         assert len(observations.shape) == 2, observations.shape
         #assert observations.shape[1] == 1024 + 1024 # TODO fix
@@ -186,7 +188,7 @@ def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False
 
     return _init
 
-def make_batches(training_dataset, batch_size, sample=False, replacement=False):
+def make_batches(training_dataset, batch_size, sample=False, replacement=False, replacement_assert_mod_n=None):
     assert batch_size > 0, f"Invalid batch size: {batch_size}"
     assert isinstance(training_dataset, list), f"Expected training_dataset to be a list, but got {type(training_dataset)}"
 
@@ -194,12 +196,27 @@ def make_batches(training_dataset, batch_size, sample=False, replacement=False):
         for i in range(0, len(training_dataset), batch_size):
             yield training_dataset[i:i + batch_size]
     else:
-        indices = list(range(len(training_dataset)))
-
         if replacement:
-            for _ in range(0, len(training_dataset), batch_size):
+            if replacement_assert_mod_n is not None:
+                assert isinstance(replacement_assert_mod_n, int), type(replacement_assert_mod_n)
+                assert replacement_assert_mod_n > 0
+
+            n = len(training_dataset)
+            extra_n = 0
+            len_l = len(range(0, n, batch_size))
+
+            while (len_l % replacement_assert_mod_n) != 0:
+                n += batch_size
+                extra_n += 1
+                new_len_l = len(range(0, n, batch_size))
+
+                assert len_l + extra_n == new_len_l, f"Expected new_len_l to be equal to len_l + extra_n, but got: {len_l} + {extra_n} vs {new_len_l}"
+
+            for _ in range(0, n, batch_size):
                 yield random.choices(training_dataset, k=batch_size)
         else:
+            indices = list(range(len(training_dataset)))
+
             random.shuffle(indices)
 
             for i in range(0, len(training_dataset), batch_size):
@@ -506,7 +523,34 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
         training_dataset = _training_dataset
 
+    translation2reward_label2rollout_id_and_return = {}
+    new_categories_count = {label: 0 for label in range(num_labels_reward)}
+
+    for idx in range(len(training_dataset)):
+        _training_dataset = training_dataset[idx]
+
+        assert isinstance(_training_dataset["reward_label"], int), type(_training_dataset["reward_label"])
+
+        translation = f"{_training_dataset['src_sentence']}\t{_training_dataset['reference']}"
+        reward_label = _training_dataset["reward_label"]
+        rollout_id = _training_dataset["rollout_id"]
+        return_value = _training_dataset["return_value"]
+
+        if translation not in translation2reward_label2rollout_id_and_return:
+            translation2reward_label2rollout_id_and_return[translation] = {}
+
+        if reward_label not in translation2reward_label2rollout_id_and_return[translation]:
+            translation2reward_label2rollout_id_and_return[translation][reward_label] = (rollout_id, return_value)
+
+        new_categories_count[reward_label] += 1
+
+        _rollout_id, _return_value = translation2reward_label2rollout_id_and_return[translation][reward_label]
+
+        assert rollout_id == _rollout_id
+
     random.shuffle(training_dataset)
+
+    logger.info("New categories count: %s", new_categories_count)
 
     return training_dataset
 
@@ -727,10 +771,13 @@ def main():
     model_kwargs = {
         #"d_model": 512,
         "d_model": 128,
+        #"d_model": 256,
         "nhead": 4,
         #"dim_feedforward": 2048,
         "dim_feedforward": 512,
+        #"dim_feedforward": 1024,
         "nlayers": 3,
+        #"nlayers": 6,
         "projection_in": state_dim_per_token,
         "projection_out": action_dim,
         "max_seq_len": 8192,
@@ -741,6 +788,7 @@ def main():
         "initial_layer_norm": True, # needed for stable training
         #"initial_layer_norm_first": False,
         "initial_layer_norm_first": True,
+        "initial_layer_norm_first_additional_layer_norm_after_projection": True, # needed to have std close to 1.0
         #"activation": "relu",
         "activation": "gelu",
         "bias": True,
@@ -892,8 +940,8 @@ def main():
     training_steps = training_steps_per_epoch * epochs # BE AWARE! "epochs" might be fake due to patience
     # END generate training set
 
-    #gradient_accumulation = 1
-    gradient_accumulation = 64
+    gradient_accumulation = 1
+    #gradient_accumulation = 64
 
     logger.info("Gradient accumulation steps: max(min(gradient_accumulation=%d, ((len(training_dataset)=%d + batch_size=%d - 1) // batch_size)=%d), 1) = %d",
                 gradient_accumulation, len(training_dataset), batch_size, (len(training_dataset) + batch_size - 1) // batch_size,
@@ -902,6 +950,10 @@ def main():
     gradient_accumulation = max(min(gradient_accumulation, (len(training_dataset) + batch_size - 1) // batch_size), 1) # + batch_size - 1 to round up (-1 to avoid counting an extra step when len(training_dataset) is divisible by batch_size)
     training_steps_per_epoch_lr_scheduler = len(training_dataset) // (batch_size * gradient_accumulation) + (0 if len(training_dataset) % (batch_size * gradient_accumulation) == 0 else 1)
     training_steps_lr_scheduler = training_steps_per_epoch_lr_scheduler * epochs
+
+    if training_steps_per_epoch_lr_scheduler > 0:
+        # TODO fix
+        logger.warning("LR scheduler will be desynced with the training steps due to the growth of the training set (training_steps_per_epoch_lr_scheduler: %d) if generate_new_samples_for_training_set_every_epochs > 0: %d", training_steps_per_epoch_lr_scheduler, generate_new_samples_for_training_set_every_epochs)
 
     #for t in training_dataset: # TODO remove
     #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
@@ -922,14 +974,18 @@ def main():
     epoch = 0
     do_training = epoch < epochs or train_until_patience
     #loss_function = nn.MSELoss(reduction="none")
-    loss_function = nn.MSELoss(reduction="mean")
+    #loss_function = nn.MSELoss(reduction="mean")
+    loss_function = nn.CosineEmbeddingLoss(reduction="mean") if knn_distance_ip else nn.MSELoss(reduction="mean")
     log_steps = 100 # TODO argument
     sum_epoch_loss = np.inf
+    mean_epoch_loss = np.inf
     early_stopping_best_loss = np.inf
     early_stopping_best_result_dev = -np.inf # higher is better
     debug = True
     early_stopping_metric_dev = early_stopping_best_result_dev
     force_eval_msg = False
+
+    logger.info("Loss function: %s", loss_function)
 
     while do_training:
         epoch_loss = []
@@ -1027,7 +1083,7 @@ def main():
         # Training loop
         model.zero_grad()
 
-        for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size, sample=True, replacement=True), 1):
+        for batch_idx, batch in enumerate(make_batches(training_dataset, batch_size, sample=True, replacement=True, replacement_assert_mod_n=gradient_accumulation), 1):
             icl_examples = [item["icl_example"] for item in batch]
             reward_labels = [item["reward_label"] for item in batch]
             states = [item["state"] for item in batch]
@@ -1067,21 +1123,26 @@ def main():
             assert model_output.shape[1] == action_dim, model_output.shape
             assert model_output.shape == actions.shape, f"{model_output.shape} vs {actions.shape}"
 
-            _loss = loss_function(model_output, actions)
+            if knn_distance_ip:
+                _loss = loss_function(model_output, actions, torch.ones(actions.shape[0]).to(device))
+            else:
+                _loss = loss_function(model_output, actions)
+
             loss = _loss / gradient_accumulation
             loss_accumulated_steps += 1
 
             loss.backward()
 
-            epoch_loss.append(loss.cpu().detach().item())
+            epoch_loss.append(loss.cpu().detach().item() * gradient_accumulation) # we multiply by gradient_accumulation to log the actual loss value before the division for gradient accumulation
 
             # loss
             if batch_idx % gradient_accumulation == 0 or batch_idx == training_steps_per_epoch:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
                 times_optimizer_step += 1
+                show_statistics = debug and batch_idx % 100 == 0 or batch_idx == training_steps_per_epoch
 
-                if debug and batch_idx % 1 == 0 or batch_idx == training_steps_per_epoch:
+                if show_statistics:
                     # Grad
                     _model_grad_sum = sum([p.grad.sum().item() for p in model.parameters() if p.grad is not None])
                     _model_projection_grad_sum = sum([p.grad.sum().item() for p in model.projection.parameters() if model.projection is not None and p.grad is not None])
@@ -1096,6 +1157,9 @@ def main():
 
                 model.zero_grad()
 
+                if show_statistics:
+                    logger.debug("Current learning rate: %s", optimizer.param_groups[0]["lr"])
+
             if (batch_idx % (log_steps * gradient_accumulation)) == 0:
                 sum_partial_loss = sum(epoch_loss[-1 * log_steps:]) # no: -1 * log_steps * gradient_accumulation!
                 sum_loss = sum(epoch_loss)
@@ -1108,17 +1172,23 @@ def main():
         assert batch_idx == training_steps_per_epoch, f"{batch_idx} vs {training_steps_per_epoch}"
 
         sum_epoch_loss = sum(epoch_loss)
+        mean_epoch_loss = np.mean(epoch_loss)
 
         logger.info("Epoch loss: %s", sum_epoch_loss)
+        # CosineEmbeddingLoss: mean loss range is [0, 2], without negative pairs
+        # CosineEmbeddingLoss: cos=1-loss, and range is [-1, 1], where -1 is opposite, and 1 is perfect alignment
+        logger.info("Epoch loss (mean): %s%s", mean_epoch_loss, f" (cos=1-loss={1.0 - mean_epoch_loss})" if knn_distance_ip else '')
 
         assert str(sum_epoch_loss) != "nan", "Some values in the input data are NaN"
+        assert str(mean_epoch_loss) != "nan", "Some values in the input data are NaN"
 
-        if sum_epoch_loss < early_stopping_best_loss:
-            logger.info("Better loss result: %s -> %s", early_stopping_best_loss, sum_epoch_loss)
+        if mean_epoch_loss < early_stopping_best_loss:
+            # we use the mean instead of the sum to avoid problems with the growth of the training set
+            logger.info("Better loss result: %s -> %s", early_stopping_best_loss, mean_epoch_loss)
 
-            early_stopping_best_loss = sum_epoch_loss
+            early_stopping_best_loss = mean_epoch_loss
         else:
-            logger.info("No improvement in loss (best: %s): %s", early_stopping_best_loss, sum_epoch_loss)
+            logger.info("No improvement in loss (best: %s): %s", early_stopping_best_loss, mean_epoch_loss)
 
         sys.stdout.flush()
         sys.stderr.flush()
