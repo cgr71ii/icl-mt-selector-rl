@@ -480,8 +480,8 @@ class MTICLEnv(gym.Env):
 
         #self.rewards.append(reward)
         self.logger_wrapper(gym.logger.info,
-                            "Action in time step #%d (reward: %s; distance: %s; max_icl_examples: %s; translation_candidate: %s): %s",
-                            self.time_step, reward, action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)
+                            "Action in time step #%d (reward: %s; %s: %s; max_icl_examples: %s; translation_candidate: %s): %s",
+                            self.time_step, reward, "similarity" if self.knn_distance_ip else "distance", action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...

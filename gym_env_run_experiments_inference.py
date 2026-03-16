@@ -12,9 +12,10 @@ import gymnasium as gym
 from stable_baselines3 import DDPG, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NFeaturesExtractor, TransformerExtractor
+import torch
 
-if __name__ == "__main__":
+def main():
     # Evaluate
     best_model_path = sys.argv[1]
     src_lang = sys.argv[2]
@@ -41,15 +42,16 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # parse args
-    max_data_entries = parsed_kwargs.get("max_data_entries", -1) # load all data (default value)
-    max_data_icl_examples_entries = parsed_kwargs.get("max_data_icl_examples_entries", -1) # load all data (default value)
+    max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
+    max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
     #max_data_icl_examples_entries = 100 # TODO remove
+    device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
-    parsed_kwargs["max_icl_examples"] = parsed_kwargs.get("max_icl_examples", 5)
+    parsed_kwargs["max_icl_examples"] = int(parsed_kwargs.get("max_icl_examples", 5))
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
-    parsed_kwargs["device"] = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
+    parsed_kwargs["device"] = device
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "api-eval")
     parsed_kwargs["knn_api_retrieve"] = parsed_kwargs.get("knn_api_retrieve", None)
@@ -57,9 +59,12 @@ if __name__ == "__main__":
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
-    parsed_kwargs["state_window_length"] = parsed_kwargs.get("state_window_length", 1024 + 1)
+    parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 3
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
+    parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False)
+    parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
+    knn_distance_ip = parsed_kwargs["knn_distance_ip"]
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
@@ -87,6 +92,10 @@ if __name__ == "__main__":
     pre_k = parsed_kwargs.pop("k", "0.05")
     pre_k_is_float = '.' in pre_k
     k = max(1, int(float(pre_k) * len(_data_icl_examples)) if pre_k_is_float else int(pre_k))
+    actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
+    add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
+    wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
+    critic_dropout_p = 0.01
 
     logger.info("Seed: %s", seed)
     logger.info("k=%d", k)
@@ -99,7 +108,7 @@ if __name__ == "__main__":
     env_eval_dev_class = MTICLEvalEnv
     env_eval_dev = Monitor(env_eval_dev_class(*list(env_args), custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=None, override_existing=True)
 
-    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={"shuffle_all_data": False})
+    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={})
 
     action_dim = env_eval_dev.action_dim
     state_dim_per_token = env_eval_dev.state_dim_per_token
@@ -107,10 +116,6 @@ if __name__ == "__main__":
     skip_we = action_dim // state_dim_per_token
     #retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
-    net_arch = {
-        "pi": [256, 256],
-        "qf": [512, 256]
-    }
     #actor_transformer_args_and_kwargs = {
     #    "d_model": 512,
     #    "nhead": 4,
@@ -133,6 +138,7 @@ if __name__ == "__main__":
     #actor_use_transformer = True
     #critic_use_transformer = True
     policy_actor_kwargs = {
+        "squash_output": not actor_mlp_l2_norm, # actor l2-norm
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
         "actor_lr_schedule": lambda foo: 100.0, # dummy callable
         "actor_layer_norm_input": True,
@@ -142,7 +148,7 @@ if __name__ == "__main__":
         #"actor_dropout_p": 0.1,
         #"actor_transformer": actor_use_transformer,
         #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
-        "actor_mlp_l2_norm": True,
+        "actor_mlp_l2_norm": actor_mlp_l2_norm,
     }
     policy_critic_kwargs = {
         #"critic_lr_schedule": lambda foo: critic_learning_rate, # callable
@@ -150,56 +156,88 @@ if __name__ == "__main__":
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        #"critic_dropout": True,
-        #"critic_dropout_p": 0.1,
+        "critic_dropout": True,
+        "critic_dropout_p": critic_dropout_p, # DroQ paper
         #"critic_transformer": critic_use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if critic_use_transformer else False,
     }
     use_transformer = True
-    dropout_p = 0.1
+    n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
+    transformer_d_model = 128
 
     if not use_transformer:
-        features_extractor_class = FlattenExtractor
-        #features_extractor_class = NoFlattenExtractor
-        features_extractor_kwargs_actor = {}
-        features_extractor_kwargs_critic = {}
+        net_arch = {
+            "pi": [512, 512],
+            "qf": [512, 256, 128]
+        } # "pi" is actor and "qf" the critic (ignored if transformer is used)
+
+        logger.info("Transformer disabled: using MLP: %s", net_arch)
+
+        if n_features <= 0:
+            features_extractor_class = FlattenExtractor
+            #features_extractor_class = NoFlattenExtractor
+            features_extractor_kwargs_actor = {}
+            features_extractor_kwargs_critic = {}
+        else:
+            features_extractor_class = NFeaturesExtractor
+            features_extractor_kwargs_actor = {
+                "n": n_features,
+                "skip_n": action_dim,
+            }
+            features_extractor_kwargs_critic = dict(features_extractor_kwargs_actor)
     else:
+        net_arch = {
+            "pi": [512, 512],
+            "qf": [128]
+        } # "pi" is actor and "qf" the critic (ignored if transformer is used)
+
+        logger.info("Transformer enabled: using transformer+MLP: ... + %s", net_arch)
+
         # the feature extractor only processes the state (not the action for the critic)
         features_extractor_class = TransformerExtractor
         transformer_common_kwargs = {
-            "d_model": 512,
+            "d_model": transformer_d_model,
             "nhead": 4,
-            "dim_feedforward": 2048,
-            "nlayers": 3,
+            "dim_feedforward": transformer_d_model * 4,
+            "nlayers": 2,
             "projection_in": state_dim_per_token,
             #"projection_out": action_dim,
             #"projection_out": 256,
             "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
-            "activation": "relu",
+            "activation": "gelu",
             "bias": True,
             "norm_first": True,
             "initial_layer_norm": True,
-            "initial_layer_norm_first": False,
-            "embedding_dropout": 0.0, # it can increse the variance in the training
-            "dropout_p": dropout_p, # we can disable dropout setting to 0.0 if needed
-            "projection_out_dropout_p": 0.0,
+            "initial_layer_norm_first": True,
+            "embedding_dropout": critic_dropout_p, # it can increse the variance in the training
+            "dropout_p": critic_dropout_p, # we can disable dropout setting to 0.0 if needed
+            "projection_out_dropout_p": critic_dropout_p,
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
-            "l2_norm": False, # disable to let the model learn how the representation should be
+            #"l2_norm": False, # disable to let the model learn how the representation should be
             "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
             #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
             "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
             #"expected_seq_len": None, # TODO remove
+            "last_layer_norm": False,
+            "last_linear_layer": True,
+            "remove_first_column_of_zeros": True,
         }
         features_extractor_kwargs_actor = {
             "str_id": "actor",
+            "l2_norm": True if knn_distance_ip else False,
+            "mean_pooling": True,
             **transformer_common_kwargs
         }
         features_extractor_kwargs_critic = {
             "str_id": "critic",
+            "l2_norm": False,
+            "mean_pooling": False,
             **transformer_common_kwargs
         }
 
+    critic_action_linear_layer_projection = 512
+    critic_features_linear_layer_projection = 512
     model_class = TD3
     model = model_class.load(
         best_model_path,
@@ -211,16 +249,23 @@ if __name__ == "__main__":
             "callback_retrieve_knn_training": None,
             "k": k,
             #"add_all_knn_to_batch": True, # Faster
-            "add_all_knn_to_batch": 1,
+            "add_all_knn_to_batch": add_all_knn_to_batch,
             "apply_rws_inference": False,
+            "share_features_extractor": False,
             **policy_actor_kwargs,
             **policy_critic_kwargs,
-            #"squash_output": True,
-            "squash_output": False,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs_actor": features_extractor_kwargs_actor,
             "features_extractor_kwargs_critic": features_extractor_kwargs_critic,
+            "wolpertinger_disable_actor": wolpertinger_disable_actor,
+            "critic_action_layer_norm_input": True,
+            "critic_features_layer_norm_input": True,
+            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
+            "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
+            "activation_fn": torch.nn.GELU,
         },
+        device=device,
     )
 
     ## dev: evaluate and report result
@@ -234,3 +279,6 @@ if __name__ == "__main__":
     std_length = np.std(episode_lengths)
 
     print(f"Mean reward dev: {mean_reward} +/- {std_reward} (length: {mean_length} +/- {std_length})")
+
+if __name__ == "__main__":
+    main()

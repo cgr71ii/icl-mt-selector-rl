@@ -171,16 +171,29 @@ class VectorFromPoolActionNoise(ActionNoise):
         return f"VectorFromPoolActionNoise(len(pool)={len(self.pool)})"
 
 class DelayedEvalCallback(sb3_cb.EvalCallback):
-    def __init__(self, *args, learning_starts=0, **kwargs):
+    def __init__(self, *args, learning_starts=0, disable_eval=False, custom_callback_on_eval=None, custom_logger=None, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.learning_starts = learning_starts
+        self.disable_eval = disable_eval
+        self.custom_callback_on_eval = custom_callback_on_eval
+        self.custom_logger = custom_logger
 
     def _on_step(self) -> bool:
         # Only start evaluating after learning_starts
         if self.num_timesteps < self.learning_starts:
             self.n_calls = 0 # so it starts from this point when this conditions does not hold
 
+            return True
+
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            if self.custom_logger:
+                self.custom_logger.debug("Eval callback: evaluating at step %d (num_timesteps: %d)", self.n_calls, self.num_timesteps)
+
+            if self.custom_callback_on_eval is not None:
+                self.custom_callback_on_eval(self.n_calls, self.eval_freq)
+
+        if self.disable_eval:
             return True
 
         return super()._on_step()
@@ -229,7 +242,22 @@ def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False
 
     return _init
 
-if __name__ == "__main__":
+def store_model(save_path, name_prefix, name, model, logger):
+    # Store (adapted from CheckpointCallback)
+    model_path = f"{name_prefix}_{name}_model.zip"
+    _model_path = os.path.join(save_path, model_path)
+
+    logger.info("Storing model: %s", _model_path)
+
+    model.save(_model_path)
+    #model.save_replay_buffer(os.path.join(save_path, f"{name_prefix}_{name}_replay-buffer.pkl")) # too much disk...
+
+    if model.get_vec_normalize_env() is not None:
+        model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_{name}_vecnormalize.pkl"))
+
+    return _model_path
+
+def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
 
     logger.info("Provided args: %s", sys.argv)
@@ -266,7 +294,7 @@ if __name__ == "__main__":
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
-    num_envs = max(1, parsed_kwargs.pop("num_envs", 8))
+    num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
@@ -274,6 +302,14 @@ if __name__ == "__main__":
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
     update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
+    disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
+    store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
+
+    if disable_eval:
+        logger.warning("Evaluation disabled")
+
+    if store_model_on_eval:
+        logger.info("Model will be stored on each evaluation")
 
     if wolpertinger_disable_actor and pre_k != "1.0":
         logger.warning("wolpertinger_disable_actor is set to True, and k should be set to 1.0 (instead of %s)", pre_k)
@@ -325,12 +361,14 @@ if __name__ == "__main__":
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
+    parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples_training = data_icl_examples_training[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
+    knn_distance_ip = parsed_kwargs["knn_distance_ip"]
 
     # Some values
     pre_k_is_float = '.' in pre_k
@@ -367,7 +405,7 @@ if __name__ == "__main__":
     #eval_freq = 2000 # steps
     #eval_freq = 5000 # steps
     eval_freq = 10000 # steps
-    #eval_freq = 50 # TODO remove
+    #eval_freq = 20 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -399,18 +437,10 @@ if __name__ == "__main__":
     #batch_size = 256
     batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 256)))
     #batch_size = 16 # TODO remove
-    net_arch = {
-        #"pi": [256, 256],
-        "pi": [512, 512],
-        #"qf": [512, 256]
-        #"qf": [512, 512]
-        #"qf": [1024, 512]
-        #"qf": [400, 300]
-        "qf": [512, 256, 128]
-    } # "pi" is actor and "qf" the critic (ignored if transformer is used)
     gamma = 1.0
     #gamma = 0.99
-    replay_buffer_size = 1000000
+    #replay_buffer_size = 1000000
+    replay_buffer_size = 50000 # given 5 ICL examples and training set of 1000 sentences, this allows to store all transitions of 10 epochs (1000 * 5 * 10 = 50000)
     #replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
@@ -428,14 +458,15 @@ if __name__ == "__main__":
 #    max_steps_training = 10000 # steps while training
     #max_steps_training = 20000 # steps while training
     #max_steps_training = 50000 # steps while training
-    max_steps_training = 100000 # steps while training
+    #max_steps_training = 100000 # steps while training
+    max_steps_training = 10000000 # steps while training # TODO remove?
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     #init_training_steps = 5000
     init_training_steps = 10000
 #    init_training_steps = 1000
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
-    #init_training_steps = 5 # TODO remove
+    #init_training_steps = 10 # TODO remove
     #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
@@ -521,15 +552,9 @@ if __name__ == "__main__":
     #}
     use_transformer = True
     #dropout_p = 0.1 # TODO enable?
-    dropout_p = 0.0
-    dropout_droq_p = 0.01
+    #dropout_p = 0.0
     #critic_dropout_p = 0.1
-    critic_dropout_p = 0.0
-    #warmup_steps = 200
-    #warmup_steps = 1000
-    #warmup_steps = 2000
-    warmup_steps = 5000
-    #warmup_steps = 10 # TODO remove
+    critic_dropout_p = 0.01 # DroQ paper if value greater than 0
     exploration_rate_steps_percentage = 0.5
     exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
     exploration_rate_initial = 1.0
@@ -549,6 +574,9 @@ if __name__ == "__main__":
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
     use_transformer = False # TODO remove?
 
+    if use_transformer and not wolpertinger_disable_actor:
+        assert not share_features_extractor, "share_features_extractor is not supported when using transformers (different configuration for actor and critic)"
+
     if wolpertinger_disable_actor and share_features_extractor:
         share_features_extractor = False
 
@@ -559,17 +587,46 @@ if __name__ == "__main__":
 
     min_actor_learning_rate = actor_learning_rate / 10
     min_critic_learning_rate = critic_learning_rate / 10
+    transformer_d_model = 128
 
     if not use_transformer:
-        logger.info("Transformer disabled: using MLP")
+        net_arch = {
+            #"pi": [256, 256],
+            "pi": [512, 512],
+            #"qf": [512, 256]
+            #"qf": [512, 512]
+            #"qf": [1024, 512]
+            #"qf": [400, 300]
+            "qf": [512, 256, 128]
+        } # "pi" is actor and "qf" the critic (ignored if transformer is used)
+
+        logger.info("Transformer disabled: using MLP: %s", net_arch)
 
         warmup_steps = 0
         actor_learning_rate = 1e-3
         critic_learning_rate = 1e-3
-        min_actor_learning_rate = 1e-3
-        min_critic_learning_rate = 1e-3
+        min_actor_learning_rate = actor_learning_rate
+        min_critic_learning_rate = critic_learning_rate
+    else:
+        net_arch = {
+            "pi": [512, 512],
+            "qf": [128]
+        } # "pi" is actor and "qf" the critic (ignored if transformer is used)
 
-    if patience >= 0:
+        logger.info("Transformer enabled: using transformer+MLP: ... + %s", net_arch)
+
+        #warmup_steps = 200
+        #warmup_steps = 1000
+        #warmup_steps = 2000
+        warmup_steps = 5000
+        #warmup_steps = 20 # TODO remove
+        actor_learning_rate = 1e-5
+        critic_learning_rate = 1e-4
+        min_actor_learning_rate = actor_learning_rate
+        min_critic_learning_rate = critic_learning_rate
+
+    #if patience >= 0:
+    if False: # TODO remove?
         actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable
         critic_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, logger=logger, str_id="critic") # callable
     else:
@@ -597,10 +654,8 @@ if __name__ == "__main__":
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        #"critic_dropout": True,
-        #"critic_dropout_p": dropout_droq_p, # DroQ paper
-        "critic_dropout": False, # TODO remove
-        "critic_dropout_p": 0.0, # DroQ paper # TODO remove
+        "critic_dropout": True,
+        "critic_dropout_p": critic_dropout_p, # DroQ paper
         #"critic_transformer": use_transformer,
         #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,
@@ -624,10 +679,12 @@ if __name__ == "__main__":
         features_extractor_class = TransformerExtractor
         transformer_common_kwargs = {
             #"d_model": 512,
-            "d_model": 128,
+            #"d_model": 128,
+            "d_model": transformer_d_model,
             "nhead": 4,
             #"dim_feedforward": 2048,
-            "dim_feedforward": 512,
+            #"dim_feedforward": 512,
+            "dim_feedforward": transformer_d_model * 4,
             #"nlayers": 3,
             "nlayers": 2,
             "projection_in": state_dim_per_token,
@@ -642,23 +699,30 @@ if __name__ == "__main__":
             "initial_layer_norm": True,
             #"initial_layer_norm_first": False,
             "initial_layer_norm_first": True,
-            "embedding_dropout": 0.0, # it can increse the variance in the training
-            "dropout_p": dropout_p, # we can disable dropout setting to 0.0 if needed
-            "projection_out_dropout_p": 0.0,
+            "embedding_dropout": critic_dropout_p, # it can increse the variance in the training
+            "dropout_p": critic_dropout_p, # we can disable dropout setting to 0.0 if needed
+            "projection_out_dropout_p": critic_dropout_p,
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
-            "l2_norm": False, # disable to let the model learn how the representation should be
+            #"l2_norm": False,
             "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
             #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
             "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
             #"expected_seq_len": None, # TODO remove
+            "last_layer_norm": False,
+            "last_linear_layer": True,
+            "remove_first_column_of_zeros": True,
         }
+
         features_extractor_kwargs_actor = {
             "str_id": "actor",
+            "l2_norm": True if knn_distance_ip else False,
+            "mean_pooling": True,
             **transformer_common_kwargs
         }
         features_extractor_kwargs_critic = {
             "str_id": "critic",
-            "last_layer_norm": False,
+            "l2_norm": False,
+            "mean_pooling": False,
             **transformer_common_kwargs
         }
 
@@ -730,6 +794,7 @@ if __name__ == "__main__":
     # EvalCallback
     ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
     ## it does not evaluate the model performance when training finishes (we evaluate below)
+    custom_callback_on_eval = None if not store_model_on_eval else lambda n_calls, eval_freq: store_model(save_path, name_prefix, f"eval-{n_calls // eval_freq}", model, logger)
     callbacks.append(DelayedEvalCallback(
         env_eval_dev,
         learning_starts=init_training_steps,
@@ -744,7 +809,10 @@ if __name__ == "__main__":
         verbose=1,
         predict_kwargs={
             "knn_callback": retrieve_embeddings_dev,
-        }
+        },
+        disable_eval=disable_eval,
+        custom_callback_on_eval=custom_callback_on_eval,
+        custom_logger=logger,
     ))
     callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
         save_freq=save_freq,
@@ -764,25 +832,20 @@ if __name__ == "__main__":
     # Train
     model.learn(max_steps, log_interval=1, callback=callback)
 
-    # Store last version (adapted from CheckpointCallback)
-    last_model_path = f"{name_prefix}_last-step_model.zip"
-    model.save(os.path.join(save_path, last_model_path))
-    #model.save_replay_buffer(os.path.join(save_path, f"{name_prefix}_last-step_replay-buffer.pkl")) # too much disk...
-    if model.get_vec_normalize_env() is not None:
-        model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_last-step_vecnormalize.pkl"))
+    # Store last version
+    model_path = store_model(save_path, name_prefix, "last-step", model, logger)
 
     # Evaluate
-    best_model_path = os.path.join(save_path, last_model_path) # do not evaluate best_model as the result is already in the log
-
-    assert utils.file_exists(best_model_path), f"Best model not found: {best_model_path}"
+    ## do not evaluate best_model as the result is already in the log (unless eval is disabled and best model is unknown)
+    assert utils.file_exists(model_path), f"Model not found: {model_path}"
 
     ## dev: load model
     #logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", best_model_path)
-    logger.info("Loading last-step model (dev): %s", best_model_path)
+    logger.info("Loading last-step model (dev): %s", model_path)
 
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
-        best_model_path,
+        model_path,
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
@@ -817,7 +880,7 @@ if __name__ == "__main__":
     print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
 
     ## test: load model
-    logger.info("Loading best model (test): %s", best_model_path)
+    logger.info("Loading last-step model (test): %s", model_path)
 
     env_eval_test = env_eval_test_class(src_lang_test, trg_lang_test, file_data_test, file_data_icl_examples_test, gym_logger_level=gym.logger.INFO, custom_env_id="eval_test", is_eval_env=True, **parsed_kwargs)
 
@@ -826,7 +889,7 @@ if __name__ == "__main__":
     retrieve_embeddings_test = lambda proto_action, _k, observations: env_eval_test.get_closest_neighbors_urls(proto_action, k=k_test, get_representations_instead_of_embeddings=False, observations=observations, debug=False, return_all_neighbors=return_all_neighbors_test)[0]
     policy_actor_kwargs["actor_lr_schedule"] = lambda foo: 100.0 # dummy callable
     model = model_class.load(
-        best_model_path,
+        model_path,
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
@@ -858,3 +921,6 @@ if __name__ == "__main__":
     mean_reward, std_reward = evaluate_policy(model, env_eval_test, n_eval_episodes=len(data_to_be_translated_test))
 
     print(f"Mean reward test: {mean_reward} +/- {std_reward}")
+
+if __name__ == "__main__":
+    main()

@@ -460,6 +460,13 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
     reward_intervals = pd.qcut([d["return_value"] for d in training_dataset], num_labels_reward, duplicates='drop')
     reward_intervals_codes = reward_intervals.codes.tolist()
+    max_reward_label_code = max(reward_intervals_codes)
+    reward_intervals_codes_offset = 0
+
+    if max_reward_label_code < num_labels_reward - 1:
+        logger.warning("Max reward label code is less than num_labels_reward - 1: %d < %d", max_reward_label_code, num_labels_reward - 1)
+
+        reward_intervals_codes_offset = num_labels_reward - 1 - max_reward_label_code
 
     logger.info("Reward label description (total: %d):\n%s", len(reward_intervals), reward_intervals.describe())
 
@@ -474,10 +481,10 @@ def update_training_dataset(training_dataset, best_rewards, num_labels_reward, e
 
         if epoch == 1:
             assert _training_dataset["reward_label"] is None, _training_dataset["reward_label"]
-        else:
-            assert isinstance(_training_dataset["reward_label"], int), type(_training_dataset["reward_label"])
+        #else:
+        #    assert isinstance(_training_dataset["reward_label"], int), type(_training_dataset["reward_label"]) # this may not be true if new data is added in each epoch
 
-        _training_dataset["reward_label"] = reward_intervals_codes[idx]
+        _training_dataset["reward_label"] = reward_intervals_codes[idx] + reward_intervals_codes_offset
 
         assert isinstance(training_dataset[idx]["reward_label"], int), type(training_dataset[idx]["reward_label"])
 
@@ -702,16 +709,21 @@ def main():
     training_dataset_path = parsed_kwargs.pop("training_dataset_path", None)
     #patience = 6 # early stopping patience (number of evals with no improvement)
     #patience = 100 # TODO remove
-    patience = -1 # disable early stopping # TODO remove?
+    #patience = -1 # disable early stopping # TODO remove?
+    #patience = 10
+    patience = 20
+    #patience = 200 # TODO remove
     #eval_freq_epochs = 1
-    eval_freq_epochs = 5  # TODO remove
+    #eval_freq_epochs = 5  # TODO remove
+    eval_freq_epochs = 20
     #generate_new_samples_for_training_set_every_epochs = 1
-    generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
+    #generate_new_samples_for_training_set_every_epochs = 0 # TODO remove
+    generate_new_samples_for_training_set_every_epochs = max(eval_freq_epochs // 2, 1)
     #initial_epochs_without_eval_nor_generation = 0
-    initial_epochs_without_eval_nor_generation = 50
+    initial_epochs_without_eval_nor_generation = 50 # ignored if min_loss_start_training is enabled
     #initial_epochs_without_eval_nor_generation = 1000 # TODO remove
     min_loss_start_training = -1.0 # negative is disabled
-    min_loss_start_training = 0.001
+    min_loss_start_training = 0.7 if knn_distance_ip else 0.001
     #min_loss_start_training = 0.01
     min_loss_start_training = float(min_loss_start_training)
 
@@ -745,6 +757,7 @@ def main():
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 32)))
     batch_size = max(1, int(parsed_kwargs.pop("sl_batch_size", 512)))
+    load_model_path = parsed_kwargs.pop("sl_load_model_path", None)
     #learning_rate = 1e-5
     learning_rate = 1e-4
     #learning_rate = 1e-3
@@ -783,14 +796,14 @@ def main():
 
     model_kwargs = {
         #"d_model": 512,
-        "d_model": 128,
-        #"d_model": 256,
+        #"d_model": 128,
+        "d_model": 256,
         "nhead": 4,
         #"dim_feedforward": 2048,
-        "dim_feedforward": 512,
-        #"dim_feedforward": 1024,
-        "nlayers": 3,
-        #"nlayers": 6,
+        #"dim_feedforward": 512,
+        "dim_feedforward": 1024,
+        #"nlayers": 3,
+        "nlayers": 6,
         "projection_in": state_dim_per_token,
         "projection_out": action_dim,
         "max_seq_len": 8192,
@@ -823,6 +836,14 @@ def main():
         "use_first_n_tokens": use_first_n_tokens,
     }
     model = TransformerModel(**model_kwargs)
+
+    if load_model_path is not None and os.path.exists(load_model_path):
+        logger.info("Loading model from: %s", load_model_path)
+
+        model_weights = torch.load(load_model_path)
+
+        model.load_state_dict(model_weights)
+
     model = model.to(device)
 
     model.train()
@@ -976,23 +997,29 @@ def main():
     training_steps_per_epoch_lr_scheduler = len(training_dataset) // (batch_size * gradient_accumulation) + (0 if len(training_dataset) % (batch_size * gradient_accumulation) == 0 else 1)
     training_steps_lr_scheduler = training_steps_per_epoch_lr_scheduler * epochs
 
-    if generate_new_samples_for_training_set_every_epochs > 0:
-        # TODO fix
-        logger.warning("LR scheduler will be desynced with the training steps due to the growth of the training set (training_steps_per_epoch_lr_scheduler=%d) if generate_new_samples_for_training_set_every_epochs=%d > 0", training_steps_per_epoch_lr_scheduler, generate_new_samples_for_training_set_every_epochs)
-
     #for t in training_dataset: # TODO remove
     #    logger.debug("debug: %s: %s\n%s", t["state"].shape, torch.sum((torch.from_numpy(t["state"]).reshape(1, -1, 4) == 0).all(dim=2)), torch.from_numpy(t["state"]).reshape(1, -1, 4))
 
-    warmup_steps = 10 if patience >= 0 else "10%"
-    lr_scheduler_str = "inverse_sqrt" if patience >= 0 else "linear"
+    #warmup_steps = 1000 if patience >= 0 else "10%"
+    warmup_steps = "10%"
+    #lr_scheduler_str = "inverse_sqrt" if patience >= 0 else "linear"
+    lr_scheduler_str = "linear"
     lr_scheduler_args = [str(warmup_steps)]
+    lr_scheduler_restart_every_steps = -1 # negative value means no restart
+    lr_scheduler_restart_every_steps = training_steps_lr_scheduler
     optimizer, scheduler =\
         utils.get_lr_scheduler_and_optimizer_using_argparse_values("adamw", lr_scheduler_str, [0.9, 0.999, 1e-08, 0.01], lr_scheduler_args, optimizer_args_params, learning_rate, training_steps_lr_scheduler, training_steps_per_epoch_lr_scheduler, logger)
+
+    if generate_new_samples_for_training_set_every_epochs > 0:
+        logger.warning("LR scheduler will be desynced with the training steps due to the growth of the training set (training_steps_per_epoch_lr_scheduler=%d) if generate_new_samples_for_training_set_every_epochs=%d > 0. It will not be a problem as long as the LR scheduler is restarted (lr_scheduler_restart_every_steps > 0): %s", training_steps_per_epoch_lr_scheduler, generate_new_samples_for_training_set_every_epochs, lr_scheduler_restart_every_steps)
 
     if train_until_patience:
         logger.info("Training until patience is exhausted, with patience: %d", patience)
     else:
         logger.info("Training for a fixed number of epochs: %d", epochs)
+
+    if lr_scheduler_restart_every_steps > 0:
+        logger.info("LR scheduler will restart every %d steps (when restarted, warmup is disabled)", lr_scheduler_restart_every_steps)
 
     # training args
     current_patience = 0
@@ -1009,6 +1036,7 @@ def main():
     debug = True
     early_stopping_metric_dev = early_stopping_best_result_dev
     force_eval_msg = False
+    times_optimizer_step_global = 0
 
     logger.info("Loss function: %s", loss_function)
 
@@ -1044,7 +1072,7 @@ def main():
 
                 early_stopping_metric_dev = mean_reward
 
-                logger.info("Dev eval: %s +- %s", mean_reward, std_reward)
+                logger.info("Dev eval (epoch: %d): %s +- %s", epoch, mean_reward, std_reward)
 
                 if early_stopping_metric_dev > early_stopping_best_result_dev:
                     logger.info("Patience better dev result: %s -> %s", early_stopping_best_result_dev, early_stopping_metric_dev)
@@ -1071,11 +1099,11 @@ def main():
             if generate_new_samples_for_training_set_every_epochs > 0 and epoch_number_fix_eval % generate_new_samples_for_training_set_every_epochs == 0:
                 # Generate new samples for the training set using the model trained so far, to have more informative samples in the training set as the training progresses
 
-                logger.info("Generating new samples for the training set with the current model (epoch: %d). Recomputing the label rewards", epoch + 1)
+                logger.info("Generating new samples for the training set with the current model (epoch: %d). Recomputing the label rewards", epoch)
                 # BEGIN generate training set
                 _training_dataset = do_generate_rollouts(
                     data_to_be_translated_training,
-                    1, # we generate 1 rollout per data entry at each epoch after the random rolldouts generated at the beginning of the training
+                    1, # we generate 1 rollout per data entry at each epoch after the random rollouts generated at the beginning of the training
                     env_training_dummy,
                     max_icl_examples,
                     data_icl_examples_training,
@@ -1178,6 +1206,7 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
                 times_optimizer_step += 1
+                times_optimizer_step_global += 1
                 show_statistics = debug and batch_idx % 100 == 0 or batch_idx == training_steps_per_epoch
 
                 if show_statistics:
@@ -1187,8 +1216,16 @@ def main():
 
                     logger.debug("Grad sum (model, projection): %s %s", _model_grad_sum, _model_projection_grad_sum)
                     logger.debug("Optimizer steps: %s (* gradient_accumulation = * %s = %s); Accumulated loss steps: %d", times_optimizer_step, gradient_accumulation, times_optimizer_step * gradient_accumulation, loss_accumulated_steps)
+                    logger.debug("Optimizer steps (global): %s (* gradient_accumulation = * %s = %s)", times_optimizer_step_global, gradient_accumulation, times_optimizer_step_global * gradient_accumulation)
 
                 loss_accumulated_steps = 0
+
+                if lr_scheduler_restart_every_steps > 0 and times_optimizer_step_global % lr_scheduler_restart_every_steps == 0:
+                    # Before optimizer.step, so in the next iteration, the new learning rate will be applied (but in the current iteration the optimizer will use the current learning rate)
+                    logger.info("Restarting LR scheduler at global step: %d", times_optimizer_step_global)
+
+                    #lr_scheduler_args[0] = "0" # disable warmup after the first lr_scheduler_restart_every_steps steps
+                    scheduler = utils.get_lr_scheduler_and_optimizer_using_argparse_values(None, lr_scheduler_str, None, lr_scheduler_args, None, learning_rate, training_steps_lr_scheduler, training_steps_per_epoch_lr_scheduler, logger, _optimizer=optimizer)[1]
 
                 optimizer.step()
                 scheduler.step()
@@ -1237,6 +1274,14 @@ def main():
         do_training = epoch < epochs or train_until_patience
 
     with torch.no_grad():
+        logger.info("Loading best model for final evaluation: %s", save_model_path)
+
+        model_weights = torch.load(save_model_path)
+
+        model.load_state_dict(model_weights)
+
+        model = model.to(device)
+
         mean_reward, std_reward = evaluate_policy_custom(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev), render=False, device=device,
                                                          reward_idx=num_labels_reward - 1, logger=logger, max_icl_examples=max_icl_examples,
                                                          l2_norm_model_output=knn_distance_ip and disable_l2_norm_in_model)

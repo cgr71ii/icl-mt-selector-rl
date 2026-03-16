@@ -349,18 +349,25 @@ def get_lr_scheduler(scheduler, optimizer, *args, **kwargs):
 
     return scheduler_instance, mandatory_args
 
-def get_lr_scheduler_and_optimizer_using_argparse_values(optimizer_str, scheduler_str, optimizer_args, lr_scheduler_args, optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger):
+def get_lr_scheduler_and_optimizer_using_argparse_values(optimizer_str, scheduler_str, optimizer_args, lr_scheduler_args, optimizer_args_params, learning_rate, training_steps, training_steps_per_epoch, logger, _optimizer=None):
     # Expected: optimizer_args and lr_scheduler_args have been processed through argparse using argparse_pytorch_conf
     # learning_rate: "used when a parameter group doesn't specify them" (class Optimizer: https://pytorch.org/docs/stable/_modules/torch/optim/optimizer.html)
 
     # Get optimizer
     logger.debug("Optimizer args: %s", optimizer_args)
 
-    if optimizer_str == "none":
+    if _optimizer is not None:
+        assert optimizer_str is None
+
+        optimizer = _optimizer
+
+    if optimizer_str is None:
+        pass
+    elif optimizer_str == "none":
         optimizer = None
 
         logger.debug("Be aware that even with the optimizer disabled minor changes might be observed while training since the model is "
-                    "not in inference mode, so layers like Dropout have a random component which is enabled")
+                     "not in inference mode, so layers like Dropout have a random component which is enabled")
     elif optimizer_str == "adam":
         optimizer_kwargs = {
             "betas": tuple(optimizer_args[0:2]),
