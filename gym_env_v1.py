@@ -192,6 +192,8 @@ class MTICLEnv(gym.Env):
             else:
                 self.logger_wrapper(gym.logger.info, "Each new episode will change the total number of ICL examples to select between 1 and %d", self.max_icl_examples)
 
+        assert not self.select_max_icl_examples_randomly, "Watch out: you should adapt the code to work with the transformer to process the max number of steps per environment similarly to how time steps are processed"
+
         assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features"), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 

@@ -48,7 +48,8 @@ def main():
     #max_data_icl_examples_entries = 100 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
-    parsed_kwargs["max_icl_examples"] = int(parsed_kwargs.get("max_icl_examples", 5))
+    max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
+    parsed_kwargs["max_icl_examples"] = max_icl_examples
     parsed_kwargs["max_data_entries"] = max_data_entries
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["device"] = device
@@ -163,6 +164,7 @@ def main():
         #"critic_first_actions_then_features": True if critic_use_transformer else False,
     }
     use_transformer = True
+    #use_transformer = False
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
     transformer_d_model = 128
 
@@ -215,13 +217,14 @@ def main():
             "projection_out_dropout_p": critic_dropout_p,
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
             #"l2_norm": False, # disable to let the model learn how the representation should be
-            "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            "skip_n_word_embeddings_from_observation": f"0:{skip_we + 2}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
             #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
-            "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+            "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token - 2 if state_representation == "representation_per_token_with_features" else None,
             #"expected_seq_len": None, # TODO remove
             "last_layer_norm": False,
             "last_linear_layer": True,
             "remove_first_column_of_zeros": True,
+            "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
         }
         features_extractor_kwargs_actor = {
             "str_id": "actor",
@@ -232,7 +235,8 @@ def main():
         features_extractor_kwargs_critic = {
             "str_id": "critic",
             "l2_norm": False,
-            "mean_pooling": False,
+            #"mean_pooling": False,
+            "mean_pooling": True,
             **transformer_common_kwargs
         }
 
@@ -266,6 +270,7 @@ def main():
             "activation_fn": torch.nn.GELU,
         },
         device=device,
+        replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
     )
 
     ## dev: evaluate and report result

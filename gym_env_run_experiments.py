@@ -308,9 +308,6 @@ def main():
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
     store_model_on_eval = False # TODO remove
 
-    if disable_eval:
-        logger.warning("Evaluation disabled")
-
     if store_model_on_eval:
         logger.info("Model will be stored on each evaluation")
 
@@ -346,8 +343,9 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    max_data_entries = 5 # TODO remove
-    max_data_icl_examples_entries = 64 # TODO remove
+    #max_data_entries = 5 # TODO remove
+    max_data_entries = 50 # TODO remove
+    #max_data_icl_examples_entries = 64 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -417,11 +415,14 @@ def main():
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     #patience = 6 # early stopping patience (number of evals with no improvement)
     #patience = 20 # TODO remove
-    patience = -1 # disabled
-    enable_eval = True
+    #patience = -1 # disabled
+    patience = 10 # TODO remove?
+    enable_eval = not disable_eval
 
     if not enable_eval:
-        logger.info("Evaluation (dev set) disabled: no best model will be available, only last model")
+        logger.warning("Evaluation (dev set) disabled: no best model will be available, only last model")
+    else:
+        assert patience >= 0, "Expected patience to be non-negative, but got %d" % patience
 
     if patience < 0:
         logger.info("Early stopping disabled (patience < 0)")
@@ -710,7 +711,7 @@ def main():
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
             #"l2_norm": False,
             #"skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
-            "skip_n_word_embeddings_from_observation": f"0:{skip_we + 2}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            "skip_n_word_embeddings_from_observation": f"0:{skip_we + 2}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap (+2 to ignore the custom position tokens)
             #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
             #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
             "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token - 2 if state_representation == "representation_per_token_with_features" else None,
@@ -718,7 +719,7 @@ def main():
             "last_layer_norm": False,
             "last_linear_layer": True,
             "remove_first_column_of_zeros": True,
-            "step_embeddings": max_icl_examples, # add embeddings for each time step
+            "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
         }
 
         features_extractor_kwargs_actor = {
@@ -788,7 +789,8 @@ def main():
         replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
-        max_grad_norm=0.5,
+        #max_grad_norm=0.5,
+        max_grad_norm=1.0,
         #invert_grad=True,
         wolpertinger_add_noise_after_knn=True, # TD3 noise -> it should improve generalization
         wolpertinger_target_policy_actor_noise=wolpertinger_target_policy_actor_noise, # noise before kNN for the target policy -> it should improve exploration of different actions
@@ -821,6 +823,7 @@ def main():
         verbose=1,
         predict_kwargs={
             "knn_callback": retrieve_embeddings_dev,
+            "env_instance": env_eval_dev.unwrapped,
         },
         disable_eval=disable_eval,
         custom_callback_on_eval=custom_callback_on_eval,
@@ -887,7 +890,10 @@ def main():
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
-    mean_reward, std_reward = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev))
+    mean_reward, std_reward = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev),
+        predict_kwargs={
+            "env_instance": env_eval_dev.unwrapped,
+        },)
 
     print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
 
@@ -930,7 +936,10 @@ def main():
     ## test: evaluate and report result
     logger.info("Evaluating test")
 
-    mean_reward, std_reward = evaluate_policy(model, env_eval_test, n_eval_episodes=len(data_to_be_translated_test))
+    mean_reward, std_reward = evaluate_policy(model, env_eval_test, n_eval_episodes=len(data_to_be_translated_test),
+        predict_kwargs={
+            "env_instance": env_eval_test,
+        },)
 
     print(f"Mean reward test: {mean_reward} +/- {std_reward}")
 
