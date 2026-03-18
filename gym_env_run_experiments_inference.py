@@ -277,7 +277,10 @@ def main():
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated))
-    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated), return_episode_rewards=True)
+    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated), return_episode_rewards=True,
+        predict_kwargs={
+            "env_instance": env_eval_dev.unwrapped,
+        },)
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
     mean_length = np.mean(episode_lengths)
