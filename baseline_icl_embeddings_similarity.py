@@ -68,8 +68,8 @@ def batchify(sentences, batch_size, sentences_embeddings=None, icl_examples_pool
 def main():
     print(f"argv: {sys.argv}", file=sys.stderr)
 
-    src_lang_value, src_lang_value_nllb = sys.argv[1].split(':') # e.g., "English:eng_Latn"
-    trg_lang_value, trg_lang_value_nllb = sys.argv[2].split(':')
+    src_lang_value = sys.argv[1] # e.g., "English" -> flores format -> eng_Latn
+    trg_lang_value = sys.argv[2]
     icl_examples_file = sys.argv[3] # tab-separated file with icl examples with format: "src_sentence\ttrg_sentence"
     icl_num_examples = int(sys.argv[4]) # if 0, zero-shot
     batch_size, batch_size_embeddings = tuple(map(int, sys.argv[5].split(':'))) if len(sys.argv) > 5 else (8, 8)
@@ -108,8 +108,8 @@ def main():
 
     random.shuffle(icl_examples_pool)
 
-    sentences_embeddings = embeddings_utils.get_embeddings(embeddings_name, sentences, src_lang_value_nllb, batch_size=batch_size_embeddings)
-    icl_examples_pool_embeddings = embeddings_utils.get_embeddings(embeddings_name, icl_examples_pool, src_lang_value_nllb, batch_size=batch_size_embeddings)
+    sentences_embeddings = embeddings_utils.get_embeddings(embeddings_name, sentences, src_lang_value, batch_size=batch_size_embeddings)
+    icl_examples_pool_embeddings = embeddings_utils.get_embeddings(embeddings_name, icl_examples_pool, src_lang_value, batch_size=batch_size_embeddings)
 
     # Encode each sentence in base64
     url = f"http://127.0.0.1:{server_port}/translate"

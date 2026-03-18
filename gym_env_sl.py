@@ -830,7 +830,6 @@ def main():
         "mean_pooling": True,
         "last_linear_layer": True,
         "reward_embeddings": num_labels_reward,
-        "assert_embedding_idxs": True,
         "remove_first_column_of_zeros": True,
         "step_embeddings": max_icl_examples, # we can also use learnable step embeddings to represent the position in the trajectory
         "use_first_n_tokens": use_first_n_tokens,

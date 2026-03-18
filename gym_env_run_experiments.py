@@ -302,8 +302,11 @@ def main():
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
     update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
+    update_to_data_ratio = 0.0 # TODO remove
     disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
+    disable_eval = False # TODO remove
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
+    store_model_on_eval = False # TODO remove
 
     if disable_eval:
         logger.warning("Evaluation disabled")
@@ -343,8 +346,8 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 5 # TODO remove
-    #max_data_icl_examples_entries = 8 # TODO remove
+    max_data_entries = 5 # TODO remove
+    max_data_icl_examples_entries = 64 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -405,7 +408,7 @@ def main():
     #eval_freq = 2000 # steps
     #eval_freq = 5000 # steps
     eval_freq = 10000 # steps
-    #eval_freq = 20 # TODO remove
+    eval_freq = 20 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -466,7 +469,7 @@ def main():
 #    init_training_steps = 1000
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
-    #init_training_steps = 10 # TODO remove
+    init_training_steps = 10 # TODO remove
     #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
@@ -567,12 +570,14 @@ def main():
     wolpertinger_target_actor_noise_clip = 2.5 * wolpertinger_target_policy_actor_noise
     share_features_extractor = False
     #share_features_extractor = True
+    #train_freq_steps = 1
+    train_freq_steps = max_icl_examples
     #gradient_steps = -1 if num_envs > 1 else 1
     #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
-    gradient_steps = max(int(update_to_data_ratio * num_envs), 1) # times data is sampled from the replay buffer and then used for training
+    gradient_steps = max(int(update_to_data_ratio * train_freq_steps * num_envs), 1) # times data is sampled from the replay buffer and then used for training
     #n_features = 0 # disabled
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
-    use_transformer = False # TODO remove?
+    #use_transformer = False # TODO remove?
 
     if use_transformer and not wolpertinger_disable_actor:
         assert not share_features_extractor, "share_features_extractor is not supported when using transformers (different configuration for actor and critic)"
@@ -583,7 +588,7 @@ def main():
         logger.info("Disabling share_features_extractor because wolpertinger_disable_actor is set to True")
 
     logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
-    logger.info("Gradient steps (UTD: %s): %d", update_to_data_ratio, gradient_steps)
+    logger.info("Gradient steps (UTD: %s; train_freq_steps: %s): %d", update_to_data_ratio, train_freq_steps, gradient_steps)
 
     min_actor_learning_rate = actor_learning_rate / 10
     min_critic_learning_rate = critic_learning_rate / 10
@@ -619,7 +624,7 @@ def main():
         #warmup_steps = 1000
         #warmup_steps = 2000
         warmup_steps = 5000
-        #warmup_steps = 20 # TODO remove
+        warmup_steps = 20 # TODO remove
         actor_learning_rate = 1e-5
         critic_learning_rate = 1e-4
         min_actor_learning_rate = actor_learning_rate
@@ -704,13 +709,16 @@ def main():
             "projection_out_dropout_p": critic_dropout_p,
             "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
             #"l2_norm": False,
-            "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            #"skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
+            "skip_n_word_embeddings_from_observation": f"0:{skip_we + 2}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embeddings, which corresponds to the source translation candidate representation for detecting overlap
             #"skip_n_word_embeddings_from_observation": "0:0", # TODO remove
-            "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+            #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
+            "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token - 2 if state_representation == "representation_per_token_with_features" else None,
             #"expected_seq_len": None, # TODO remove
             "last_layer_norm": False,
             "last_linear_layer": True,
             "remove_first_column_of_zeros": True,
+            "step_embeddings": max_icl_examples, # add embeddings for each time step
         }
 
         features_extractor_kwargs_actor = {
@@ -722,7 +730,8 @@ def main():
         features_extractor_kwargs_critic = {
             "str_id": "critic",
             "l2_norm": False,
-            "mean_pooling": False,
+            #"mean_pooling": False,
+            "mean_pooling": True, # TODO remove?
             **transformer_common_kwargs
         }
 
@@ -772,8 +781,11 @@ def main():
         gamma=gamma,
         device=device,
         gradient_steps=gradient_steps,
-        train_freq=(1, "step"),
+        #train_freq=(1, "step"),
+        #train_freq=(1, "episode"), # Not supported "episode" and num_envs > 1
+        train_freq=(train_freq_steps, "step"), # sparse reward environment: we only have reward != 0 at the end of the episode
         buffer_size=replay_buffer_size,
+        replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         max_grad_norm=0.5,

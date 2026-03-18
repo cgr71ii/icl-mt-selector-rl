@@ -44,6 +44,7 @@ def main():
     batch_size = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     seed = sys.argv[6] if len(sys.argv) > 6 else None # default random seed
     server_port = sys.argv[7] if len(sys.argv) > 7 else "8000"
+    server_name = sys.argv[8] if len(sys.argv) > 8 else "127.0.0.1"
 
     assert icl_num_examples >= 0, f"icl_num_examples must be non-negative, got: {icl_num_examples}"
 
@@ -77,7 +78,7 @@ def main():
     random.shuffle(icl_examples_pool)
 
     # Encode each sentence in base64
-    url = f"http://127.0.0.1:{server_port}/translate"
+    url = f"http://{server_name}:{server_port}/translate"
     src_sentences_idx = 0
 
     for batch, batch_icl_examples in batchify(sentences, batch_size, icl_examples_pool=icl_examples_pool, icl_num_examples=icl_num_examples):
