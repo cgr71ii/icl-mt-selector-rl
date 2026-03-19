@@ -45,6 +45,7 @@ def main():
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
+    #max_data_entries = 10 # TODO remove
     #max_data_icl_examples_entries = 100 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
@@ -164,7 +165,7 @@ def main():
         #"critic_first_actions_then_features": True if critic_use_transformer else False,
     }
     use_transformer = True
-    #use_transformer = False
+    use_transformer = False # TODO remove
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
     transformer_d_model = 128
 

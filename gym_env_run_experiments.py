@@ -49,7 +49,7 @@ class InverseSqrtWithWarmUpLRSchedule:
         self.logger = logger
         self.str_id = str_id
 
-        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
+        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, warmup_steps)
 
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
         lr = self.get_lr()
@@ -95,7 +95,7 @@ class LinearWithWarmUpLRSchedule:
         assert self.total_steps > self.warmup_steps
         assert self.min_lr >= 0.0, self.min_lr
 
-        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, self.warmup_steps)
+        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, warmup_steps)
         self.logger.debug("[%s] [%s] m and n values: %f %f", self.__class__.__name__, self.str_id, self.m, self.n)
 
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
@@ -126,11 +126,11 @@ class LinearWithWarmUpLRSchedule:
 
         return lr
 
-class CyclicLR:
+class CyclicWithWarmUpLRSchedule:
     # Code adapted from https://github.com/bckenstler/CLR/blob/master/clr_callback.py
 
     def __init__(self, base_lr=None, max_lr=None, step_size=None, mode='triangular',
-                 gamma=1., scale_fn=None, scale_mode='cycle', logger=None, str_id="none"):
+                 gamma=1., scale_fn=None, scale_mode='cycle', warmup_steps=0, logger=None, str_id="none"):
         assert base_lr is not None and max_lr is not None and step_size is not None
         assert logger is not None
 
@@ -142,6 +142,7 @@ class CyclicLR:
         assert max_lr >= 0.0, max_lr
         assert step_size > 0.0, step_size
         assert base_lr <= max_lr, (base_lr, max_lr)
+        assert warmup_steps >= 0, warmup_steps
 
         self.logger = logger
         self.str_id = str_id
@@ -152,6 +153,7 @@ class CyclicLR:
         self.gamma = gamma
         self.step = 1
         self.old_current_progress_remaining = np.inf
+        self.warmup_steps = warmup_steps + 1
 
         if scale_fn == None:
             if self.mode == 'triangular':
@@ -169,12 +171,15 @@ class CyclicLR:
 
         assert self.scale_mode in ('cycle', 'iterations'), self.scale_mode
 
-        self.clr_iterations = 0.
+        self.clr_iterations = 0
 
-        self.logger.debug("[%s] [%s] First LR: %f (base and max: %f %f) %f", self.__class__.__name__, self.str_id, self.get_lr(), base_lr, max_lr, step_size)
+        if warmup_steps > 0:
+            self.clr_iterations += self.step_size
+
+        self.logger.debug("[%s] [%s] First LR, step size and warmup steps: %f (base and max: %f %f) %f %d", self.__class__.__name__, self.str_id, self.get_lr(), base_lr, max_lr, self.step_size, warmup_steps)
 
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
-        lr = self.get_lr()
+        lr, is_warming_up = self.get_lr(get_info=True)
 
         if not _update_learning_rate:
             assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
@@ -189,18 +194,30 @@ class CyclicLR:
         self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
 
         self.step += 1
-        self.clr_iterations += 1
+
+        if not is_warming_up:
+            self.clr_iterations += 1
 
         return lr
 
-    def get_lr(self):
-        cycle = np.floor(1+self.clr_iterations/(2*self.step_size))
-        x = np.abs(self.clr_iterations/self.step_size - 2*cycle + 1)
-
-        if self.scale_mode == 'cycle':
-            return self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(cycle)
+    def get_lr(self, get_info=False):
+        if self.step < self.warmup_steps:
+            is_warming_up = True
+            lr = self.max_lr * float(self.step) / float(self.warmup_steps)
         else:
-            return self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(self.clr_iterations)
+            is_warming_up = False
+            cycle = np.floor(1+self.clr_iterations/(2*self.step_size))
+            x = np.abs(self.clr_iterations/self.step_size - 2*cycle + 1)
+
+            if self.scale_mode == 'cycle':
+                lr = self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(cycle)
+            else:
+                lr = self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(self.clr_iterations)
+
+        if get_info:
+            return lr, is_warming_up
+
+        return lr
 
 class SelectActionNoiseFromList(ActionNoise):
 
@@ -378,11 +395,11 @@ def main():
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
     update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
-    update_to_data_ratio = 0.0 # TODO remove
+    #update_to_data_ratio = 0.0 # TODO remove
     disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
-    disable_eval = False # TODO remove
+    #disable_eval = False # TODO remove
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
-    store_model_on_eval = False # TODO remove
+    #store_model_on_eval = False # TODO remove
 
     if store_model_on_eval:
         logger.info("Model will be stored on each evaluation")
@@ -420,7 +437,7 @@ def main():
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
-    max_data_entries = 10 # TODO remove
+    #max_data_entries = 10 # TODO remove
     #max_data_entries = 50 # TODO remove
     #max_data_icl_examples_entries = 64 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
@@ -483,7 +500,7 @@ def main():
     #eval_freq = 2000 # steps
     #eval_freq = 5000 # steps
     eval_freq = 10000 # steps
-    eval_freq = 20 # TODO remove
+    #eval_freq = 20 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -492,8 +509,8 @@ def main():
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     #patience = 6 # early stopping patience (number of evals with no improvement)
     #patience = 20 # TODO remove
-    #patience = -1 # disabled
-    patience = 3 # TODO remove?
+    patience = -1 # disabled
+    #patience = 3 # TODO remove?
     enable_eval = not disable_eval
 
     if not enable_eval:
@@ -505,6 +522,10 @@ def main():
         logger.info("Early stopping disabled (patience < 0)")
     else:
         logger.info("Early stopping enabled (patience: %d evals with no improvement)", patience)
+
+    assert not os.path.exists(save_path), f"Save path already exists: {save_path}"
+
+    os.makedirs(save_path, exist_ok=False)
 
     logger.info("Save path: %s", save_path)
 
@@ -547,7 +568,7 @@ def main():
 #    init_training_steps = 1000
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
-    init_training_steps = 10 # TODO remove
+    #init_training_steps = 10 # TODO remove
     #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
@@ -655,7 +676,7 @@ def main():
     gradient_steps = max(int(update_to_data_ratio * train_freq_steps * num_envs), 1) # times data is sampled from the replay buffer and then used for training
     #n_features = 0 # disabled
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
-    use_transformer = False # TODO remove?
+    #use_transformer = False # TODO remove?
 
     if use_transformer and not wolpertinger_disable_actor:
         assert not share_features_extractor, "share_features_extractor is not supported when using transformers (different configuration for actor and critic)"
@@ -671,8 +692,9 @@ def main():
     min_actor_learning_rate = actor_learning_rate / 10
     min_critic_learning_rate = critic_learning_rate / 10
     transformer_d_model = 128
-    #step_size = 5000
-    step_size = 20 # TODO remove
+    warmup_steps = 1000
+    step_size = 500
+    #step_size = 20 # TODO remove
 
     if not use_transformer:
         net_arch = {
@@ -719,8 +741,8 @@ def main():
     #    critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
 
     clr_fn = lambda x: 0.5*(1+np.sin(x*np.pi/2.))
-    actor_lr_schedule = CyclicLR(base_lr=actor_learning_rate / 100, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", logger=logger, str_id="actor")
-    critic_lr_schedule = CyclicLR(base_lr=critic_learning_rate / 100, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", logger=logger, str_id="critic")
+    actor_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=actor_learning_rate / 10, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="actor")
+    critic_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=critic_learning_rate / 10, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="critic")
     policy_actor_kwargs = {
         #"squash_output": True,
         "squash_output": not actor_mlp_l2_norm, # actor l2-norm
