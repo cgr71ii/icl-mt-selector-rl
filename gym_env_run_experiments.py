@@ -21,7 +21,7 @@ from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor, NFeaturesExtractor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor, NFeaturesExtractor, NFeaturesExtractorWithTimeStepEmbeddings
 import numpy as np
 import torch
 
@@ -390,7 +390,6 @@ def main():
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
-    model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
@@ -457,6 +456,8 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
     parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
+    parsed_kwargs["current_icl_examples_prepend"] = parsed_kwargs.get("current_icl_examples_prepend", True)
+    parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
@@ -464,6 +465,7 @@ def main():
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
+    parsed_kwargs["current_icl_examples_prepend"] = False # TODO remove? When multiple ICL examples are prepended, the representations of the last tokens are too similar and the model can't diffentiate between different states
 
     # Some values
     pre_k_is_float = '.' in pre_k
@@ -573,6 +575,7 @@ def main():
     max_steps = max_steps_training + init_training_steps
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
     add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
+    use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
 
     logger.info("Evaluation frequency (steps, adjusted by number of parallel environments): %d // %d = %d (total times evaluation: %d)", eval_freq, num_envs, max(1, eval_freq // num_envs), ((max_steps - init_training_steps) / num_envs) // max(1, eval_freq / num_envs))
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
@@ -615,6 +618,7 @@ def main():
     action_dim = env_training_dummy.action_dim
     state_dim_per_token = env_training_dummy.state_dim_per_token
     state_window_length = env_training_dummy.state_window_length
+    state_dim_per_token_time_step = env_training_dummy.state_dim_per_token_time_step
     skip_we = action_dim // state_dim_per_token
     callbacks = []
     #model_class = DDPG
@@ -626,35 +630,10 @@ def main():
         "target_policy_noise": 0.0, # TODO remove
         "target_noise_clip": 0.0, # TODO remove
     } if model_class is TD3 else {}
-    #actor_transformer_args_and_kwargs = {
-    #    "d_model": 512,
-    #    "nhead": 4,
-    #    "dim_feedforward": 2048,
-    #    "nlayers": 3,
-    #    "max_seq_len": max_seq_len,
-    #    "projection_in": state_dim_per_token,
-    #    #"l2_norm": True, # disable to let the model learn how the representation should be
-    #    "l2_norm": False,
-    #    "str_id": "actor",
-    #    "skip_n_word_embeddings_from_observation": f"0:{skip_we}" if state_representation == "representation_per_token_with_features" else "0:0", # skip the first word embedding, which corresponds to the source translation candidate representation
-    #    #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
-    #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # no action, due to skip_n_word_embeddings_from_observation
-    #}
-    #critic_transformer_args_and_kwargs = {
-    #    "d_model": 512,
-    #    "nhead": 4,
-    #    "dim_feedforward": 2048,
-    #    "nlayers": 3,
-    #    "max_seq_len": max_seq_len + 2, # +2 for the action (source and target, in case they are different)
-    #    "projection_in": state_dim_per_token,
-    #    "str_id": "critic",
-    #    "skip_n_word_embeddings_from_observation": f"{skip_we}:{skip_we * 2}" if state_representation == "representation_per_token_with_features" else "0:0", # "{skip_we}:{skip_we * 2}" instead of "0:{skip_we}" due to critic_first_actions_then_features == True
-    #    #"expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None,
-    #    "expected_seq_len": ((state_window_length - 1) * state_dim_per_token + action_dim) // state_dim_per_token if state_representation == "representation_per_token_with_features" else None, # one action only, due to skip_n_word_embeddings_from_observation
-    #}
-    use_transformer = True
+    #use_transformer = True
     #dropout_p = 0.1 # TODO enable?
     #dropout_p = 0.0
+    actor_dropout_p = 0.0
     #critic_dropout_p = 0.1
     critic_dropout_p = 0.01 # DroQ paper if value greater than 0
     exploration_rate_steps_percentage = 0.5
@@ -674,9 +653,13 @@ def main():
     #gradient_steps = -1 if num_envs > 1 else 1
     #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
     gradient_steps = max(int(update_to_data_ratio * train_freq_steps * num_envs), 1) # times data is sampled from the replay buffer and then used for training
-    #n_features = 0 # disabled
-    n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
-    #use_transformer = False # TODO remove?
+
+    if state_representation == "representation_per_token_with_features":
+        n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
+    elif state_representation == "representation_last_token_current_and_relative_diff":
+        n_features = state_dim_per_token * 2 + state_dim_per_token_time_step
+    else:
+        n_features = 0
 
     if use_transformer and not wolpertinger_disable_actor:
         assert not share_features_extractor, "share_features_extractor is not supported when using transformers (different configuration for actor and critic)"
@@ -692,9 +675,9 @@ def main():
     min_actor_learning_rate = actor_learning_rate / 10
     min_critic_learning_rate = critic_learning_rate / 10
     transformer_d_model = 128
-    warmup_steps = 1000
     step_size = 500
-    #step_size = 20 # TODO remove
+    warmup_steps = step_size * 2
+    step_size = 20 # TODO remove
 
     if not use_transformer:
         net_arch = {
@@ -752,9 +735,7 @@ def main():
         "actor_layer_norm_before_activation": True,
         "actor_last_layer_init_uniform_value": 0.001,
         #"actor_dropout": True,
-        #"actor_dropout_p": 0.1,
-        #"actor_transformer": use_transformer,
-        #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+        "actor_dropout_p": actor_dropout_p,
         "actor_mlp_l2_norm": actor_mlp_l2_norm,
     }
     policy_critic_kwargs = {
@@ -763,10 +744,7 @@ def main():
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        "critic_dropout": True,
         "critic_dropout_p": critic_dropout_p, # DroQ paper
-        #"critic_transformer": use_transformer,
-        #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if use_transformer else False,
     }
 
@@ -777,13 +755,33 @@ def main():
             features_extractor_kwargs_actor = {}
             features_extractor_kwargs_critic = {}
         else:
-            features_extractor_class = NFeaturesExtractor
+            features_extractor_class = NFeaturesExtractorWithTimeStepEmbeddings
+            n = n_features
+            skip_n = action_dim
+
+            if state_representation == "representation_per_token_with_features":
+                step_embeddings_dim = state_dim_per_token
+                n -= step_embeddings_dim # "- step_embeddings_dim" to add the time_step embedding
+                skip_n += state_dim_per_token * 2 # "state_dim_per_token * 2" to remove the time_step information
+            elif state_representation == "representation_last_token_current_and_relative_diff":
+                step_embeddings_dim = state_dim_per_token_time_step
+                #n -= state_dim_per_token_time_step
+                skip_n += state_dim_per_token_time_step
+            else:
+                raise Exception()
+
             features_extractor_kwargs_actor = {
-                "n": n_features,
-                "skip_n": action_dim,
+                "n": n,
+                "skip_n": skip_n,
+                "state_dim_per_token": state_dim_per_token,
+                "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
+                "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
+                "step_embeddings_dim": step_embeddings_dim,
             }
             features_extractor_kwargs_critic = dict(features_extractor_kwargs_actor)
     else:
+        assert state_representation == "representation_per_token_with_features", "Some values should be revised for the transformer such as 'projection_in'"
+
         # the feature extractor only processes the state (not the action for the critic)
         features_extractor_class = TransformerExtractor
         transformer_common_kwargs = {
@@ -821,8 +819,9 @@ def main():
             #"expected_seq_len": None, # TODO remove
             "last_layer_norm": False,
             "last_linear_layer": True,
-            "remove_first_column_of_zeros": True,
+            "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features" else False,
             "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
+            "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
         }
 
         features_extractor_kwargs_actor = {
@@ -889,7 +888,8 @@ def main():
         #train_freq=(1, "episode"), # Not supported "episode" and num_envs > 1
         train_freq=(train_freq_steps, "step"), # sparse reward environment: we only have reward != 0 at the end of the episode
         buffer_size=replay_buffer_size,
-        replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
+        #replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
+        replay_buffer_kwargs={"process_time_steps": True},
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         #max_grad_norm=0.5,

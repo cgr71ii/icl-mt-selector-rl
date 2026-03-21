@@ -194,7 +194,7 @@ class MTICLEnv(gym.Env):
 
         assert not self.select_max_icl_examples_randomly, "Watch out: you should adapt the code to work with the transformer to process the max number of steps per environment similarly to how time steps are processed"
 
-        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff"), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
@@ -215,6 +215,8 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d. Value too low", self.state_window_length)
 
             #self.state_window_length = 512 + 1 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples and +1 for the current step
+        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+            self.state_window_length = 4 # action representation, time_step, current last token representation, current last token - previous last token representation (0s if initial state)
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -250,11 +252,13 @@ class MTICLEnv(gym.Env):
         if self.state_representation == "representation_per_token_with_features":
             #self.embedding_pooling_model_method_state = "none"
             self.embedding_pooling_model_method_state = "features"
+        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+            self.embedding_pooling_model_method_state = "last"
 
         # Model conf
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
         self.device = torch.device(utils.dict_or_default(kwargs, "device", "cuda"))
-        self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 4096) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
+        self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 1536) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
         self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, f=int)
         self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, f=int)
         self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
@@ -335,6 +339,10 @@ class MTICLEnv(gym.Env):
         self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
         self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", True) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
+        self.state_dim_per_token_time_step = utils.dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
+
+        if self.state_representation == "representation_last_token_current_and_relative_diff":
+            self.state_dim = self.state_dim_per_token * 2 + self.state_dim_per_token_time_step + self.action_dim
 
         if self.knn_distance_ip:
             assert self.apply_l2_normalization_action, "L2 normalization of action embeddings should be enabled when using inner product (IP) as distance metric for kNN search (cosine similarity)."
@@ -738,6 +746,8 @@ class MTICLEnv(gym.Env):
             if idx == 0:
                 # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
+            elif idx == 1 and self.state_representation == "representation_last_token_current_and_relative_diff":
+                self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
@@ -839,6 +849,24 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
+        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+            token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
+
+            assert isinstance(token_representations, np.ndarray), type(token_representations)
+            assert len(token_representations.shape) == 1, f"Expected token_representations to be a 1D numpy array, got shape {token_representations.shape}: {token_representations}"
+            assert token_representations.shape[0] == self.state_dim_per_token, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
+
+            token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
+
+            assert token_representations.shape == (1, self.state_dim_per_token), token_representations.shape
+
+            self.current_state_window[1] = np.zeros(self.state_dim_per_token_time_step)
+            self.current_state_window[2] = token_representations[0]
+
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+
+            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+            assert np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
         observation = self.postprocessing_observation(observation)
@@ -1094,6 +1122,7 @@ class MTICLEnv(gym.Env):
         response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
         response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
         response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+        response_result = response_result.to(torch.float32)
 
         return response_result
 
@@ -1134,6 +1163,7 @@ class MTICLEnv(gym.Env):
         response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
         response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
         response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+        response_result = response_result.to(torch.float32)
 
         return response_result
 
@@ -1253,6 +1283,7 @@ class MTICLEnv(gym.Env):
             response_result = base64.b64decode(response_text["ok"]) # base64 tensor representation
             response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
             response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+            response_result = response_result.to(torch.float32)
 
             representations.append(response_result)
 
@@ -1341,6 +1372,7 @@ class MTICLEnv(gym.Env):
                 response_result = base64.b64decode(response_result) # base64 tensor representation
                 response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
                 response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+                response_result = response_result.to(torch.float32)
 
             translations.append(response_result)
 
@@ -1369,7 +1401,9 @@ class MTICLEnv(gym.Env):
                 new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
                 translations = new_translations
 
-            assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+                assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+            else:
+                assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim_per_token)}"
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
@@ -1832,6 +1866,7 @@ class MTICLEnv(gym.Env):
             assert terminated or truncated, f"Early stopping action received but not terminated or truncated: {terminated}, {truncated}"
             assert self.enable_eos_action
 
+            # TODO fix this will not work for all values of self.state_representation
             observation = self.str2representation[self.eos_token_str]
 
             assert isinstance(observation, np.ndarray), type(observation)
@@ -1851,7 +1886,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation in ("model_single_representation", "representation_per_token_with_features"):
+            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
@@ -1874,6 +1909,8 @@ class MTICLEnv(gym.Env):
 
         if self.state_representation == "representation_per_token_with_features":
             observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
+        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+            pass
         elif self.time_step > 1:
             offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
 
@@ -1932,6 +1969,17 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
+        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+            assert len(observation.shape) == 1, observation.shape
+            assert observation.shape[0] == len(self.current_state_window[3]), f"{observation.shape} vs {len(self.current_state_window[3])}"
+            assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step
+            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+
+            self.current_state_window[3] = observation - self.current_state_window[2] # this first before updating self.current_state_window[2]!
+            self.current_state_window[2] = observation
+
+            self.logger_wrapper(gym.logger.debug, "First ... last representations (current): %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations (relative diff): %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
         else:
             self.current_state_window[self.time_step] = observation
 
