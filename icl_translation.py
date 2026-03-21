@@ -143,10 +143,14 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
     input_ids = inputs["input_ids"].to(model.device) if inputs is not None else _inputs.to(model.device)
     attention_mask = inputs["attention_mask"].to(model.device) if inputs is not None else _masks.to(model.device)
 
+    assert len(attention_mask.shape) == 2, f"attention_mask expected shape: (batch_size, seq_len); got: {attention_mask.shape}"
+
     for idx in range(attention_mask.shape[0]):
         assert attention_mask[idx].sum().item() > 0, f"All tokens are padding for input idx {idx}: input_ids: {input_ids[idx]}, attention_mask: {attention_mask[idx]}"
         assert torch.all((attention_mask[idx] == 0) | (attention_mask[idx] == 1)).item(), f"Attention mask must be binary (0 or 1) for input idx {idx}: attention_mask: {attention_mask[idx]}"
         assert torch.all(attention_mask[idx][:-1] <= attention_mask[idx][1:]).item(), f"Attention mask must be left-to-right (non-decreasing; LLMs padding) for input idx {idx}: attention_mask: {attention_mask[idx]}"
+
+    assert torch.all(attention_mask[:,-1] == 1).item(), attention_mask
 
     # Forward pass with hidden states
     with torch.no_grad():
@@ -154,7 +158,6 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         hidden_states = outputs.hidden_states[layer] # shape: (batch_size, seq_len, hidden_dim)
 
         assert len(hidden_states.shape) == 3, f"hidden_states expected shape: (batch_size, seq_len, hidden_dim); got: {hidden_states.shape}"
-        assert len(attention_mask.shape) == 2, f"attention_mask expected shape: (batch_size, seq_len); got: {attention_mask.shape}"
         assert hidden_states.shape[0] == attention_mask.shape[0], f"hidden_states and attention_mask batch size mismatch: {hidden_states.shape[0]} vs {attention_mask.shape[0]}"
         assert hidden_states.shape[1] == attention_mask.shape[1], f"hidden_states and attention_mask sequence length mismatch: {hidden_states.shape[1]} vs {attention_mask.shape[1]}"
 
@@ -177,9 +180,10 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         # Last token pooling
         # TODO check that last_token_indices contains expected values and that once EoS is reached, the attention mask is 0 (it is being assumed here)
 
-        attention_mask_expanded_int = torch.round(attention_mask_expanded).int()
-        last_token_indices = utils.last_one_indices(attention_mask_expanded_int)
-        pooled_embeddings = hidden_states[torch.arange(hidden_states.shape[0]), last_token_indices, :]
+        #attention_mask_expanded_int = torch.round(attention_mask_expanded).int()
+        #last_token_indices = utils.last_one_indices(attention_mask_expanded_int)
+        #pooled_embeddings = hidden_states[torch.arange(hidden_states.shape[0]), last_token_indices, :]
+        pooled_embeddings = hidden_states[:, -1, :]
     elif pooling == "none":
         # No pooling, return all token embeddings (after removing padding with attention mask)
         pooled_embeddings = hidden_states * attention_mask_expanded
@@ -257,7 +261,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
             assert torch.all(_attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
             assert torch.all(_attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
 
-            tmp = torch.zeros(expected_shape, device=pooled_embeddings.device)
+            tmp = torch.zeros(expected_shape, device=pooled_embeddings.device, dtype=pooled_embeddings.dtype)
             tmp[:n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
 
             assert torch.allclose(torch.flip(pooled_embeddings[idx], dims=(0,)), tmp), f"Flipped pooled_embeddings does not match expected for input idx {idx}: {torch.flip(pooled_embeddings[idx])} vs {tmp}"
