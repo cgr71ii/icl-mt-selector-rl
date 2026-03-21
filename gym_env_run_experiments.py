@@ -676,8 +676,11 @@ def main():
     min_critic_learning_rate = critic_learning_rate / 10
     transformer_d_model = 128
     step_size = 500
+    step_size = max(int(step_size / (train_freq_steps * num_envs) + 0.5), 1) # We divide by (train_freq_steps * num_envs) to apply a similar number of times the learning rate regardless the number of environments and how much the training is delayed
     warmup_steps = step_size * 2
-    step_size = 20 # TODO remove
+    #step_size = 20 # TODO remove
+
+    logger.info("Step size and warmup steps: %d %d", step_size, warmup_steps)
 
     if not use_transformer:
         net_arch = {

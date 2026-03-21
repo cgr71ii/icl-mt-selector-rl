@@ -12,7 +12,7 @@ import gymnasium as gym
 from stable_baselines3 import DDPG, TD3
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import FlattenExtractor, NFeaturesExtractor, TransformerExtractor
+from stable_baselines3.common.torch_layers import FlattenExtractor, NFeaturesExtractor, TransformerExtractor, NFeaturesExtractorWithTimeStepEmbeddings
 import torch
 
 def main():
@@ -66,6 +66,8 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False)
     parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
+    parsed_kwargs["current_icl_examples_prepend"] = parsed_kwargs.get("current_icl_examples_prepend", True)
+    parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
 
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
@@ -90,13 +92,14 @@ def main():
     #parsed_kwargs["max_data_entries"] = max_data_entries
     #parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     #data_to_be_translated = data_to_be_translated[:max_data_entries if max_data_entries > 0 else None]
-    model_hidden_size = parsed_kwargs.get("model_hidden_size", 4096)
     pre_k = parsed_kwargs.pop("k", "0.05")
     pre_k_is_float = '.' in pre_k
     k = max(1, int(float(pre_k) * len(_data_icl_examples)) if pre_k_is_float else int(pre_k))
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
     add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
+    use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
+    actor_dropout_p = 0.0
     critic_dropout_p = 0.01
 
     logger.info("Seed: %s", seed)
@@ -118,27 +121,6 @@ def main():
     skip_we = action_dim // state_dim_per_token
     #retrieve_embeddings_training = lambda proto_action, _k, observations: env_training_dummy.get_closest_neighbors_urls(proto_action, k=_k, get_representations_instead_of_embeddings=False, debug=True)[0] # Get only the result, not I or D
     retrieve_embeddings_dev = lambda proto_action, _k, observations: env_eval_dev.unwrapped.get_closest_neighbors_urls(proto_action, k=k, get_representations_instead_of_embeddings=False, observations=observations, debug=True)[0]
-    #actor_transformer_args_and_kwargs = {
-    #    "d_model": 512,
-    #    "nhead": 4,
-    #    "dim_feedforward": 2048,
-    #    "nlayers": 3,
-    #    "max_seq_len": 16,
-    #    "projection_in": model_hidden_size,
-    #    "l2_norm": False,
-    #    "str_id": "actor",
-    #}
-    #critic_transformer_args_and_kwargs = {
-    #    "d_model": 512,
-    #    "nhead": 4,
-    #    "dim_feedforward": 2048,
-    #    "nlayers": 3,
-    #    "max_seq_len": 16,
-    #    "projection_in": model_hidden_size,
-    #    "str_id": "critic",
-    #}
-    #actor_use_transformer = True
-    #critic_use_transformer = True
     policy_actor_kwargs = {
         "squash_output": not actor_mlp_l2_norm, # actor l2-norm
         #"actor_lr_schedule": lambda foo: actor_learning_rate, # callable
@@ -146,10 +128,7 @@ def main():
         "actor_layer_norm_input": True,
         "actor_layer_norm_before_activation": True,
         "actor_last_layer_init_uniform_value": 0.001,
-        #"actor_dropout": True,
-        #"actor_dropout_p": 0.1,
-        #"actor_transformer": actor_use_transformer,
-        #"actor_transformer_args_and_kwargs": actor_transformer_args_and_kwargs,
+        "actor_dropout_p": actor_dropout_p,
         "actor_mlp_l2_norm": actor_mlp_l2_norm,
     }
     policy_critic_kwargs = {
@@ -158,14 +137,10 @@ def main():
         "critic_layer_norm_input": True,
         "critic_layer_norm_before_activation": True,
         #"critic_last_layer_init_uniform_value": 0.001,
-        "critic_dropout": True,
         "critic_dropout_p": critic_dropout_p, # DroQ paper
-        #"critic_transformer": critic_use_transformer,
-        #"critic_transformer_args_and_kwargs": critic_transformer_args_and_kwargs,
         #"critic_first_actions_then_features": True if critic_use_transformer else False,
     }
-    use_transformer = True
-    use_transformer = False # TODO remove
+    #use_transformer = True
     n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
     transformer_d_model = 128
 
@@ -183,10 +158,14 @@ def main():
             features_extractor_kwargs_actor = {}
             features_extractor_kwargs_critic = {}
         else:
+            #features_extractor_class = NFeaturesExtractorWithTimeStepEmbeddings
             features_extractor_class = NFeaturesExtractor
             features_extractor_kwargs_actor = {
                 "n": n_features,
                 "skip_n": action_dim,
+                #"state_dim_per_token": state_dim_per_token,
+                #"check_zeros": True if state_representation == "representation_per_token_with_features" else False,
+                #"step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
             }
             features_extractor_kwargs_critic = dict(features_extractor_kwargs_actor)
     else:
@@ -224,8 +203,9 @@ def main():
             #"expected_seq_len": None, # TODO remove
             "last_layer_norm": False,
             "last_linear_layer": True,
-            "remove_first_column_of_zeros": True,
+            "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features" else False,
             "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
+            "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
         }
         features_extractor_kwargs_actor = {
             "str_id": "actor",
@@ -272,6 +252,7 @@ def main():
         },
         device=device,
         replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
+        #replay_buffer_kwargs={"process_time_steps": True},
     )
 
     ## dev: evaluate and report result
