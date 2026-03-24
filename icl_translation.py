@@ -151,11 +151,30 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         assert torch.all(attention_mask[idx][:-1] <= attention_mask[idx][1:]).item(), f"Attention mask must be left-to-right (non-decreasing; LLMs padding) for input idx {idx}: attention_mask: {attention_mask[idx]}"
 
     assert torch.all(attention_mask[:,-1] == 1).item(), attention_mask
+    assert isinstance(layer, (str, int)), f"layer must be either str or int; got: {type(layer)}"
+
+    _layer = None
 
     # Forward pass with hidden states
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        hidden_states = outputs.hidden_states[layer] # shape: (batch_size, seq_len, hidden_dim)
+
+        if _layer is None:
+            if isinstance(layer, str):
+                if layer[-1] == '%':
+                    assert float(layer[:-1]) >= 0 and float(layer[:-1]) <= 100, f"Percentage layer must be between 0 and 100: got {layer}"
+
+                    _layer = int(float(layer[:-1]) / 100 * (len(outputs.hidden_states) - 1) + 0.5)
+                else:
+                    _layer = int(layer)
+            else:
+                _layer = layer
+
+            assert isinstance(_layer, int), f"_layer must be int; got: {type(_layer)}"
+
+            logger.debug("Using layer %s (original: %s) of %d total layers", _layer, layer, len(outputs.hidden_states))
+
+        hidden_states = outputs.hidden_states[_layer] # shape: (batch_size, seq_len, hidden_dim)
 
         assert len(hidden_states.shape) == 3, f"hidden_states expected shape: (batch_size, seq_len, hidden_dim); got: {hidden_states.shape}"
         assert hidden_states.shape[0] == attention_mask.shape[0], f"hidden_states and attention_mask batch size mismatch: {hidden_states.shape[0]} vs {attention_mask.shape[0]}"
@@ -178,11 +197,6 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         pooled_embeddings, _ = torch.max(masked_embeddings, dim=1)
     elif pooling == "last":
         # Last token pooling
-        # TODO check that last_token_indices contains expected values and that once EoS is reached, the attention mask is 0 (it is being assumed here)
-
-        #attention_mask_expanded_int = torch.round(attention_mask_expanded).int()
-        #last_token_indices = utils.last_one_indices(attention_mask_expanded_int)
-        #pooled_embeddings = hidden_states[torch.arange(hidden_states.shape[0]), last_token_indices, :]
         pooled_embeddings = hidden_states[:, -1, :]
     elif pooling == "none":
         # No pooling, return all token embeddings (after removing padding with attention mask)
@@ -238,6 +252,12 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         pooled_embeddings = torch.cat(list(model_features.values()), dim=-1)
 
         assert pooled_embeddings.shape == (hidden_states.shape[0], hidden_states.shape[1] - 1, len_features), f"pooled_embeddings shape mismatch: {pooled_embeddings.shape} vs {(hidden_states.shape[0], hidden_states.shape[1] - 1, len_features)}"
+    elif pooling == "mean+last":
+        sum_embeddings = torch.sum(hidden_states * attention_mask_expanded, dim=1)
+        sum_mask = attention_mask_expanded.sum(dim=1)
+        mean_pooled_embeddings = sum_embeddings / sum_mask
+        last_token_embeddings = hidden_states[:, -1, :]
+        pooled_embeddings = torch.cat([mean_pooled_embeddings, last_token_embeddings], dim=-1)
     else:
         raise ValueError(f"Unknown pooling method: {pooling}")
 

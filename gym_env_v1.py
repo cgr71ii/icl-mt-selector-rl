@@ -194,7 +194,7 @@ class MTICLEnv(gym.Env):
 
         assert not self.select_max_icl_examples_randomly, "Watch out: you should adapt the code to work with the transformer to process the max number of steps per environment similarly to how time steps are processed"
 
-        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
@@ -217,6 +217,8 @@ class MTICLEnv(gym.Env):
             #self.state_window_length = 512 + 1 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples and +1 for the current step
         elif self.state_representation == "representation_last_token_current_and_relative_diff":
             self.state_window_length = 4 # action representation, time_step, current last token representation, current last token - previous last token representation (0s if initial state)
+        elif self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+            self.state_window_length = 4 # action representation, time_step, mean plus last token pooled embeddings, current last representation - previous last representation (0s if initial state)
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -254,6 +256,9 @@ class MTICLEnv(gym.Env):
             self.embedding_pooling_model_method_state = "features"
         elif self.state_representation == "representation_last_token_current_and_relative_diff":
             self.embedding_pooling_model_method_state = "last"
+        elif self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+            self.embedding_pooling_model_method_state = "mean+last"
+            self.embedding_pooling_model_layer = "75%"
 
         # Model conf
         self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
@@ -341,7 +346,9 @@ class MTICLEnv(gym.Env):
         self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", True) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
         self.state_dim_per_token_time_step = utils.dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
 
-        if self.state_representation == "representation_last_token_current_and_relative_diff":
+        self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
+
+        if self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             self.state_dim = self.state_dim_per_token * 2 + self.state_dim_per_token_time_step + self.action_dim
 
         if self.knn_distance_ip:
@@ -746,7 +753,7 @@ class MTICLEnv(gym.Env):
             if idx == 0:
                 # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
-            elif idx == 1 and self.state_representation == "representation_last_token_current_and_relative_diff":
+            elif idx == 1 and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
                 self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
@@ -849,7 +856,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
-        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
@@ -1886,7 +1893,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff"):
+            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
@@ -1909,7 +1916,7 @@ class MTICLEnv(gym.Env):
 
         if self.state_representation == "representation_per_token_with_features":
             observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
-        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             pass
         elif self.time_step > 1:
             offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
@@ -1969,7 +1976,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
-        elif self.state_representation == "representation_last_token_current_and_relative_diff":
+        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             assert len(observation.shape) == 1, observation.shape
             assert observation.shape[0] == len(self.current_state_window[3]), f"{observation.shape} vs {len(self.current_state_window[3])}"
             assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step

@@ -167,7 +167,7 @@ def translate():
             trg_sentences = []
 
     pooling = utils.string2list(request_method.getlist("pooling"))
-    layer = list(map(int, utils.string2list(request_method.getlist("layer"))))
+    layer = utils.string2list(request_method.getlist("layer"))
     get_representation = True if route_name == "get_embedding_pooling" else False
     get_representation = [get_representation] * len(src_sentences)
 
@@ -361,7 +361,7 @@ def get_embedding_pooling():
             trg_sentences = []
 
     pooling = utils.string2list(request_method.getlist("pooling"))
-    layer = list(map(int, utils.string2list(request_method.getlist("layer"))))
+    layer = utils.string2list(request_method.getlist("layer"))
     get_representation = True if route_name == "get_embedding_pooling" else False
     get_representation = [get_representation] * len(src_sentences)
 
