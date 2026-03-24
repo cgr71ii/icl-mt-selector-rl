@@ -195,7 +195,7 @@ def translate():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none", "features"):
+        if p not in ("mean", "max", "last", "none", "features", "mean+last"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -389,7 +389,7 @@ def get_embedding_pooling():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none", "features"):
+        if p not in ("mean", "max", "last", "none", "features", "mean+last"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
