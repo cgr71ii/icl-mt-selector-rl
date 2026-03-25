@@ -362,13 +362,10 @@ class MTICLEnv(gym.Env):
         if not self.enable_eos_action:
             self.knn_always_add_eos_action = False
 
-        if self.state_representation == "representation_per_token_with_features":
-            assert self.embedding_pooling_model_method_state == "features", self.embedding_pooling_model_method_state
+        if self.apply_l2_normalization_state and self.state_representation in ("representation_per_token_with_features",):
+            self.logger_wrapper(gym.logger.warn, "L2 normalization should not be enabled with '%s' state representation: disabling", self.state_representation)
 
-            if self.apply_l2_normalization_state:
-                self.logger_wrapper(gym.logger.warn, "L2 normalization should not be enabled with 'representation_per_token_with_features' state representation: disabling")
-
-                self.apply_l2_normalization_state = False
+            self.apply_l2_normalization_state = False
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
@@ -1398,7 +1395,18 @@ class MTICLEnv(gym.Env):
                 translations = translations.numpy()
 
             if self.apply_l2_normalization_state:
-                translations = utils.l2_normalize(translations)
+                if self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+                    assert translations.shape[-1] % 2 == 0, translations.shape
+
+                    translations1 = utils.l2_normalize(translations[:,:translations.shape[-1] // 2])
+                    translations2 = utils.l2_normalize(translations[:,translations.shape[-1] // 2:])
+
+                    if numpy:
+                        translations = np.concatenate((translations1, translations2), axis=1)
+                    else:
+                        translations = torch.cat((translations1, translations2), dim=1)
+                else:
+                    translations = utils.l2_normalize(translations)
 
             if self.state_representation == "representation_per_token_with_features":
                 translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
@@ -1927,7 +1935,16 @@ class MTICLEnv(gym.Env):
                 assert np.allclose(self.current_state_window[idx], np.zeros_like(self.current_state_window[idx])), f"{self.time_step} + {offset} ...  {self.current_state_window.maxlen}: {idx}"
 
         if self.apply_l2_normalization_state:
-            assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
+            if self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+                assert observation.shape[-1] % 2 == 0, observation.shape
+
+                observation1 = utils.l2_normalize(observation[:observation.shape[-1] // 2])
+                observation2 = utils.l2_normalize(observation[observation.shape[-1] // 2:])
+
+                assert utils.check_l2_normalized(observation1), "Observation1 must be l2 normalized"
+                assert utils.check_l2_normalized(observation2), "Observation2 must be l2 normalized"
+            else:
+                assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
 
         if self.state_representation == "model_single_representation":
             self.current_state_window[0] = observation

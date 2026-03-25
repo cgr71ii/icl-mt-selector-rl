@@ -456,7 +456,7 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
     parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
-    parsed_kwargs["current_icl_examples_prepend"] = parsed_kwargs.get("current_icl_examples_prepend", True)
+    parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", True)))
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
@@ -466,6 +466,9 @@ def main():
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
     parsed_kwargs["current_icl_examples_prepend"] = False # TODO remove? When multiple ICL examples are prepended, the representations of the last tokens are too similar and the model can't diffentiate between different states
+
+    if state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+        parsed_kwargs["model_hidden_size"] *= 2
 
     # Some values
     pre_k_is_float = '.' in pre_k
@@ -510,7 +513,6 @@ def main():
     max_episodes_epochs = 100000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     #patience = 6 # early stopping patience (number of evals with no improvement)
-    #patience = 20 # TODO remove
     patience = -1 # disabled
     #patience = 3 # TODO remove?
     enable_eval = not disable_eval
@@ -544,7 +546,7 @@ def main():
     gamma = 1.0
     #gamma = 0.99
     #replay_buffer_size = 1000000
-    replay_buffer_size = 50000 # given 5 ICL examples and training set of 1000 sentences, this allows to store all transitions of 10 epochs (1000 * 5 * 10 = 50000)
+    #replay_buffer_size = 50000 # given 5 ICL examples and training set of 1000 sentences, this allows to store all transitions of 10 epochs (1000 * 5 * 10 = 50000)
     #replay_buffer_size = 10000
     #critic_learning_rate = 1e-3
     #actor_learning_rate = 1e-4
@@ -562,26 +564,31 @@ def main():
 #    max_steps_training = 10000 # steps while training
     #max_steps_training = 20000 # steps while training
     #max_steps_training = 50000 # steps while training
-    #max_steps_training = 100000 # steps while training
-    max_steps_training = 10000000 # steps while training # TODO remove?
+    max_steps_training = 100000 # steps while training
+    #max_steps_training = 10000000 # steps while training # TODO remove?
+    max_steps_training += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     #init_training_steps = 5000
-    init_training_steps = 10000
+    #init_training_steps = 10000
+    init_training_steps = int(max_steps_training * 0.1 + 0.5)
 #    init_training_steps = 1000
 #    init_training_steps = 2000
     #init_training_steps = 0 # TODO remove
     #init_training_steps = 10 # TODO remove
     #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
+    replay_buffer_size = int(max_steps * 0.5 + 0.5)
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
     add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
     use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
+    total_evaluations = max_steps_training // eval_freq
 
-    logger.info("Evaluation frequency (steps, adjusted by number of parallel environments): %d // %d = %d (total times evaluation: %d)", eval_freq, num_envs, max(1, eval_freq // num_envs), ((max_steps - init_training_steps) / num_envs) // max(1, eval_freq / num_envs))
+    logger.info("Evaluation frequency (steps, adjusted by number of parallel environments): %d // %d = %d (total evaluations: %d)", eval_freq, num_envs, max(1, eval_freq // num_envs), total_evaluations)
     logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
     logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
     logger.info("actor_mlp_l2_norm: %s", actor_mlp_l2_norm)
     logger.info("Actual batch_size for running the critic with the observations and the kNN elements: %d * min(%d, k) = %d", batch_size, add_all_knn_to_batch, batch_size * add_all_knn_to_batch)
+    logger.info("Replay buffer size: %d", replay_buffer_size)
 
     eval_freq = max(1, eval_freq // num_envs)
 
@@ -635,13 +642,18 @@ def main():
     #dropout_p = 0.0
     actor_dropout_p = 0.0
     #critic_dropout_p = 0.1
-    critic_dropout_p = 0.01 # DroQ paper if value greater than 0
-    exploration_rate_steps_percentage = 0.5
-    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage)
+    #critic_dropout_p = 0.01 # DroQ paper if value greater than 0
+    critic_dropout_p = 0.0 # TODO enable?
+    #exploration_rate_steps_percentage = 0.5
+    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * 0.5 + 0.5)
+    #exploration_rate_steps = 50000
+    #exploration_rate_steps = 50 # TODO remove
+    exploration_rate_steps_percentage_of_training = exploration_rate_steps / ((max_steps - init_training_steps) / num_envs)
     exploration_rate_initial = 1.0
-    exploration_rate_last = 0.01
-    #exploration_rate = LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration")
-    exploration_rate = 0.1
+    #exploration_rate_initial = 0.1 # TODO remove
+    exploration_rate_last = 0.05
+    exploration_rate = LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration")
+    #exploration_rate = 0.1
     #wolpertinger_target_policy_actor_noise = 0.1
     #wolpertinger_target_policy_actor_noise = 0.02
     wolpertinger_target_policy_actor_noise = 0.0212
@@ -656,7 +668,7 @@ def main():
 
     if state_representation == "representation_per_token_with_features":
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
-    elif state_representation == "representation_last_token_current_and_relative_diff":
+    elif state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
         n_features = state_dim_per_token * 2 + state_dim_per_token_time_step
     else:
         n_features = 0
@@ -669,7 +681,7 @@ def main():
 
         logger.info("Disabling share_features_extractor because wolpertinger_disable_actor is set to True")
 
-    logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage * 100, exploration_rate_initial, exploration_rate_last)
+    logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage_of_training * 100, exploration_rate_initial, exploration_rate_last)
     logger.info("Gradient steps (UTD: %s; train_freq_steps: %s): %d", update_to_data_ratio, train_freq_steps, gradient_steps)
 
     min_actor_learning_rate = actor_learning_rate / 10
@@ -727,8 +739,13 @@ def main():
     #    critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
 
     clr_fn = lambda x: 0.5*(1+np.sin(x*np.pi/2.))
-    actor_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=actor_learning_rate / 10, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="actor")
-    critic_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=critic_learning_rate / 10, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="critic")
+    min_actor_learning_rate = actor_learning_rate / 10
+    min_critic_learning_rate = critic_learning_rate / 10
+    #actor_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_actor_learning_rate, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="actor")
+    #critic_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_critic_learning_rate, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="critic")
+    total_steps = (max_steps - init_training_steps) // num_envs
+    actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_actor_learning_rate, str_id="actor")
+    critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
     policy_actor_kwargs = {
         #"squash_output": True,
         "squash_output": not actor_mlp_l2_norm, # actor l2-norm
@@ -766,7 +783,7 @@ def main():
                 step_embeddings_dim = state_dim_per_token
                 n -= step_embeddings_dim # "- step_embeddings_dim" to add the time_step embedding
                 skip_n += state_dim_per_token * 2 # "state_dim_per_token * 2" to remove the time_step information
-            elif state_representation == "representation_last_token_current_and_relative_diff":
+            elif state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
                 step_embeddings_dim = state_dim_per_token_time_step
                 #n -= state_dim_per_token_time_step
                 skip_n += state_dim_per_token_time_step
