@@ -293,7 +293,7 @@ def get_similarity(embeddings1, embeddings2, metric="cosine"):
     if metric == "cosine":
         similarity = 1.0 - distance # 1 - cosine_distance = cosine_similarity
 
-        assert np.all(similarity <= 2.0) and np.all(similarity >= 0.0), f"Cosine similarity must be between 0 and 2, got {similarity}"
+        assert np.all(similarity <= 1.0) and np.all(similarity >= -1.0), f"Cosine similarity must be between 0 and 2, got {similarity}"
     else:
         raise Exception(f"Metric not supported: {metric}")
 

@@ -22,6 +22,7 @@ from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor, NFeaturesExtractor, NFeaturesExtractorWithTimeStepEmbeddings
+from stable_baselines3.common.buffers import NStepReplayBuffer, MonteCarloReplayBuffer
 import numpy as np
 import torch
 
@@ -435,10 +436,10 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 5 # TODO remove
+    #max_data_entries = 1 # TODO remove
     #max_data_entries = 10 # TODO remove
     #max_data_entries = 50 # TODO remove
-    #max_data_icl_examples_entries = 64 # TODO remove
+    #max_data_icl_examples_entries = 8 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -448,14 +449,14 @@ def main():
     parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "chrf2")
     parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
     parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", True)
-    parsed_kwargs["repeat_translation_candidates_times"] = parsed_kwargs.get("repeat_translation_candidates_times", 1)
+    parsed_kwargs["repeat_translation_candidates_times"] = int(parsed_kwargs.get("repeat_translation_candidates_times", 4))
     parsed_kwargs["knn_always_add_eos_action"] = parsed_kwargs.get("knn_always_add_eos_action", True)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     parsed_kwargs["state_window_length"] = int(parsed_kwargs.get("state_window_length", 1024)) + 3
     parsed_kwargs["action_representation"] = parsed_kwargs.get("action_representation", "src_embedding:SONAR")
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
-    parsed_kwargs["knn_distance_ip"] = parsed_kwargs.get("knn_distance_ip", True)
+    parsed_kwargs["knn_distance_ip"] = bool(int(parsed_kwargs.get("knn_distance_ip", True)))
     parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", True)))
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
@@ -505,7 +506,7 @@ def main():
     #eval_freq = 2000 # steps
     #eval_freq = 5000 # steps
     eval_freq = 10000 # steps
-    #eval_freq = 20 # TODO remove
+    #eval_freq = 40 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -564,7 +565,8 @@ def main():
 #    max_steps_training = 10000 # steps while training
     #max_steps_training = 20000 # steps while training
     #max_steps_training = 50000 # steps while training
-    max_steps_training = 100000 # steps while training
+    #max_steps_training = 100000 # steps while training
+    max_steps_training = 200000
     #max_steps_training = 10000000 # steps while training # TODO remove?
     max_steps_training += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
@@ -577,7 +579,8 @@ def main():
     #init_training_steps = 10 # TODO remove
     #init_training_steps = 50 # TODO remove
     max_steps = max_steps_training + init_training_steps
-    replay_buffer_size = int(max_steps * 0.5 + 0.5)
+    #replay_buffer_size = int(max_steps * 0.5 + 0.5) # small value to avoid remove old transitions and avoid averaging Q-values over "bad" actions. If monte carlo updates are used, and old transitions are updated to the best Q-value found, then this value can be increased
+    replay_buffer_size = int(max_steps * 1.0 + 0.5)
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
     add_all_knn_to_batch = max(1, int(parsed_kwargs.pop("add_all_knn_to_batch", 1)))
     use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
@@ -743,7 +746,7 @@ def main():
     min_critic_learning_rate = critic_learning_rate / 10
     #actor_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_actor_learning_rate, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="actor")
     #critic_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_critic_learning_rate, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="critic")
-    total_steps = (max_steps - init_training_steps) // num_envs
+    total_steps = max(int((max_steps - init_training_steps) / (train_freq_steps * num_envs) + 0.5), 1)
     actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_actor_learning_rate, str_id="actor")
     critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
     policy_actor_kwargs = {
@@ -767,6 +770,8 @@ def main():
         "critic_dropout_p": critic_dropout_p, # DroQ paper
         #"critic_first_actions_then_features": True if use_transformer else False,
     }
+    #n_critics = 2 # TD3 uses 2 critics to mitigate overestimation bias
+    n_critics = 1
 
     if not use_transformer:
         if n_features <= 0:
@@ -872,6 +877,7 @@ def main():
         #learning_rate=critic_learning_rate,
         learning_rate=critic_lr_schedule,
         policy_kwargs={
+            "n_critics": n_critics,
             # Optimizer
             "optimizer_class": torch.optim.AdamW,
             "optimizer_kwargs": {
@@ -896,7 +902,7 @@ def main():
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
-            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_layer_dropout": 0.0,
             "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
             "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
             "activation_fn": torch.nn.GELU,
@@ -909,7 +915,10 @@ def main():
         train_freq=(train_freq_steps, "step"), # sparse reward environment: we only have reward != 0 at the end of the episode
         buffer_size=replay_buffer_size,
         #replay_buffer_kwargs={} if not use_transformer else {"process_time_steps": True},
-        replay_buffer_kwargs={"process_time_steps": True},
+        #replay_buffer_class=NStepReplayBuffer,
+        replay_buffer_class=MonteCarloReplayBuffer,
+        #replay_buffer_kwargs={"process_time_steps": True, "n_steps": max_icl_examples, "gamma": gamma},
+        replay_buffer_kwargs={"process_time_steps": True, "episodes_length": max_icl_examples, "gamma": gamma, "update_old_q_values_with_max_found": True, "epsilon": 1e-7},
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         #max_grad_norm=0.5,
@@ -987,6 +996,7 @@ def main():
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
+            "n_critics": n_critics,
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_dev,
             "callback_retrieve_knn_training": None,
@@ -1002,7 +1012,7 @@ def main():
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
-            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_layer_dropout": 0.0,
             "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
             "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
             "activation_fn": torch.nn.GELU,
@@ -1034,6 +1044,7 @@ def main():
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
+            "n_critics": n_critics,
             "net_arch": dict(net_arch),
             "callback_retrieve_knn": retrieve_embeddings_test,
             "callback_retrieve_knn_training": None,
@@ -1049,7 +1060,7 @@ def main():
             "wolpertinger_disable_actor": wolpertinger_disable_actor,
             "critic_action_layer_norm_input": True,
             "critic_features_layer_norm_input": True,
-            "critic_action_layer_dropout": critic_dropout_p,
+            "critic_action_layer_dropout": 0.0,
             "critic_action_linear_layer_projection": critic_action_linear_layer_projection,
             "critic_features_linear_layer_projection": critic_features_linear_layer_projection,
             "activation_fn": torch.nn.GELU,

@@ -73,9 +73,10 @@ def main():
     icl_examples_file = sys.argv[3] # tab-separated file with icl examples with format: "src_sentence\ttrg_sentence"
     icl_num_examples = int(sys.argv[4]) # if 0, zero-shot
     batch_size, batch_size_embeddings = tuple(map(int, sys.argv[5].split(':'))) if len(sys.argv) > 5 else (8, 8)
-    seed = sys.argv[6] if len(sys.argv) > 6 else None # default random seed
+    seed = int(sys.argv[6]) if len(sys.argv) > 6 else None # default random seed
     server_port = sys.argv[7] if len(sys.argv) > 7 else "8000"
-    embeddings_name = sys.argv[8] if len(sys.argv) > 8 else "SONAR"
+    server_name = sys.argv[8] if len(sys.argv) > 8 else "127.0.0.1"
+    embeddings_name = sys.argv[9] if len(sys.argv) > 9 else "SONAR"
 
     assert icl_num_examples >= 0, f"icl_num_examples must be non-negative, got: {icl_num_examples}"
 
@@ -109,10 +110,10 @@ def main():
     random.shuffle(icl_examples_pool)
 
     sentences_embeddings = embeddings_utils.get_embeddings(embeddings_name, sentences, src_lang_value, batch_size=batch_size_embeddings)
-    icl_examples_pool_embeddings = embeddings_utils.get_embeddings(embeddings_name, icl_examples_pool, src_lang_value, batch_size=batch_size_embeddings)
+    icl_examples_pool_embeddings = embeddings_utils.get_embeddings(embeddings_name, [_icl_examples_pool[0] for _icl_examples_pool in icl_examples_pool], src_lang_value, batch_size=batch_size_embeddings)
 
     # Encode each sentence in base64
-    url = f"http://127.0.0.1:{server_port}/translate"
+    url = f"http://{server_name}:{server_port}/translate"
     src_sentences_idx = 0
 
     for batch, batch_icl_examples in batchify(sentences, batch_size, sentences_embeddings=sentences_embeddings, icl_examples_pool=icl_examples_pool, icl_examples_pool_embeddings=icl_examples_pool_embeddings, icl_num_examples=icl_num_examples):
