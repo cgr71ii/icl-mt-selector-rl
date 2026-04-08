@@ -31,7 +31,7 @@ def init(batch_size=16, streamer_max_latency=0.1, pretrained_model="meta-llama/L
         "--verbose",
 #        "--disable-streamer", # It should be enabled for crawls of multiple websites, but disabled for a few websites
         "--num-beams", str(num_beams),
-        "--store-translations",
+#        "--store-translations",
         "--max-new-tokens", str(max_new_tokens),
         "--debug",
     ])

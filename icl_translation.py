@@ -351,6 +351,7 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
                  zswr_chat_response_prefix_template="[trg_lang]: [translation_text]",
                  chat_system_prompt_template="You are a machine translation system that translates sentences from [src_lang] to [trg_lang]. You just respond with the translation, without any additional comments.",
                  user_prefix_template='',
+                 compute_src_sentence_n_tokens=False,
 ):
     if teacher_forcing and icl_examples is None:
         icl_examples = [[] for _ in range(len(src_sentences))]
@@ -530,19 +531,20 @@ def build_prompt(src_sentences, src_lang, trg_lang, tokenizer, icl_examples, _bs
 
         prompts.append(prompt)
 
-        if lock is not None:
-            lock.acquire()
+        if compute_src_sentence_n_tokens:
+            if lock is not None:
+                lock.acquire()
 
-        if teacher_forcing:
-            _src_sentence_n_tokens = tokenizer(_src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
-            _trg_sentence_n_tokens = tokenizer(_trg_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
-            src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens + _trg_sentence_n_tokens)
-        else:
-            _src_sentence_n_tokens = tokenizer(src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
-            src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens)
+            if teacher_forcing:
+                _src_sentence_n_tokens = tokenizer(_src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+                _trg_sentence_n_tokens = tokenizer(_trg_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+                src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens + _trg_sentence_n_tokens)
+            else:
+                _src_sentence_n_tokens = tokenizer(src_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+                src_sentence_n_tokens = max(src_sentence_n_tokens, _src_sentence_n_tokens)
 
-        if lock is not None:
-            lock.release()
+            if lock is not None:
+                lock.release()
 
         src_sentence_idx += 1
 
