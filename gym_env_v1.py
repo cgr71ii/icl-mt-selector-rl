@@ -183,6 +183,7 @@ class MTICLEnv(gym.Env):
         self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by td3.py
         self.select_max_icl_examples_randomly = utils.dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
         self.current_max_icl_examples = self.max_icl_examples
+        self.process_token_time_step = bool(int(utils.dict_or_default(kwargs, "process_token_time_step", True)))
 
         if self.select_max_icl_examples_randomly:
             if self.state_representation != "representation_per_token_with_features":
@@ -217,10 +218,19 @@ class MTICLEnv(gym.Env):
             #self.state_window_length = 512 + 1 + 1 + 1 # +1 for the action representation at the beginning and +1 for the state representation regarding self.current_max_icl_examples and +1 for the current step
         elif self.state_representation == "representation_last_token_current_and_relative_diff":
             self.state_window_length = 4 # action representation, time_step, current last token representation, current last token - previous last token representation (0s if initial state)
+
+            if not self.process_token_time_step:
+                self.state_window_length -= 1
         elif self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
             self.state_window_length = 4 # action representation, time_step, mean plus last token pooled embeddings, current last representation - previous last representation (0s if initial state)
+
+            if not self.process_token_time_step:
+                self.state_window_length -= 1
         elif self.state_representation == "representation_mean_75_perc_layer":
             self.state_window_length = 3 # action representation, time_step, mean pooled embeddings
+
+            if not self.process_token_time_step:
+                self.state_window_length -= 1
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -280,7 +290,7 @@ class MTICLEnv(gym.Env):
         else:
             self.state_dim = self.model_hidden_size
 
-        if self.action_representation != "llm":
+        if self.action_representation not in ("llm", "discrete_index"): # TODO finish "discrete_index"
             self.logger_wrapper(gym.logger.info,
                                 "Remember to set the correct model_hidden_size_action_{src,trg}_sentence according to the appropriate embedding sizes: %s and %s",
                                 self.model_hidden_size_action_src_sentence, self.model_hidden_size_action_trg_sentence)
@@ -315,6 +325,12 @@ class MTICLEnv(gym.Env):
         #
         #    assert self.model_hidden_size_action_src_sentence == 0, self.model_hidden_size_action_src_sentence
         #    assert self.model_hidden_size_action_trg_sentence > 0, self.model_hidden_size_action_trg_sentence
+        elif self.action_representation == "discrete_index":
+            self.action_dim = 1
+            self.action_representation_src_sentence = "discrete_index"
+            self.action_representation_trg_sentence = "discrete_index"
+
+            self.logger_wrapper(gym.logger.info, "Action representation is 'discrete_index': action will be represented as the index of the selected translation candidate in the list of candidates provided as input to the model. Remember you cannot change the pool!")
         else:
             raise Exception(f"Action representation not supported: {self.action_representation}")
 
@@ -359,8 +375,14 @@ class MTICLEnv(gym.Env):
         if self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             self.state_dim = self.state_dim_per_token * 2 + self.state_dim_per_token_time_step + self.action_dim
 
+            if not self.process_token_time_step:
+                self.state_dim -= self.state_dim_per_token_time_step
+
         if self.state_representation == "representation_mean_75_perc_layer":
             self.state_dim = self.state_dim_per_token + self.state_dim_per_token_time_step + self.action_dim
+
+            if not self.process_token_time_step:
+                self.state_dim -= self.state_dim_per_token_time_step
 
         if self.knn_distance_ip:
             assert self.apply_l2_normalization_action, "L2 normalization of action embeddings should be enabled when using inner product (IP) as distance metric for kNN search (cosine similarity)."
@@ -764,7 +786,7 @@ class MTICLEnv(gym.Env):
             if idx == 0:
                 # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
-            elif idx == 1 and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
+            elif idx == 1 and self.process_token_time_step and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
                 self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
@@ -878,15 +900,20 @@ class MTICLEnv(gym.Env):
 
             assert token_representations.shape == (1, self.state_dim_per_token), token_representations.shape
 
-            self.current_state_window[1] = np.zeros(self.state_dim_per_token_time_step)
-            self.current_state_window[2] = token_representations[0]
+            if self.process_token_time_step:
+                self.current_state_window[1] = np.zeros(self.state_dim_per_token_time_step)
+                data_idx = 2
 
-            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+                assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+            else:
+                data_idx = 1
 
-            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+            self.current_state_window[data_idx] = token_representations[0]
+
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
 
             if self.state_representation != "representation_mean_75_perc_layer":
-                assert np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
+                assert np.allclose(self.current_state_window[data_idx + 1], np.zeros_like(self.current_state_window[data_idx + 1]))
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
         observation = self.postprocessing_observation(observation)
@@ -1191,7 +1218,7 @@ class MTICLEnv(gym.Env):
         payload = []
 
         for name in (self.action_representation_src_sentence, self.action_representation_trg_sentence):
-            if name is not None and name != "llm":
+            if name is not None and name not in ("llm", "discrete_index"):
                 payload.append(("name", name))
 
         if len(payload) == 0:
@@ -2013,24 +2040,38 @@ class MTICLEnv(gym.Env):
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
         elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             assert len(observation.shape) == 1, observation.shape
-            assert observation.shape[0] == len(self.current_state_window[3]), f"{observation.shape} vs {len(self.current_state_window[3])}"
-            assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step
-            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            self.current_state_window[3] = observation - self.current_state_window[2] # this first before updating self.current_state_window[2]!
-            self.current_state_window[2] = observation
+            if self.process_token_time_step:
+                assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step
+                assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            self.logger_wrapper(gym.logger.debug, "First ... last representations (current): %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
-            self.logger_wrapper(gym.logger.debug, "First ... last representations (relative diff): %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
+                data_idx = 2
+            else:
+                data_idx = 1
+
+            assert observation.shape[0] == len(self.current_state_window[data_idx + 1]), f"{observation.shape} vs {len(self.current_state_window[data_idx + 1])}"
+
+            self.current_state_window[data_idx + 1] = observation - self.current_state_window[data_idx] # this first before updating self.current_state_window[2]!
+            self.current_state_window[data_idx] = observation
+
+            self.logger_wrapper(gym.logger.debug, "First ... last representations (current): %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations (relative diff): %s ... %s", self.current_state_window[data_idx + 1][:10], self.current_state_window[data_idx + 1][-10:])
         elif self.state_representation == "representation_mean_75_perc_layer":
             assert len(observation.shape) == 1, observation.shape
-            assert observation.shape[0] == len(self.current_state_window[2]), f"{observation.shape} vs {len(self.current_state_window[2])}"
-            assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step
-            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            self.current_state_window[2] = observation
+            if self.process_token_time_step:
+                assert len(self.current_state_window[1]) == self.state_dim_per_token_time_step
+                assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+                data_idx = 2
+            else:
+                data_idx = 1
+
+            assert observation.shape[0] == len(self.current_state_window[data_idx]), f"{observation.shape} vs {len(self.current_state_window[data_idx])}"
+
+            self.current_state_window[data_idx] = observation
+
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
         else:
             self.current_state_window[self.time_step] = observation
 
