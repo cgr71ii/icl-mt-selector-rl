@@ -515,6 +515,8 @@ def get_embedding_pooling():
 
 #def translate_batch(src_sentences, icl_examples, src_lang, trg_lang):
 def translate_batch(data):
+    # In this method is where data from different connections are mixed, so we need to be careful with the assumptions on the data and the parameters...
+
     src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences = zip(*data)
     src_sentences = list(src_sentences)
     icl_examples = list(icl_examples)
@@ -526,6 +528,10 @@ def translate_batch(data):
     trg_sentences = list(trg_sentences)
 
     assert len(icl_examples) == len(src_sentences) == len(src_lang) == len(trg_lang) == len(pooling) == len(layer) == len(get_representation) == len(trg_sentences), f"Length mismatch: {len(icl_examples)} vs {len(src_sentences)} vs {len(src_lang)} vs {len(trg_lang)} vs {len(pooling)} vs {len(layer)} vs {len(get_representation)} vs {len(trg_sentences)}"
+    assert len(set(pooling)) == 1, f"Expected all pooling values to be the same, got: {pooling}"
+    assert len(set(layer)) == 1, f"Expected all layer values to be the same, got: {layer}"
+    assert len(set(get_representation)) == 1, f"Expected all get_representation values to be the same, got: {get_representation}"
+    assert all([trg_sentence is not None for trg_sentence in trg_sentences]) or all([trg_sentence is None for trg_sentence in trg_sentences]), f"Expected all trg_sentences to be either None or not None, got: {trg_sentences}"
 
     pooling = pooling[0]
     layer = layer[0]
@@ -982,6 +988,11 @@ def get_embedding_from_given_model_close():
 
 def embedding_from_given_model_batch(data):
     name, lang, sentences = zip(*data)
+
+    assert len(name) == len(lang) == len(sentences), f"Length mismatch: {len(name)} vs {len(lang)} vs {len(sentences)}"
+    assert len(set(name)) == 1, f"Expected all names to be the same, got: {name}"
+    assert len(set(lang)) == 1, f"Expected all langs to be the same, got: {lang}"
+
     name = list(name)[0]
     lang = list(lang)[0]
     sentences = list(sentences)

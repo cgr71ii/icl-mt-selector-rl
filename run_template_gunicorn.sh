@@ -54,6 +54,7 @@ pretrained_model="$2" # e.g., meta-llama/Llama-2-7b-hf
 gport="$3"
 num_beams="$4"
 gpus="$5"
+bsz="$6"
 
 if [[ -z "$template_file" ]] || [[ -z "$pretrained_model" ]]; then
     echo "Usage: $0 <template_file> <pretrained_model>"
@@ -64,6 +65,9 @@ if [[ -z "$gport" ]]; then
 fi
 if [[ -z "$num_beams" ]]; then
   num_beams="4"
+fi
+if [[ -z "$bsz" ]]; then
+  bsz="16"
 fi
 
 if [[ ! -f "$template_file" ]]; then
@@ -82,6 +86,7 @@ envvars_after=$(export | sort)
 echo "$(date) GPUs: $CUDA_VISIBLE_DEVICES"
 echo "$(date) starting gunicorn server with template: $template_file and model: $pretrained_model"
 echo "$(date) num_beams: $num_beams"
+echo "$(date) Batch size: $bsz"
 
 # use '--bind "0.0.0.0:$gport"'' to bind to all interfaces and be able to access the server from a different machine (or just use a specific interface)
 
@@ -92,7 +97,7 @@ if [[ ! -z "$slurm_installed" ]]; then
     slurm_wrapper="srun --gres=gpu:${gpus} --cpus-per-task=2 --mem-per-cpu=20G"
 fi
 
-$slurm_wrapper gunicorn --bind "0.0.0.0:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init(4, 0.2, '$pretrained_model', True, '$num_beams', 192)" &
+$slurm_wrapper gunicorn --bind "0.0.0.0:$gport" --timeout 0 -w 1 --threads 10 --worker-class gthread "flask_server_wrapper:init($bsz, 0.2, '$pretrained_model', True, '$num_beams', 192)" &
 pid=$!
 
 echo "$(date) start server: pid $pid"
