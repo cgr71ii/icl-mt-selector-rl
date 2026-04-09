@@ -290,7 +290,7 @@ class MTICLEnv(gym.Env):
         else:
             self.state_dim = self.model_hidden_size
 
-        if self.action_representation not in ("llm", "discrete_index"): # TODO finish "discrete_index"
+        if self.action_representation not in ("llm", "discrete_index"):
             self.logger_wrapper(gym.logger.info,
                                 "Remember to set the correct model_hidden_size_action_{src,trg}_sentence according to the appropriate embedding sizes: %s and %s",
                                 self.model_hidden_size_action_src_sentence, self.model_hidden_size_action_trg_sentence)
@@ -367,7 +367,7 @@ class MTICLEnv(gym.Env):
         self.reward_division = int(utils.dict_or_default(kwargs, "reward_division", 1.0))
         self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
-        self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", True) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
+        self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
         self.state_dim_per_token_time_step = utils.dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
@@ -383,6 +383,11 @@ class MTICLEnv(gym.Env):
 
             if not self.process_token_time_step:
                 self.state_dim -= self.state_dim_per_token_time_step
+
+        if self.action_representation == "discrete_index" and self.apply_l2_normalization_action:
+            self.logger_wrapper(gym.logger.warn, "L2 normalization of action embeddings should not be enabled when using 'discrete_index' action representation: disabling")
+
+            self.apply_l2_normalization_action = False
 
         if self.knn_distance_ip:
             assert self.apply_l2_normalization_action, "L2 normalization of action embeddings should be enabled when using inner product (IP) as distance metric for kNN search (cosine similarity)."
@@ -425,34 +430,49 @@ class MTICLEnv(gym.Env):
         #self.action_space = gym.spaces.Box(-1., 1., shape=(self.action_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
 
         error_when_sampling = False
+        self.num_icl_examples = utils.dict_or_default(kwargs, "num_icl_examples", None)
+        self.num_icl_examples = int(self.num_icl_examples) if self.num_icl_examples is not None else None
 
-        if initial_sample_list_actions is not None:
-            assert isinstance(initial_sample_list_actions, list), type(initial_sample_list_actions)
-            assert len(initial_sample_list_actions) > 0
-            assert isinstance(initial_sample_list_actions[0], tuple), type(initial_sample_list_actions[0])
-            assert len(initial_sample_list_actions[0]) == 2, len(initial_sample_list_actions[0])
-            assert isinstance(initial_sample_list_actions[0][0], str), type(initial_sample_list_actions[0][0])
-            assert isinstance(initial_sample_list_actions[0][1], np.ndarray), type(initial_sample_list_actions[0][1])
-            assert len(initial_sample_list_actions[0][1].shape) == 1, initial_sample_list_actions[0][1].shape
-            assert initial_sample_list_actions[0][1].shape[0] == self.action_dim, initial_sample_list_actions[0][1].shape
+        if self.action_representation == "discrete_index":
+            assert self.action_dim == 1, self.action_dim
+            assert self.num_icl_examples is not None
 
-            self.logger_wrapper(gym.logger.info, "Loading initial sample list actions with %d entries", len(initial_sample_list_actions))
+            if self.enable_eos_action:
+                self.num_icl_examples += 1
 
-            _initial_sample_list_actions = [(initial_sample_list_actions[i][0], initial_sample_list_actions[i][1].astype(np.float32)) for i in range(len(initial_sample_list_actions))]
+            self.action_space = gym.spaces.Discrete(self.num_icl_examples, start=0, seed=self._seed)
+
+            if initial_sample_list_actions is not None:
+                self.logger_wrapper(gym.logger.warning, "initial_sample_list_actions is not compatible with 'discrete_index' action representation and will be ignored")
         else:
-            #self.logger_wrapper(gym.logger.warning, "Generating initial sample list actions with random normal values: this is not expected by the Wolpertinger policy and should only be used for non-main training environments")
+            if initial_sample_list_actions is not None:
+                assert isinstance(initial_sample_list_actions, list), type(initial_sample_list_actions)
+                assert len(initial_sample_list_actions) > 0
+                assert isinstance(initial_sample_list_actions[0], tuple), type(initial_sample_list_actions[0])
+                assert len(initial_sample_list_actions[0]) == 2, len(initial_sample_list_actions[0])
+                assert isinstance(initial_sample_list_actions[0][0], str), type(initial_sample_list_actions[0][0])
+                assert isinstance(initial_sample_list_actions[0][1], np.ndarray), type(initial_sample_list_actions[0][1])
+                assert len(initial_sample_list_actions[0][1].shape) == 1, initial_sample_list_actions[0][1].shape
+                assert initial_sample_list_actions[0][1].shape[0] == self.action_dim, initial_sample_list_actions[0][1].shape
 
-            #_initial_sample_list_actions = [np.random.normal(np.zeros(self.action_dim), 0.1 * np.ones(self.action_dim)).astype(np.float32) for _ in range(1000)] # TODO use parameter
-            _initial_sample_list_actions = None
-            error_when_sampling = True
+                self.logger_wrapper(gym.logger.info, "Loading initial sample list actions with %d entries", len(initial_sample_list_actions))
 
-        action_space_kwargs = {
-            "sample_list_actions": _initial_sample_list_actions,
-            "sample_list_actions_is_callable": False, # SubprocVecEnv does pickle environments, and local functions can't be pickled
-            "max_icl_examples": self.max_icl_examples,
-        }
-        self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, error_when_sampling=error_when_sampling, **action_space_kwargs)
-        self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
+                _initial_sample_list_actions = [(initial_sample_list_actions[i][0], initial_sample_list_actions[i][1].astype(np.float32)) for i in range(len(initial_sample_list_actions))]
+            else:
+                #self.logger_wrapper(gym.logger.warning, "Generating initial sample list actions with random normal values: this is not expected by the Wolpertinger policy and should only be used for non-main training environments")
+
+                #_initial_sample_list_actions = [np.random.normal(np.zeros(self.action_dim), 0.1 * np.ones(self.action_dim)).astype(np.float32) for _ in range(1000)] # TODO use parameter
+                _initial_sample_list_actions = None
+                error_when_sampling = True
+
+            action_space_kwargs = {
+                "sample_list_actions": _initial_sample_list_actions,
+                "sample_list_actions_is_callable": False, # SubprocVecEnv does pickle environments, and local functions can't be pickled
+                "max_icl_examples": self.max_icl_examples,
+            }
+            self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, error_when_sampling=error_when_sampling, seed=self._seed, **action_space_kwargs)
+
+        self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,), seed=self._seed) # input/output model is expected to have tanh in order to be in [-1, 1]
 
     def get_int_env_id(self):
         try:
@@ -464,10 +484,17 @@ class MTICLEnv(gym.Env):
         assert isinstance(action, np.ndarray), type(action)
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
-        translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
-        translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
-        translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
-        action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement)
+        if self.action_representation == "discrete_index":
+            assert action.shape == (1,), f"Expected action shape (1,) for 'discrete_index' action representation, got {action.shape}"
+            action_idx = int(action[0])
+            action_url = [[self.icl_example_representation[action_idx]]]
+            action_url_idx = np.array([[action_idx]])
+            action_url_distance = np.array([[0.0]])
+        else:
+            translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
+            translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
+            translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
+            action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement)
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
@@ -624,7 +651,7 @@ class MTICLEnv(gym.Env):
         self.src_data_overlap_src_icl_examples = 0
         #self.observation_hash_dict = {} # We do not remove this data in _soft_reset because the replay buffer is not reseted after an episode ends
         self.str2representation = {} # Needed for knn search and apply_step (sentences, icl_examples and EOS token)
-        self.src_sentences_index = faiss.IndexFlatL2(self.action_dim)
+        self.src_sentences_index = faiss.IndexFlatL2(self.action_dim) if self.action_representation != "discrete_index" else None
 
         # Load data
         self.load_data()
@@ -645,7 +672,9 @@ class MTICLEnv(gym.Env):
 
         # Insert all ICL examples in the embeddings index
         ## This should be placed in self._soft_reset if the index changes after each episode (e.g., ICL examples are removed during the episode)
-        if self.knn_distance_ip:
+        if self.action_representation == "discrete_index":
+            self.embeddings_index = None
+        elif self.knn_distance_ip:
             self.embeddings_index = faiss.IndexFlatIP(self.action_dim)
         else:
             self.embeddings_index = faiss.IndexFlatL2(self.action_dim)
@@ -656,58 +685,82 @@ class MTICLEnv(gym.Env):
         ## ICL examples
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d ICL examples", len(self.data_icl_examples))
 
+        if self.action_representation == "discrete_index":
+            assert self.num_icl_examples is not None
+        elif self.num_icl_examples is None:
+            self.num_icl_examples = len(self.data_icl_examples)
+
+            if self.enable_eos_action:
+                self.num_icl_examples += 1
+
         representations_str = [f"{src_icl}\t{trg_icl}" for src_icl, trg_icl in self.data_icl_examples]
-        representations_emb = self.get_action_representation(self.data_icl_examples)
 
-        #np.save("actions.npy", representations_emb)
-        #self.logger_wrapper(gym.logger.error, "DONE")
-        #time.sleep(100)
-        #sys.exit(0)
+        if self.action_representation == "discrete_index":
+            seen_examples = set()
+            n = 1 if self.enable_eos_action else 0
 
-        assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+            for _str in representations_str:
+                if _str not in seen_examples:
+                    seen_examples.add(_str)
 
-        self.insert_embeddings(representations_str, representations_emb)
+                    self.str2representation[_str] = n
+                    self.str2representation_valid_actions_k.append(_str)
 
-        if len(representations_str) != len(set(representations_str)):
-            self.logger_wrapper(gym.logger.warn, "Duplicate ICL example representations found: %d", len(representations_str) - len(set(representations_str)))
+                    n += 1
+        else:
+            representations_emb = self.get_action_representation(self.data_icl_examples)
 
-        for _str, emb in zip(representations_str, representations_emb):
-            assert emb.shape[0] == self.action_dim, f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+            #np.save("actions.npy", representations_emb)
+            #self.logger_wrapper(gym.logger.error, "DONE")
+            #time.sleep(100)
+            #sys.exit(0)
 
-            self.str2representation[_str] = emb
+            assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-            self.str2representation_valid_actions_k.append(_str)
+            self.insert_embeddings(representations_str, representations_emb)
 
-        distances = []
-        abs_sum_values = []
+            if len(representations_str) != len(set(representations_str)):
+                self.logger_wrapper(gym.logger.warn, "Duplicate ICL example representations found: %d", len(representations_str) - len(set(representations_str)))
 
-        for idx1 in range(len(representations_emb)):
-            idx2 = idx1 + 1
+            for _str, emb in zip(representations_str, representations_emb):
+                assert emb.shape[0] == self.action_dim, f"Expected embedding shape {self.action_dim}, got {emb.shape[0]} for {_str}"
 
-            abs_sum_values.append(np.sum(np.abs(representations_emb[idx1])))
+                self.str2representation[_str] = emb
 
-            while idx2 < len(representations_emb):
-                distances.append(np.linalg.norm(representations_emb[idx1] - representations_emb[idx2]))
+                self.str2representation_valid_actions_k.append(_str)
 
-                idx2 += 1
+            distances = []
+            abs_sum_values = []
 
-        distances_max = max(distances)
-        distances_min = min(distances)
-        distances_avg = sum(distances) / len(distances) if len(distances) > 0 else 0.0
-        distances_mean = statistics.mean(distances) if len(distances) > 1 else 0.0
-        distances_stdev = statistics.stdev(distances) if len(distances) > 1 else 0.0
-        distances_var = statistics.variance(distances) if len(distances) > 1 else 0.0
-        abs_sum_values_max = max(abs_sum_values)
-        abs_sum_values_min = min(abs_sum_values)
-        abs_sum_values_avg = sum(abs_sum_values) / len(abs_sum_values) if len(abs_sum_values) > 0 else 0.0
-        abs_sum_values_mean = statistics.mean(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
-        abs_sum_values_stdev = statistics.stdev(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
-        abs_sum_values_var = statistics.variance(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+            for idx1 in range(len(representations_emb)):
+                idx2 = idx1 + 1
 
-        self.logger_wrapper(gym.logger.info, "ICL examples pairwise distances: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", distances_min, distances_max, distances_avg, distances_mean, distances_stdev, distances_var)
-        self.logger_wrapper(gym.logger.info, "ICL examples abs sum values: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", abs_sum_values_min, abs_sum_values_max, abs_sum_values_avg, abs_sum_values_mean, abs_sum_values_stdev, abs_sum_values_var)
+                abs_sum_values.append(np.sum(np.abs(representations_emb[idx1])))
 
-        time.sleep(self.initial_time_sleep) # wait so ICL examples and EoS token are not mixed due to parallel envs (i.e., num_envs > 1) and service-streamer, raising an error
+                while idx2 < len(representations_emb):
+                    distances.append(np.linalg.norm(representations_emb[idx1] - representations_emb[idx2]))
+
+                    idx2 += 1
+
+            distances_max = max(distances)
+            distances_min = min(distances)
+            distances_avg = sum(distances) / len(distances) if len(distances) > 0 else 0.0
+            distances_mean = statistics.mean(distances) if len(distances) > 1 else 0.0
+            distances_stdev = statistics.stdev(distances) if len(distances) > 1 else 0.0
+            distances_var = statistics.variance(distances) if len(distances) > 1 else 0.0
+            abs_sum_values_max = max(abs_sum_values)
+            abs_sum_values_min = min(abs_sum_values)
+            abs_sum_values_avg = sum(abs_sum_values) / len(abs_sum_values) if len(abs_sum_values) > 0 else 0.0
+            abs_sum_values_mean = statistics.mean(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+            abs_sum_values_stdev = statistics.stdev(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+            abs_sum_values_var = statistics.variance(abs_sum_values) if len(abs_sum_values) > 1 else 0.0
+
+            self.logger_wrapper(gym.logger.info, "ICL examples pairwise distances: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", distances_min, distances_max, distances_avg, distances_mean, distances_stdev, distances_var)
+            self.logger_wrapper(gym.logger.info, "ICL examples abs sum values: min %.6f, max %.6f, avg %.6f, mean %.6f, stdev %.6f, var %.6f", abs_sum_values_min, abs_sum_values_max, abs_sum_values_avg, abs_sum_values_mean, abs_sum_values_stdev, abs_sum_values_var)
+
+            time.sleep(self.initial_time_sleep) # wait so ICL examples and EoS token are not mixed due to parallel envs (i.e., num_envs > 1) and service-streamer, raising an error
+
+        # TODO finish when self.action_representation == "discrete_index"
 
         ## EoS token (early stopping action)
         if self.enable_eos_action:
@@ -739,20 +792,21 @@ class MTICLEnv(gym.Env):
         #### TODO remove this representation from the state when processing with the transformer? This may be done passing an argument to the transformer implementation (something like skip_first_n_word_embeddings)
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d sentences", len(self.data))
 
-        representations_str = [d[0] for d in self.data]
-        representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
+        if self.action_representation != "discrete_index":
+            representations_str = [d[0] for d in self.data]
+            representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
 
-        assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+            assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-        for src_sentence, observation in zip(representations_str, representations_emb):
-            assert observation.shape[0] == self.action_dim, f"Expected source sentence shape {self.action_dim}, got {observation.shape[0]} for {src_sentence}"
+            for src_sentence, observation in zip(representations_str, representations_emb):
+                assert observation.shape[0] == self.action_dim, f"Expected source sentence shape {self.action_dim}, got {observation.shape[0]} for {src_sentence}"
 
-            self.str2representation[src_sentence] = observation
+                self.str2representation[src_sentence] = observation
 
-        ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
-        representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
+            ### Insert all source sentence representations in a different index for retrieval during training in order to remove overlapping sentences
+            representations_emb = utils.embeddings_index_sanity_check(representations_emb, last_dimmension_shape=self.action_dim, check_l2_norm=self.apply_l2_normalization_action)
 
-        self.src_sentences_index.add(np.array(representations_emb).astype(np.float32))
+            self.src_sentences_index.add(np.array(representations_emb).astype(np.float32))
 
         time.sleep(self.initial_time_sleep)
 
@@ -840,7 +894,7 @@ class MTICLEnv(gym.Env):
 
         # Get the initial observation
         src_sentence = self.data[self.translation_candidate][0]
-        action_representation = self.str2representation[src_sentence]
+        action_representation = self.str2representation[src_sentence] # TODO ey! we assume that the representation of the ICL examples is depending only in the source part, so we can later detect duplicates, but that is not always true...
 
         assert len(action_representation) == self.action_dim
 
@@ -1475,7 +1529,8 @@ class MTICLEnv(gym.Env):
         terminated = limit_examples or early_stopping_terminated
         truncated = False # we have not defined an artificial termination of the environment
 
-        assert len(self.icl_example_representation) == self.embeddings_index.ntotal
+        if self.action_representation != "discrete_index":
+            assert len(self.icl_example_representation) == self.embeddings_index.ntotal
 
         return terminated, truncated
 
@@ -1485,9 +1540,12 @@ class MTICLEnv(gym.Env):
         """
             observations: states from which proto_actions were generated
         """
+        assert self.action_representation != "discrete_index", "get_closest_neighbors_urls does not support discrete_index action representation"
+
         #proto_actions = utils.l2_normalize(proto_actions) if self.apply_l2_normalization else proto_actions
         #proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
         proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim, check_l2_norm=check_l2_norm)
+
         assert isinstance(proto_actions, np.ndarray), f"Expected proto_actions to be a numpy array, got {type(proto_actions)}: {proto_actions}"
         assert len(proto_actions.shape) == 2, f"Expected proto_actions to be a 2D numpy array, got shape {proto_actions.shape}: {proto_actions}"
         assert proto_actions.shape[-1] == self.action_dim, f"Expected proto_actions last dimension to be {self.action_dim}, got {proto_actions.shape[-1]}"
@@ -1495,7 +1553,15 @@ class MTICLEnv(gym.Env):
         assert k > 0, "k must be greater than 0"
 
         if return_all_neighbors and not actions_without_replacement:
+            assert not remove_overlapping_actions
+
             results = [list(self.str2representation_valid_actions_k) for _ in range(proto_actions.shape[0])]
+
+            if len(results) > 0:
+                assert isinstance(results[0], list), f"Expected results to be a list of lists, got {type(results[0])}: {results[0]}"
+
+                if len(results[0]) > 0:
+                    assert isinstance(results[0][0], str), f"Expected results to be a list of lists of strings, got {type(results[0][0])}: {results[0][0]}"
 
             if not get_representations_instead_of_embeddings:
                 flatten = [q for w in results for q in w] # Flatten list of lists
@@ -1628,7 +1694,7 @@ class MTICLEnv(gym.Env):
                     src_icl_example, trg_icl_example = url.split('\t')
 
                     if remove_overlapping_actions and _translation_candidate == src_icl_example:
-                        self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
+                        self.logger_wrapper(gym.logger.info, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
                         d[idx2] = np.finfo(np.float32).max
@@ -1723,7 +1789,7 @@ class MTICLEnv(gym.Env):
 
             if (_add_eos_action and not eos_found) or overlapping_hits == 1:
                 # Replace the value with longest distance with EoS (or duplicate if EoS is disabled)
-                self.logger_wrapper(gym.logger.info, "Adding EoS action (%s)/Removing overlapping action (%s): %s", _add_eos_action and not eos_found, overlapping_hits, src_icl_example)
+                self.logger_wrapper(gym.logger.debug, "Adding EoS action (%s)/Removing overlapping action (%s)", _add_eos_action and not eos_found, overlapping_hits)
 
                 dist_idxs = np.flip(d.argsort())
                 longest_dist_idx = dist_idxs[0]
