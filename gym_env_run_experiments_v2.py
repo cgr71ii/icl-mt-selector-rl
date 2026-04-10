@@ -390,7 +390,7 @@ def main():
 
     # default values
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
-    #num_envs = 3 # TODO remove
+    #num_envs = 5 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
@@ -441,7 +441,7 @@ def main():
     #max_data_entries = 1 # TODO remove
     #max_data_entries = 10 # TODO remove
     #max_data_entries = 50 # TODO remove
-    #max_data_icl_examples_entries = 20 # TODO remove
+    #max_data_icl_examples_entries = 10 # TODO remove
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -459,7 +459,7 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
     parsed_kwargs["knn_distance_ip"] = bool(int(parsed_kwargs.get("knn_distance_ip", True)))
-    parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", True)))
+    parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries if max_data_entries > 0 else None]
@@ -468,7 +468,6 @@ def main():
     data_icl_examples_dev = data_icl_examples_dev[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     data_icl_examples_test = data_icl_examples_test[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     knn_distance_ip = parsed_kwargs["knn_distance_ip"]
-    parsed_kwargs["current_icl_examples_prepend"] = False # TODO remove? When multiple ICL examples are prepended, the representations of the last tokens are too similar and the model can't diffentiate between different states
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
     parsed_kwargs["process_token_time_step"] = process_token_time_step
 
@@ -480,9 +479,10 @@ def main():
     k_training = min(max(1, int(float(pre_k) * len(data_icl_examples_training)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_training))
     k_dev = min(max(1, int(float(pre_k) * len(data_icl_examples_dev)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_dev))
     k_test = min(max(1, int(float(pre_k) * len(data_icl_examples_test)) if pre_k_is_float else int(pre_k)), len(data_icl_examples_test))
-    return_all_neighbors_training = k_training == len(data_icl_examples_training)
-    return_all_neighbors_dev = k_dev == len(data_icl_examples_dev)
-    return_all_neighbors_test = k_test == len(data_icl_examples_test)
+    #return_all_neighbors_training = k_training == len(data_icl_examples_training)
+    #return_all_neighbors_dev = k_dev == len(data_icl_examples_dev)
+    #return_all_neighbors_test = k_test == len(data_icl_examples_test)
+    return_all_neighbors_training = return_all_neighbors_dev = return_all_neighbors_test = False # With this option duplicates can't be removed (easily...)
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -502,11 +502,11 @@ def main():
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    #eval_freq = 500 # steps
+    eval_freq = 10000 # steps
+    #eval_freq = 500 # TODO remove
     #eval_freq = 1000 # steps
     #eval_freq = 2000 # steps
     #eval_freq = 5000 # steps
-    eval_freq = 10000 # steps
     #eval_freq = 40 # TODO remove
     #eval_freq = 200 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
@@ -515,8 +515,8 @@ def main():
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
     max_episodes_epochs = 100000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
-    #patience = 6 # early stopping patience (number of evals with no improvement)
-    patience = -1 # disabled
+    patience = -1 # early stopping patience (number of evals with no improvement; disabled if < 0)
+    #patience = 6 #  TODO remove
     #patience = 3 # TODO remove?
     enable_eval = not disable_eval
 
@@ -930,7 +930,7 @@ def main():
         #replay_buffer_kwargs={"process_time_steps": True, "n_steps": max_icl_examples, "gamma": gamma},
         #replay_buffer_kwargs={"process_time_steps": True, "episodes_length": max_icl_examples, "gamma": gamma, "update_old_q_values_with_max_found": True, "epsilon": 1e-7},
         #replay_buffer_kwargs={"process_time_steps": True},
-        replay_buffer_kwargs={"process_time_steps": process_token_time_step}, # TODO remove
+        replay_buffer_kwargs={"process_time_steps": process_token_time_step},
         action_noise=action_noise, # actor noise before kNN -> it should improve exploration of different actions
         lambda_penalty=0.0, # the results on the dev set are better, and the actor representations seem to stabilize over time
         #max_grad_norm=0.5,
@@ -941,7 +941,7 @@ def main():
         wolpertinger_target_actor_noise_clip=wolpertinger_target_actor_noise_clip,
         #wolpertinger_target_policy_actor_noise=0.0, # TODO remove
         #wolpertinger_target_actor_noise_clip=0.0, # TODO remove
-        n_steps=1, # Monte-carlo TD3/DDPG instead of 1-step TD. Better for handling differences in the length of episodes for the early-stopping action (for 1-step TD, the episodes of length 1 due to early stopping are selected most times)
+        n_steps=1,
         **td3_args,
     )
 

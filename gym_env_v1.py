@@ -65,16 +65,24 @@ class ActionBoxSampleFromList(gym.spaces.Box):
             corpus = [action_str.split('\t') for action_str, action_emb in self.sample_list_actions]
             self.bm25 = rank_bm25.BM25Okapi([icl_example[0].split() for icl_example in corpus])
 
-    def sample(self, *args, **kwargs):
+    def sample(self, *args, src_translation_candidate=None, **kwargs):
         assert not self.error_when_sampling, "Sampling from ActionBoxSampleFromList is disabled (error_when_sampling=True)"
 
-        if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
-            if self.sample_list_actions_is_callable:
-                action_str, action = self.sample_list_actions(*self.sample_list_actions_args)
-            elif len(self.sample_list_actions):
-                action_str, action = random.choice(self.sample_list_actions)
+        if self.remove_overlapping_actions:
+            assert src_translation_candidate is not None
 
-            assert action.shape == self._shape, f"{action.shape} vs {self._shape}"
+        if self.sample_list_actions is not None and self.sample_p is not None and random.random() < self.sample_p:
+            action_str = src_translation_candidate
+
+            while action_str == src_translation_candidate:
+                if self.sample_list_actions_is_callable:
+                    action_str, action = self.sample_list_actions(*self.sample_list_actions_args)
+                elif len(self.sample_list_actions):
+                    action_str, action = random.choice(self.sample_list_actions)
+
+                assert action.shape == self._shape, f"{action.shape} vs {self._shape}"
+
+                action_str = action_str.split('\t')[0]
 
             return action
 
@@ -490,11 +498,12 @@ class MTICLEnv(gym.Env):
             action_url = [[self.icl_example_representation[action_idx]]]
             action_url_idx = np.array([[action_idx]])
             action_url_distance = np.array([[0.0]])
+            # TODO assert that action_url is not overlapping with the translation candidate source sentence
         else:
             translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
             translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
             translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
-            action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement)
+            action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement, assert_no_duplicates=True)
 
         assert len(action_url) == 1, len(action_url)
         assert len(action_url[0]) == 1, len(action_url[0])
@@ -695,18 +704,16 @@ class MTICLEnv(gym.Env):
 
         representations_str = [f"{src_icl}\t{trg_icl}" for src_icl, trg_icl in self.data_icl_examples]
 
+        assert len(representations_str) == len(set(representations_str))
+
         if self.action_representation == "discrete_index":
-            seen_examples = set()
             n = 1 if self.enable_eos_action else 0
 
             for _str in representations_str:
-                if _str not in seen_examples:
-                    seen_examples.add(_str)
+                self.str2representation[_str] = n
+                self.str2representation_valid_actions_k.append(_str)
 
-                    self.str2representation[_str] = n
-                    self.str2representation_valid_actions_k.append(_str)
-
-                    n += 1
+                n += 1
         else:
             representations_emb = self.get_action_representation(self.data_icl_examples)
 
@@ -760,40 +767,66 @@ class MTICLEnv(gym.Env):
 
             time.sleep(self.initial_time_sleep) # wait so ICL examples and EoS token are not mixed due to parallel envs (i.e., num_envs > 1) and service-streamer, raising an error
 
-        # TODO finish when self.action_representation == "discrete_index"
-
         ## EoS token (early stopping action)
         if self.enable_eos_action:
             self.logger_wrapper(gym.logger.info, "Obtaining representations for EoS token")
 
             representations_str = [self.eos_token_str]
-            if self.action_representation in ("llm", "src_embedding:llm"): # dimensionality should match
-                representations_emb = self.get_token_representation(representations_str)
+
+            if self.action_representation == "discrete_index":
+                assert len(representations_str) == 1
+
+                self.str2representation[representations_str[0]] = 0
+                self.str2representation_valid_actions_k.insert(0, representations_str[0])
             else:
-                representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
+                if self.action_representation in ("llm", "src_embedding:llm"): # dimensionality should match
+                    representations_emb = self.get_token_representation(representations_str)
+                else:
+                    representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
 
-            assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
+                assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
 
-            self.insert_embeddings(representations_str, representations_emb)
+                self.insert_embeddings(representations_str, representations_emb)
 
-            for _str, emb in zip(representations_str, representations_emb):
-                assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
+                for _str, emb in zip(representations_str, representations_emb):
+                    assert emb.shape[0] == self.action_dim, f"Expected token shape {self.action_dim}, got {emb.shape[0]} for {_str}"
 
-                self.str2representation[_str] = emb
+                    self.str2representation[_str] = emb
 
-                self.str2representation_valid_actions_k.append(_str)
+                    self.str2representation_valid_actions_k.append(_str)
 
-            time.sleep(self.initial_time_sleep)
+                time.sleep(self.initial_time_sleep)
 
-        assert self.embeddings_index.ntotal >= self.max_icl_examples, f"{self.embeddings_index.ntotal} < {self.max_icl_examples}"
+        if self.action_representation != "discrete_index":
+            assert self.embeddings_index.ntotal >= self.max_icl_examples, f"{self.embeddings_index.ntotal} < {self.max_icl_examples}"
+
+        assert self.num_icl_examples == len(self.data_icl_examples) + (1 if self.enable_eos_action else 0)
 
         ## Source sentences (do not insert, but add the representation to self.str2representation)
         ### These representation are intenteded to be used as initial first state for the translation candidate in order to detect if some ICL example is selected and results to be the same source sentence as the translation candidate
         #### TODO remove this representation from the state when processing with the transformer? This may be done passing an argument to the transformer implementation (something like skip_first_n_word_embeddings)
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d sentences", len(self.data))
 
-        if self.action_representation != "discrete_index":
-            representations_str = [d[0] for d in self.data]
+        representations_str = [d[0] for d in self.data]
+
+        if self.action_representation == "discrete_index":
+            _str2representation_src = [k.split('\t') for k in self.str2representation.keys()]
+            _str2representation_src_set = set(_str2representation_src)
+
+            for _str in representations_str:
+                if _str in self.str2representation:
+                    continue
+
+                if _str in _str2representation_src_set:
+                    idx = _str2representation_src.index(_str)
+                    _repr = list(self.str2representation.keys())[idx]
+
+                    assert _repr.split('\t')[0] == _str, f"{_repr} vs {_str}"
+
+                    self.str2representation[_str] = self.str2representation[_repr]
+                else:
+                    self.str2representation[_str] = len(self.str2representation)
+        else:
             representations_emb = self.get_action_representation(representations_str, trg_is_empty=True)
 
             assert len(representations_str) == len(representations_emb), f"Expected {len(representations_str)} representations, got {len(representations_emb)}"
@@ -808,9 +841,9 @@ class MTICLEnv(gym.Env):
 
             self.src_sentences_index.add(np.array(representations_emb).astype(np.float32))
 
-        time.sleep(self.initial_time_sleep)
+            time.sleep(self.initial_time_sleep)
 
-        self.close_action_representation_server()
+            self.close_action_representation_server()
 
         self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
 
@@ -1177,6 +1210,7 @@ class MTICLEnv(gym.Env):
         return avg, scores
 
     def _get_action_representation_llm(self, idx, batch, src_is_empty=False, trg_is_empty=False):
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert not (src_is_empty and trg_is_empty), "At least one of src_is_empty or trg_is_empty must be False"
 
         payload = []
@@ -1228,6 +1262,7 @@ class MTICLEnv(gym.Env):
         return response_result
 
     def _get_action_representation_external(self, idx, batch, lang, embedding_name, batch_side_key):
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert batch_side_key in ("src", "trg"), f"Invalid batch_side_key: {batch_side_key}"
 
         if embedding_name == "llm":
@@ -1269,6 +1304,7 @@ class MTICLEnv(gym.Env):
         return response_result
 
     def close_action_representation_server(self):
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         payload = []
 
         for name in (self.action_representation_src_sentence, self.action_representation_trg_sentence):
@@ -1296,6 +1332,7 @@ class MTICLEnv(gym.Env):
     def get_action_representation(self, icl_examples, numpy=True, trg_is_empty=False):
         # format icl_examples: list of lists with two elements: [[src1, trg1], [src2, trg2], ...]
 
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
         assert len(icl_examples) > 0, "ICL examples must not be an empty list"
 
@@ -1357,6 +1394,7 @@ class MTICLEnv(gym.Env):
         return representations
 
     def get_token_representation(self, tokens, numpy=True):
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert isinstance(tokens, list), f"Expected tokens to be a list, got {type(tokens)}: {tokens}"
         assert len(tokens) > 0, "Tokens must not be an empty list"
         assert isinstance(tokens[0], str), f"Expected tokens to be a list of strings, got {type(tokens[0])}: {tokens[0]}"
@@ -1536,11 +1574,11 @@ class MTICLEnv(gym.Env):
 
     def get_closest_neighbors_urls(self, proto_actions, k=1, distance_expected_zero=False, get_representations_instead_of_embeddings=True, observations=None,
                                    _index=None, _urls_representation=None, remove_overlapping_actions=True, check_l2_norm=False, debug=False, return_all_neighbors=False,
-                                   actions_without_replacement=False):
+                                   actions_without_replacement=False, assert_no_duplicates=False):
         """
             observations: states from which proto_actions were generated
         """
-        assert self.action_representation != "discrete_index", "get_closest_neighbors_urls does not support discrete_index action representation"
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
 
         #proto_actions = utils.l2_normalize(proto_actions) if self.apply_l2_normalization else proto_actions
         #proto_actions = utils.embeddings_index_sanity_check(proto_actions, last_dimmension_shape=self.action_dim)
@@ -1711,6 +1749,9 @@ class MTICLEnv(gym.Env):
 
             assert len(results[-1]) <= k, f"Expected results[-1] to have at most {k} elements, got {len(results[-1])}"
             assert overlapping_hits <= 1, f"Expected at most one overlapping hit, got {overlapping_hits}: this might happen if same source is repeated in the ICL examples"
+
+            if assert_no_duplicates:
+                assert overlapping_hits == 0, f"Expected no duplicates in kNN results, got {overlapping_hits} overlapping hits: this might happen if same source is repeated in the ICL examples"
 
             if actions_without_replacement:
                 assert k == 1, k
