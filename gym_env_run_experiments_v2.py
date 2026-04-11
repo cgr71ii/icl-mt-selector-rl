@@ -444,8 +444,8 @@ def main():
     #actor_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_actor_learning_rate, max_lr=actor_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="actor")
     #critic_lr_schedule = CyclicWithWarmUpLRSchedule(base_lr=min_critic_learning_rate, max_lr=critic_learning_rate, step_size=step_size, scale_fn=clr_fn, scale_mode="cycle", warmup_steps=warmup_steps, logger=logger, str_id="critic")
     total_steps = max(int((max_steps - init_training_steps) / (train_freq_steps * num_envs) + 0.5), 1)
-    actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_actor_learning_rate, str_id="actor")
-    critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr=min_critic_learning_rate, str_id="critic")
+    actor_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_actor_learning_rate, str_id="actor")
+    critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
     policy_actor_kwargs = {
         #"squash_output": True,
         "squash_output": not actor_mlp_l2_norm, # actor l2-norm

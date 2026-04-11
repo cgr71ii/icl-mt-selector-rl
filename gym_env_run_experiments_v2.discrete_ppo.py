@@ -17,7 +17,7 @@ from gym_env_run_experiments import LinearDecayScheduler, DelayedEvalCallback, L
 from gym_env_run_experiments import make_env, store_model
 
 import gymnasium as gym
-from stable_baselines3 import PPO, DQN
+from stable_baselines3 import PPO
 import stable_baselines3.common.callbacks as sb3_cb
 from stable_baselines3.common.evaluation import evaluate_policy
 from stable_baselines3.common.noise import ActionNoise, NormalActionNoise
@@ -68,18 +68,19 @@ def main():
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
-    update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
     disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
+    n_steps = int(parsed_kwargs.pop("n_steps", 25))
 
     if min_conf_debug:
         logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
 
     if min_conf_debug:
-        num_envs = 5 # TODO remove
-        #update_to_data_ratio = 0.0 # TODO remove
+        num_envs = 2 # TODO remove
         disable_eval = False # TODO remove
         store_model_on_eval = False # TODO remove
+
+    logger.info("n_steps: %d; the model will be trained with %d data points (num_envs * n_steps)", n_steps, num_envs * n_steps)
 
     if store_model_on_eval:
         logger.info("Model will be stored on each evaluation")
@@ -142,6 +143,8 @@ def main():
     parsed_kwargs["num_icl_examples"] = len(data_icl_examples)
     parsed_kwargs["action_representation"] = "discrete_index"
 
+    process_token_time_step = False # TODO change when implemented and see how to feed time_steps (replay_buffer_kwargs is not an argument anymore)
+
     logger.info("parsed_kwargs: %s", parsed_kwargs)
 
     # Other values
@@ -195,45 +198,32 @@ def main():
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
-    batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 256)))
+    batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 200)))
     gamma = 1.0
     #gamma = 0.99
-    #replay_buffer_size = 1000000
-    #replay_buffer_size = 50000 # given 5 ICL examples and training set of 1000 sentences, this allows to store all transitions of 10 epochs (1000 * 5 * 10 = 50000)
-    #replay_buffer_size = 10000
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
-#    max_steps_training = 10000 # steps while training
-    #max_steps_training = 20000 # steps while training
-    #max_steps_training = 50000 # steps while training
-    #max_steps_training = 100000 # steps while training
-    max_steps_training = 200000
-    #max_steps_training = 10000000 # steps while training # TODO remove?
-    max_steps_training += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
-    #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
-    init_training_steps = int(max_steps_training * 0.1 + 0.5)
+#    max_steps = 10000 # steps while training
+    #max_steps = 20000 # steps while training
+    #max_steps = 50000 # steps while training
+    #max_steps = 100000 # steps while training
+    max_steps = 200000
+    #max_steps = 10000000 # steps while training # TODO remove?
+    max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
+
+    assert (n_steps * num_envs) % batch_size == 0, f"Expected n_steps * num_envs to be divisible by batch_size, but got n_steps={n_steps}, num_envs={num_envs}, batch_size={batch_size}"
 
     if min_conf_debug:
         batch_size = 16 # TODO remove
-        init_training_steps = 50 # TODO remove
-        #init_training_steps = 100 # TODO remove
-        max_steps_training = 200
+        max_steps = 200
 
-    max_steps = max_steps_training + init_training_steps
-    replay_buffer_size = int(max_steps * 0.5 + 0.5) # small value to avoid remove old transitions and avoid averaging Q-values over "bad" actions. If monte carlo updates are used, and old transitions are updated to the best Q-value found, then this value can be increased
-    total_evaluations = max_steps_training // eval_freq
+    total_evaluations = max_steps // eval_freq
 
     logger.info("Evaluation frequency (steps, adjusted by number of parallel environments): %d // %d = %d (total evaluations: %d)", eval_freq, num_envs, max(1, eval_freq // num_envs), total_evaluations)
-    logger.info("Init. steps collecting rollouts without training: %d", init_training_steps)
-    logger.info("Max. steps (no_training, training, total): (%d, %d, %d)", init_training_steps, max_steps_training, max_steps)
-    logger.info("Replay buffer size: %d", replay_buffer_size)
 
     eval_freq = max(1, eval_freq // num_envs)
 
     if num_envs > 1:
-        logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment (%d // %d = %d init. training steps) instance due to the number of parallel envinronments (%d training steps, where %d different batches will be used for training from the replay buffer)",
-                    max_steps, max_steps, num_envs, max_steps // num_envs,
-                    init_training_steps, num_envs, init_training_steps // num_envs,
-                    (max_steps - init_training_steps) // num_envs, max_steps - init_training_steps)
+        logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment instance due to the number of parallel envinronments", max_steps, max_steps, num_envs, max_steps // num_envs)
 
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
@@ -247,17 +237,6 @@ def main():
     state_window_length = env_eval_dev.unwrapped.state_window_length
     state_dim_per_token_time_step = env_eval_dev.unwrapped.state_dim_per_token_time_step
     callbacks = []
-    exploration_rate_steps_percentage = 0.1
-    exploration_rate_initial = 1.0
-    exploration_rate_last = 0.05
-    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage + 0.5)
-    exploration_rate_steps_percentage_of_training = exploration_rate_steps / ((max_steps - init_training_steps) / num_envs)
-    exploration_rate = LinearDecayScheduler(exploration_rate_initial, exploration_rate_last, exploration_rate_steps, logger, "epsilon-greedy exploration")
-    #train_freq_steps = 1
-    train_freq_steps = max_icl_examples
-    #gradient_steps = -1 if num_envs > 1 else 1
-    #gradient_steps = num_envs # "do as many gradient steps as steps done in the environment during the rollout", also recommended for off-policy algorithms with num_envs > 1
-    gradient_steps = max(int(update_to_data_ratio * train_freq_steps * num_envs), 1) # times data is sampled from the replay buffer and then used for training
 
     if state_representation == "representation_per_token_with_features":
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
@@ -268,12 +247,13 @@ def main():
     else:
         n_features = 0
 
-    logger.info("Exploration rate steps: %d (%s %% of the total training steps): from %s to %s", exploration_rate_steps, exploration_rate_steps_percentage_of_training * 100, exploration_rate_initial, exploration_rate_last)
-    logger.info("Gradient steps (UTD: %s; train_freq_steps: %s): %d", update_to_data_ratio, train_freq_steps, gradient_steps)
-
     #net_arch = [512, 128, 32]
     #net_arch = [512, 256, 128]
-    net_arch = [1024, 512, 256]
+    #net_arch = [1024, 512, 256]
+    net_arch = {
+        "pi": [512, 256],
+        "qf": [512, 256]
+    } # "pi" is actor and "qf" the critic
 
     logger.info("net_arch: %s", net_arch)
 
@@ -288,7 +268,7 @@ def main():
     logger.info("Warmup steps: %d", warmup_steps)
 
     min_critic_learning_rate = critic_learning_rate / 10
-    total_steps = max(int((max_steps - init_training_steps) / (train_freq_steps * num_envs) + 0.5), 1)
+    total_steps = max(int(max_steps / num_envs + 0.5), 1)
     critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
 
     if n_features <= 0:
@@ -324,15 +304,13 @@ def main():
 
     avoid_overlapping_action = True
 
-    #model_class = PPO
-    model_class = DQN
+    model_class = PPO
     model = model_class(
         "MlpPolicy",
         env,
         verbose=1,
         seed=seed,
         batch_size=batch_size,
-        learning_starts=init_training_steps,
         learning_rate=critic_lr_schedule,
         policy_kwargs={
             # Optimizer
@@ -342,32 +320,21 @@ def main():
                 "weight_decay": 1e-2,
             },
             # Other
-            "net_arch": list(net_arch),
+            "net_arch": dict(net_arch),
             "layer_norm_input": True,
             "layer_norm_before_activation": True,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
             "activation_fn": torch.nn.GELU,
-            "avoid_overlapping_action": avoid_overlapping_action,
+            "avoid_overlapping_action": avoid_overlapping_action, # It assumes that the first element in the observation is the representation of the source sentence being translated
         },
         gamma=gamma,
         device=device,
-        gradient_steps=gradient_steps,
-        #train_freq=(1, "step"),
-        #train_freq=(1, "episode"), # Not supported "episode" and num_envs > 1
-        train_freq=(train_freq_steps, "step"), # sparse reward environment: we only have reward != 0 at the end of the episode
-        buffer_size=replay_buffer_size,
-        replay_buffer_kwargs={"process_time_steps": process_token_time_step},
+        #replay_buffer_kwargs={"process_time_steps": process_token_time_step},
         #max_grad_norm=0.5,
         max_grad_norm=1.0,
-        n_steps=1,
-        exploration_fraction=None,
-        exploration_initial_eps=None,
-        exploration_final_eps=None,
-        exploration_rate_custom=exploration_rate,
-        avoid_overlapping_action=avoid_overlapping_action, # It assumes that the first element in the observation is the representation of the source sentence being translated
-        tau=0.005,
-        target_update_interval=2,
+        n_steps=n_steps,
+        n_epochs=4,
     )
 
     #assert init_training_episodes < max_episodes
@@ -380,7 +347,7 @@ def main():
     custom_callback_on_eval = None if not store_model_on_eval else lambda n_calls, eval_freq: store_model(save_path, name_prefix, f"eval-{n_calls // eval_freq}", model, logger)
     callbacks.append(DelayedEvalCallback(
         env_eval_dev,
-        learning_starts=init_training_steps,
+        learning_starts=0,
         best_model_save_path=save_path,
         log_path=save_path,
         eval_freq=eval_freq,
@@ -431,7 +398,7 @@ def main():
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
-            "net_arch": list(net_arch),
+            "net_arch": dict(net_arch),
             "layer_norm_input": True,
             "layer_norm_before_activation": True,
             "features_extractor_class": features_extractor_class,
@@ -464,7 +431,7 @@ def main():
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
-            "net_arch": list(net_arch),
+            "net_arch": dict(net_arch),
             "layer_norm_input": True,
             "layer_norm_before_activation": True,
             "features_extractor_class": features_extractor_class,

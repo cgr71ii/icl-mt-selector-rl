@@ -77,6 +77,8 @@ def main():
     parsed_kwargs["process_token_time_step"] = process_token_time_step
     parsed_kwargs["num_icl_examples"] = len(_data_icl_examples)
 
+    process_token_time_step = False # TODO change when implemented and see how to feed time_steps (replay_buffer_kwargs is not an argument anymore)
+
     if "_seed" in parsed_kwargs or "seed" in parsed_kwargs:
         seed = parsed_kwargs.pop("_seed", None)
 
@@ -119,7 +121,12 @@ def main():
         n_features = 0
 
     #net_arch = [512, 128, 32]
-    net_arch = [512, 256, 128]
+    #net_arch = [512, 256, 128]
+
+    net_arch = {
+        "pi": [512, 512],
+        "qf": [512, 256, 128]
+    } # "pi" is actor and "qf" the critic
 
     logger.info("net_arch: %s", net_arch)
 
@@ -153,13 +160,13 @@ def main():
             "step_embeddings_dim": step_embeddings_dim,
         }
 
-    model_class = DQN
+    model_class = PPO
     model = model_class.load(
         best_model_path,
         learning_rate=lambda foo: 100.0, # dummy callable
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
-            "net_arch": list(net_arch),
+            "net_arch": dict(net_arch),
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
             "layer_norm_input": True,
@@ -168,10 +175,7 @@ def main():
             "avoid_overlapping_action": True,
         },
         device=device,
-#        replay_buffer_class=NStepReplayBuffer,
-        replay_buffer_kwargs={"process_time_steps": process_token_time_step},
-#        replay_buffer_class=MonteCarloReplayBuffer,
-#        replay_buffer_kwargs={"process_time_steps": True, "episodes_length": max_icl_examples, "gamma": 1.0, "update_old_q_values_with_max_found": True, "epsilon": 1e-7},
+        #replay_buffer_kwargs={"process_time_steps": process_token_time_step},
     )
 
     ## dev: evaluate and report result
