@@ -307,7 +307,7 @@ class LinearDecayScheduler:
 
         self.logger.debug("[%s] Linear decay: start and end values, and total steps: %f-%f %d", self.str_id, self.start_val, self.end_val, self.total_steps)
 
-    def __call__(self):
+    def __call__(self, _current_progress_remaining=None):
         if self.step - 1 >= self.total_steps:
             return self.end_val
 
@@ -319,7 +319,7 @@ class LinearDecayScheduler:
             assert np.isclose(progress, 1.0), progress
             assert np.isclose(new_value, self.end_val), f"{new_value} vs {self.end_val}"
 
-        self.logger.debug("[%s] Linear decay: new value (step %d): %f%s", self.str_id, self.step + 1, new_value, " (and the rest of steps...)" if self.step == self.total_steps else '')
+        self.logger.debug("[%s] Linear decay: new value (step %d): %f%s (_current_progress_remaining: %s)", self.str_id, self.step + 1, new_value, " (and the rest of steps...)" if self.step == self.total_steps else '', _current_progress_remaining)
 
         self.step += 1
 

@@ -13,6 +13,8 @@ import utils
 from gym_env_v1 import MTICLEnv
 from gym_env_v1_eval import MTICLEvalEnv
 #from gym_env_v1_eval_single_episode import MTICLEvalSingleEpisodeEnv
+from gym_env_run_experiments import LinearDecayScheduler, DelayedEvalCallback, LinearWithWarmUpLRSchedule, NormalActionNoiseWithClip
+from gym_env_run_experiments import make_env, store_model
 
 import gymnasium as gym
 from stable_baselines3 import DDPG, TD3
@@ -26,331 +28,6 @@ from stable_baselines3.common.buffers import NStepReplayBuffer, MonteCarloReplay
 from stable_baselines3.common.policies import ContinuousCritic, ContinuousCriticTower
 import numpy as np
 import torch
-
-class NormalActionNoiseWithClip(NormalActionNoise):
-    def __init__(self, *args, clip_value=np.inf, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.clip_value = clip_value
-
-    def __call__(self, *args, **kwargs):
-        noise = super().__call__(*args, **kwargs)
-
-        assert isinstance(noise, np.ndarray), f"Expected noise to be a numpy array, found {type(noise)}"
-
-        return np.clip(noise, a_min=-self.clip_value, a_max=self.clip_value)
-
-class InverseSqrtWithWarmUpLRSchedule:
-    def __init__(self, warmup_steps, initial_lr, logger, str_id="none"):
-        assert warmup_steps >= 0, warmup_steps
-
-        self.warmup_steps = warmup_steps + 1
-        self.initial_lr = initial_lr
-        self.old_current_progress_remaining = np.inf
-        self.step = 1
-        self.logger = logger
-        self.str_id = str_id
-
-        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, warmup_steps)
-
-    def __call__(self, _current_progress_remaining, _update_learning_rate=False):
-        lr = self.get_lr()
-
-        if not _update_learning_rate:
-            assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
-            assert self.step == 1, self.step
-
-            return lr
-        else:
-            assert _current_progress_remaining <= self.old_current_progress_remaining, f"Expected _current_progress_remaining to be non-increasing, but got {self.old_current_progress_remaining} -> {_current_progress_remaining}"
-
-            self.old_current_progress_remaining = _current_progress_remaining
-
-        self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
-
-        self.step += 1
-
-        return lr
-
-    def get_lr(self):
-        if self.step < self.warmup_steps:
-            lr = self.initial_lr * float(self.step) / float(self.warmup_steps)
-        else:
-            lr = self.initial_lr * (self.warmup_steps ** 0.5) * (self.step ** -0.5)
-
-        return lr
-
-class LinearWithWarmUpLRSchedule:
-    def __init__(self, warmup_steps, initial_lr, total_steps, logger, min_lr=0.0, str_id="none"):
-        assert warmup_steps >= 0, warmup_steps
-
-        self.warmup_steps = warmup_steps + 1
-        self.initial_lr = initial_lr
-        self.total_steps = total_steps
-        self.old_current_progress_remaining = np.inf
-        self.step = 1
-        self.logger = logger
-        self.str_id = str_id
-        self.min_lr = min_lr
-        self.m, self.n = np.polyfit([self.warmup_steps, self.total_steps], [self.initial_lr, 0.0], 1)
-
-        assert self.total_steps > self.warmup_steps
-        assert self.min_lr >= 0.0, self.min_lr
-
-        self.logger.debug("[%s] [%s] First LR and warmup steps: %f (initial: %f) %d", self.__class__.__name__, self.str_id, self.get_lr(), self.initial_lr, warmup_steps)
-        self.logger.debug("[%s] [%s] m and n values: %f %f", self.__class__.__name__, self.str_id, self.m, self.n)
-
-    def __call__(self, _current_progress_remaining, _update_learning_rate=False):
-        lr = self.get_lr()
-
-        if not _update_learning_rate:
-            assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
-            assert self.step == 1, self.step
-
-            return lr
-        else:
-            assert _current_progress_remaining <= self.old_current_progress_remaining, f"Expected _current_progress_remaining to be non-increasing, but got {self.old_current_progress_remaining} -> {_current_progress_remaining}"
-
-            self.old_current_progress_remaining = _current_progress_remaining
-
-        self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
-
-        self.step += 1
-
-        return lr
-
-    def get_lr(self):
-        if self.step < self.warmup_steps:
-            lr = self.initial_lr * float(self.step) / float(self.warmup_steps)
-        else:
-            lr = self.m * self.step + self.n
-            lr = max(lr, self.min_lr)
-
-        return lr
-
-class CyclicWithWarmUpLRSchedule:
-    # Code adapted from https://github.com/bckenstler/CLR/blob/master/clr_callback.py
-
-    def __init__(self, base_lr=None, max_lr=None, step_size=None, mode='triangular',
-                 gamma=1., scale_fn=None, scale_mode='cycle', warmup_steps=0, logger=None, str_id="none"):
-        assert base_lr is not None and max_lr is not None and step_size is not None
-        assert logger is not None
-
-        base_lr = float(base_lr)
-        max_lr = float(max_lr)
-        step_size = float(step_size)
-
-        assert base_lr >= 0.0, base_lr
-        assert max_lr >= 0.0, max_lr
-        assert step_size > 0.0, step_size
-        assert base_lr <= max_lr, (base_lr, max_lr)
-        assert warmup_steps >= 0, warmup_steps
-
-        self.logger = logger
-        self.str_id = str_id
-        self.base_lr = base_lr
-        self.max_lr = max_lr
-        self.step_size = step_size
-        self.mode = mode
-        self.gamma = gamma
-        self.step = 1
-        self.old_current_progress_remaining = np.inf
-        self.warmup_steps = warmup_steps + 1
-
-        if scale_fn == None:
-            if self.mode == 'triangular':
-                self.scale_fn = lambda x: 1.
-                self.scale_mode = 'cycle'
-            elif self.mode == 'triangular2':
-                self.scale_fn = lambda x: 1/(2.**(x-1))
-                self.scale_mode = 'cycle'
-            elif self.mode == 'exp_range':
-                self.scale_fn = lambda x: gamma**(x)
-                self.scale_mode = 'iterations'
-        else:
-            self.scale_fn = scale_fn
-            self.scale_mode = scale_mode
-
-        assert self.scale_mode in ('cycle', 'iterations'), self.scale_mode
-
-        self.clr_iterations = 0
-
-        if warmup_steps > 0:
-            self.clr_iterations += self.step_size
-
-        self.logger.debug("[%s] [%s] First LR, step size and warmup steps: %f (base and max: %f %f) %f %d", self.__class__.__name__, self.str_id, self.get_lr(), base_lr, max_lr, self.step_size, warmup_steps)
-
-    def __call__(self, _current_progress_remaining, _update_learning_rate=False):
-        lr, is_warming_up = self.get_lr(get_info=True)
-
-        if not _update_learning_rate:
-            assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
-            assert self.step == 1, self.step
-
-            return lr
-        else:
-            assert _current_progress_remaining <= self.old_current_progress_remaining, f"Expected _current_progress_remaining to be non-increasing, but got {self.old_current_progress_remaining} -> {_current_progress_remaining}"
-
-            self.old_current_progress_remaining = _current_progress_remaining
-
-        self.logger.debug("[%s] [%s] New LR (step %d): %f", self.__class__.__name__, self.str_id, self.step, lr)
-
-        self.step += 1
-
-        if not is_warming_up:
-            self.clr_iterations += 1
-
-        return lr
-
-    def get_lr(self, get_info=False):
-        if self.step < self.warmup_steps:
-            is_warming_up = True
-            lr = self.max_lr * float(self.step) / float(self.warmup_steps)
-        else:
-            is_warming_up = False
-            cycle = np.floor(1+self.clr_iterations/(2*self.step_size))
-            x = np.abs(self.clr_iterations/self.step_size - 2*cycle + 1)
-
-            if self.scale_mode == 'cycle':
-                lr = self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(cycle)
-            else:
-                lr = self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(self.clr_iterations)
-
-        if get_info:
-            return lr, is_warming_up
-
-        return lr
-
-class SelectActionNoiseFromList(ActionNoise):
-
-    def __init__(self, noises, p=None):
-        assert isinstance(noises, list)
-
-        for n in noises:
-            assert isinstance(n, ActionNoise), f"Expected all elements in noises to be ActionNoise instances, found {type(n)}"
-
-        self.noises = noises
-        self.p = p
-
-        super().__init__()
-
-    def __call__(self):
-        idx = np.random.choice(range(len(self.noises)), size=1, p=self.p)[0]
-        noise = self.noises[idx]()
-
-        assert isinstance(noise, np.ndarray), f"Expected noise to be a numpy array, found {type(noise)}"
-
-        return noise
-
-    def __repr__(self) -> str:
-        return f"SelectActionNoiseFromList(noises={self.noises}, p={self.p})"
-
-class VectorFromPoolActionNoise(ActionNoise):
-
-    def __init__(self, pool):
-        self.pool = pool
-
-        assert len(self.pool) > 0, "Pool must not be empty"
-
-        super().__init__()
-
-    def __call__(self):
-        idx = np.random.choice(range(len(self.pool)), size=1)[0]
-        noise = self.pool[idx]
-
-        assert isinstance(noise, np.ndarray), f"Expected noise to be a numpy array, found {type(noise)}"
-
-        return noise
-
-    def __repr__(self) -> str:
-        return f"VectorFromPoolActionNoise(len(pool)={len(self.pool)})"
-
-class DelayedEvalCallback(sb3_cb.EvalCallback):
-    def __init__(self, *args, learning_starts=0, disable_eval=False, custom_callback_on_eval=None, custom_logger=None, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.learning_starts = learning_starts
-        self.disable_eval = disable_eval
-        self.custom_callback_on_eval = custom_callback_on_eval
-        self.custom_logger = custom_logger
-
-    def _on_step(self) -> bool:
-        # Only start evaluating after learning_starts
-        if self.num_timesteps < self.learning_starts:
-            self.n_calls = 0 # so it starts from this point when this conditions does not hold
-
-            return True
-
-        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
-            if self.custom_logger:
-                self.custom_logger.debug("Eval callback: evaluating at step %d (num_timesteps: %d)", self.n_calls, self.num_timesteps)
-
-            if self.custom_callback_on_eval is not None:
-                self.custom_callback_on_eval(self.n_calls, self.eval_freq)
-
-        if self.disable_eval:
-            return True
-
-        return super()._on_step()
-
-class LinearDecayScheduler:
-
-    def __init__(self, start_val, end_val, total_steps, logger, str_id="none"):
-        assert start_val >= end_val
-        assert total_steps > 0, total_steps
-
-        self.start_val = start_val
-        self.end_val = end_val
-        self.total_steps = total_steps
-        self.step = 0
-        self.logger = logger
-        self.str_id = str_id
-
-        self.logger.debug("[%s] Linear decay: start and end values, and total steps: %f-%f %d", self.str_id, self.start_val, self.end_val, self.total_steps)
-
-    def __call__(self):
-        if self.step - 1 >= self.total_steps:
-            return self.end_val
-
-        # Linear interpolation
-        progress = min(1.0, self.step / self.total_steps)
-        new_value = self.start_val - progress * (self.start_val - self.end_val)
-
-        if self.step == self.total_steps:
-            assert np.isclose(progress, 1.0), progress
-            assert np.isclose(new_value, self.end_val), f"{new_value} vs {self.end_val}"
-
-        self.logger.debug("[%s] Linear decay: new value (step %d): %f%s", self.str_id, self.step + 1, new_value, " (and the rest of steps...)" if self.step == self.total_steps else '')
-
-        self.step += 1
-
-        return new_value
-
-def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False):
-    def _init():
-        sys.stderr.flush()
-        env = env_cls(*env_args, **{"_seed": seed + (rank if seed_add_rank else 0) if seed is not None else rank, **env_kwargs})
-
-        #env.reset(seed=seed + rank, options={"soft_reset_after_hard_reset": False})
-
-        return env
-
-    return _init
-
-def store_model(save_path, name_prefix, name, model, logger):
-    # Store (adapted from CheckpointCallback)
-    model_path = f"{name_prefix}_{name}_model.zip"
-    _model_path = os.path.join(save_path, model_path)
-
-    logger.info("Storing model: %s", _model_path)
-
-    model.save(_model_path)
-    #model.save_replay_buffer(os.path.join(save_path, f"{name_prefix}_{name}_replay-buffer.pkl")) # too much disk...
-
-    if model.get_vec_normalize_env() is not None:
-        model.get_vec_normalize_env().save(os.path.join(save_path, f"{name_prefix}_{name}_vecnormalize.pkl"))
-
-    return _model_path
 
 def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
@@ -389,19 +66,26 @@ def main():
                 data_icl_examples.append(line.rstrip("\r\n"))
 
     # default values
+    min_conf_debug = False
+    #min_conf_debug = True
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
-    #num_envs = 5 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     apply_rws_inference = parsed_kwargs.get("apply_rws_inference", False)
     wolpertinger_disable_actor = bool(int(parsed_kwargs.pop("wolpertinger_disable_actor", 0)))
     pre_k = parsed_kwargs.pop("k", "0.15")
     update_to_data_ratio = float(parsed_kwargs.pop("update_to_data_ratio", 1.0)) # UTD (check, for example, "Dropout Q-Functions for Doubly Efficient Reinforcement Learning" paper)
-    #update_to_data_ratio = 0.0 # TODO remove
     disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
-    #disable_eval = False # TODO remove
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
-    #store_model_on_eval = False # TODO remove
+
+    if min_conf_debug:
+        logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
+
+    if min_conf_debug:
+        num_envs = 5 # TODO remove
+        #update_to_data_ratio = 0.0 # TODO remove
+        disable_eval = False # TODO remove
+        store_model_on_eval = False # TODO remove
 
     if store_model_on_eval:
         logger.info("Model will be stored on each evaluation")
@@ -438,10 +122,14 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    #max_data_entries = 1 # TODO remove
-    #max_data_entries = 10 # TODO remove
-    #max_data_entries = 50 # TODO remove
-    #max_data_icl_examples_entries = 10 # TODO remove
+
+    if min_conf_debug:
+        #max_data_entries = 1 # TODO remove
+        max_data_entries = 10 # TODO remove
+        #max_data_entries = 50 # TODO remove
+        max_data_icl_examples_entries = 10 # TODO remove
+        pass
+
     state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
     parsed_kwargs["device"] = device
     parsed_kwargs["max_icl_examples"] = max_icl_examples
@@ -483,6 +171,7 @@ def main():
     #return_all_neighbors_dev = k_dev == len(data_icl_examples_dev)
     #return_all_neighbors_test = k_test == len(data_icl_examples_test)
     return_all_neighbors_training = return_all_neighbors_dev = return_all_neighbors_test = False # With this option duplicates can't be removed (easily...)
+    #return_all_neighbors_training = return_all_neighbors_dev = return_all_neighbors_test = True # TODO DEBUG REMOVE
 
     assert isinstance(k_training, int) # other parameters use k assuming integer instead of float
     assert isinstance(k_dev, int)
@@ -503,12 +192,6 @@ def main():
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
     eval_freq = 10000 # steps
-    #eval_freq = 500 # TODO remove
-    #eval_freq = 1000 # steps
-    #eval_freq = 2000 # steps
-    #eval_freq = 5000 # steps
-    #eval_freq = 40 # TODO remove
-    #eval_freq = 200 # TODO remove
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -516,9 +199,17 @@ def main():
     max_episodes_epochs = 100000 # repeat N times (patience-driven environment, so this value might not be used at all)
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     patience = -1 # early stopping patience (number of evals with no improvement; disabled if < 0)
-    #patience = 6 #  TODO remove
-    #patience = 3 # TODO remove?
     enable_eval = not disable_eval
+
+    if min_conf_debug:
+        #eval_freq = 500 # TODO remove
+        #eval_freq = 1000 # steps
+        #eval_freq = 2000 # steps
+        #eval_freq = 5000 # steps
+        #eval_freq = 40 # TODO remove
+        eval_freq = 200 # TODO remove
+        patience = 6 #  TODO remove
+        #patience = 3 # TODO remove?
 
     if not enable_eval:
         logger.warning("Evaluation (dev set) disabled: no best model will be available, only last model")
@@ -545,7 +236,6 @@ def main():
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
     batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 256)))
-    #batch_size = 16 # TODO remove
     gamma = 1.0
     #gamma = 0.99
     #replay_buffer_size = 1000000
@@ -573,8 +263,12 @@ def main():
     max_steps_training += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
     #init_training_steps = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs)
     init_training_steps = int(max_steps_training * 0.1 + 0.5)
-    #init_training_steps = 50 # TODO remove
-    #init_training_steps = 100 # TODO remove
+
+    if min_conf_debug:
+        batch_size = 16 # TODO remove
+        init_training_steps = 50 # TODO remove
+        #init_training_steps = 100 # TODO remove
+
     max_steps = max_steps_training + init_training_steps
     replay_buffer_size = int(max_steps * 0.5 + 0.5) # small value to avoid remove old transitions and avoid averaging Q-values over "bad" actions. If monte carlo updates are used, and old transitions are updated to the best Q-value found, then this value can be increased
     actor_mlp_l2_norm = bool(int(parsed_kwargs.pop("actor_mlp_l2_norm", 1)))
@@ -644,7 +338,8 @@ def main():
     #critic_dropout_p = 0.01 # DroQ paper if value greater than 0
     critic_dropout_p = 0.0 # TODO enable?
     #exploration_rate_steps_percentage = 0.5
-    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * 0.5 + 0.5)
+    exploration_rate_steps_percentage = 0.1
+    exploration_rate_steps = int((max_steps - init_training_steps) / num_envs * exploration_rate_steps_percentage + 0.5)
     #exploration_rate_steps = 50000
     #exploration_rate_steps = 50 # TODO remove
     exploration_rate_steps_percentage_of_training = exploration_rate_steps / ((max_steps - init_training_steps) / num_envs)
@@ -688,12 +383,11 @@ def main():
     min_actor_learning_rate = actor_learning_rate / 10
     min_critic_learning_rate = critic_learning_rate / 10
     transformer_d_model = 128
-    step_size = 500
-    step_size = max(int(step_size / (train_freq_steps * num_envs) + 0.5), 1) # We divide by (train_freq_steps * num_envs) to apply a similar number of times the learning rate regardless the number of environments and how much the training is delayed
-    warmup_steps = step_size * 2
-    #step_size = 20 # TODO remove
+    #step_size = 500
+    #step_size = max(int(step_size / (train_freq_steps * num_envs) + 0.5), 1) # We divide by (train_freq_steps * num_envs) to apply a similar number of times the learning rate regardless the number of environments and how much the training is delayed
+    #warmup_steps = step_size * 2
 
-    logger.info("Step size and warmup steps: %d %d", step_size, warmup_steps)
+    #logger.info("Step size and warmup steps: %d %d", step_size, warmup_steps)
 
     if not use_transformer:
         net_arch = {
@@ -704,7 +398,8 @@ def main():
             #"qf": [1024, 512]
             #"qf": [400, 300]
             #"qf": [512, 256, 128]
-            "qf": [512, 128, 32]
+            #"qf": [512, 128, 32]
+            "qf": [512, 256, 128]
         } # "pi" is actor and "qf" the critic (ignored if transformer is used)
 
         logger.info("Transformer disabled: using MLP: %s", net_arch)
@@ -725,14 +420,15 @@ def main():
         logger.info("Transformer enabled: using transformer+MLP: ... + %s", net_arch)
 
         #warmup_steps = 200
-        #warmup_steps = 1000
+        warmup_steps = 1000
         #warmup_steps = 2000
         #warmup_steps = 5000
-        #warmup_steps = 20 # TODO remove
         actor_learning_rate = 1e-5
         critic_learning_rate = 1e-4
         min_actor_learning_rate = actor_learning_rate
         min_critic_learning_rate = critic_learning_rate
+
+    logger.info("Warmup steps: %d", warmup_steps)
 
     #if patience >= 0:
     #    actor_lr_schedule = InverseSqrtWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=actor_learning_rate, logger=logger, str_id="actor") # callable

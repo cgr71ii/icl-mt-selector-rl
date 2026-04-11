@@ -489,8 +489,20 @@ class MTICLEnv(gym.Env):
             return None
 
     def preprocess_action(self, action):
-        assert isinstance(action, np.ndarray), type(action)
+        if self.action_representation == "discrete_index":
+            assert isinstance(action, (np.integer, np.ndarray)), f"Expected action to be an integer or a numpy array for 'discrete_index' action representation, got {type(action)}"
+
+            if isinstance(action, np.ndarray):
+                assert action.shape == (1,), f"Expected action shape (1,) for 'discrete_index' action representation, got {action.shape}"
+                action = np.array([np.int64(action[0])])
+            else:
+                action = np.array([np.int64(action)])
+        else:
+            assert isinstance(action, np.ndarray), type(action)
+
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
+
+        current_translation_candidate = self.data[self.translation_candidate][0]
 
         if self.action_representation == "discrete_index":
             assert action.shape == (1,), f"Expected action shape (1,) for 'discrete_index' action representation, got {action.shape}"
@@ -498,10 +510,9 @@ class MTICLEnv(gym.Env):
             action_url = [[self.icl_example_representation[action_idx]]]
             action_url_idx = np.array([[action_idx]])
             action_url_distance = np.array([[0.0]])
-            # TODO assert that action_url is not overlapping with the translation candidate source sentence
         else:
             translation_candidate_observation = np.zeros((1, self.state_dim), dtype=np.float32) # dummy observation
-            translation_candidate_actual_representation = self.str2representation[self.data[self.translation_candidate][0]]
+            translation_candidate_actual_representation = self.str2representation[current_translation_candidate]
             translation_candidate_observation[0, :translation_candidate_actual_representation.shape[0]] = translation_candidate_actual_representation # self.get_closest_neighbors_urls expects this representation at the very beginning
             action_url, action_url_distance, action_url_idx = self.get_closest_neighbors_urls(np.expand_dims(action, axis=0), k=1, observations=translation_candidate_observation, debug=False, actions_without_replacement=self.actions_without_replacement, assert_no_duplicates=True)
 
@@ -517,6 +528,7 @@ class MTICLEnv(gym.Env):
         assert action_url_idx.shape == (1, 1), action_url_idx.shape
         assert action_url == self.icl_example_representation[action_url_idx[0][0]], f"{action_url} vs {self.icl_example_representation[action_url_idx[0][0]]}"
         assert action_url_idx[0][0] == self.icl_example_representation_icl2idx[action_url], f"{action_url_idx[0][0]} vs {self.icl_example_representation_icl2idx[action_url]}"
+        assert current_translation_candidate != action_url.split('\t')[0], f"Selected action URL is the same as the current translation candidate (env id: {self.custom_env_id}): {action_url}"
 
         return action_url, action_url_idx, action_url_distance
 
@@ -544,7 +556,17 @@ class MTICLEnv(gym.Env):
         self.time_step += 1
         self.time_step_global += 1
 
-        assert isinstance(action, np.ndarray), type(action)
+        if self.action_representation == "discrete_index":
+            assert isinstance(action, (np.integer, np.ndarray)), f"Expected action to be an integer or a numpy array for 'discrete_index' action representation, got {type(action)}"
+
+            if isinstance(action, np.ndarray):
+                assert action.shape == (1,), f"Expected action shape (1,) for 'discrete_index' action representation, got {action.shape}"
+                action = np.array([np.int64(action[0])])
+            else:
+                action = np.array([np.int64(action)])
+        else:
+            assert isinstance(action, np.ndarray), type(action)
+
         assert action.shape == (self.action_dim,), f"Expected action shape {(self.action_dim,)}, got {action.shape}"
 
         # Preprocess action and apply step
@@ -710,6 +732,8 @@ class MTICLEnv(gym.Env):
             n = 1 if self.enable_eos_action else 0
 
             for _str in representations_str:
+                self.icl_example_representation[n] = _str
+                self.icl_example_representation_icl2idx[_str] = n
                 self.str2representation[_str] = n
                 self.str2representation_valid_actions_k.append(_str)
 
@@ -776,6 +800,8 @@ class MTICLEnv(gym.Env):
             if self.action_representation == "discrete_index":
                 assert len(representations_str) == 1
 
+                self.icl_example_representation[0] = representations_str[0]
+                self.icl_example_representation_icl2idx[representations_str[0]] = 0
                 self.str2representation[representations_str[0]] = 0
                 self.str2representation_valid_actions_k.insert(0, representations_str[0])
             else:
@@ -810,7 +836,7 @@ class MTICLEnv(gym.Env):
         representations_str = [d[0] for d in self.data]
 
         if self.action_representation == "discrete_index":
-            _str2representation_src = [k.split('\t') for k in self.str2representation.keys()]
+            _str2representation_src = [k.split('\t')[0] for k in self.str2representation.keys()]
             _str2representation_src_set = set(_str2representation_src)
 
             for _str in representations_str:
@@ -927,11 +953,14 @@ class MTICLEnv(gym.Env):
 
         # Get the initial observation
         src_sentence = self.data[self.translation_candidate][0]
-        action_representation = self.str2representation[src_sentence] # TODO ey! we assume that the representation of the ICL examples is depending only in the source part, so we can later detect duplicates, but that is not always true...
+        action_repr = self.str2representation[src_sentence] # TODO ey! we assume that the representation of the ICL examples is depending only in the source part, so we can later detect duplicates, but that is not always true...
 
-        assert len(action_representation) == self.action_dim
+        if self.action_representation == "discrete_index":
+            action_repr = np.array([action_repr], dtype=np.float32)
 
-        self.current_state_window[0] = action_representation
+        assert len(action_repr) == self.action_dim
+
+        self.current_state_window[0] = action_repr
 
         if self.state_representation == "representation_per_token_with_features":
             self.current_state_window[1] = np.ones(self.state_dim_per_token) * self.current_max_icl_examples / 10 # state representing the number of maximum examples that will be selected. 10 as constant so the value is less than 1 (as long as self.max_icl_examples is less than 10)
@@ -1125,6 +1154,7 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples_bm25 = rank_bm25.BM25Okapi(self.data_icl_examples_bm25_corpus_tokenized)
 
     def insert_embeddings(self, urls, embeddings, _index=None, _urls_representation=None, _urls_representation_url2idx=None, update_representation=True, check_l2_norm=True):
+        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert isinstance(urls, list), f"Expected urls to be a list, got {type(urls)}: {urls}"
         assert len(urls) > 0, "urls must not be an empty list"
         assert isinstance(urls[0], str), f"Expected urls to be a list of strings, got {type(urls[0])}: {urls[0]}"
@@ -1732,7 +1762,7 @@ class MTICLEnv(gym.Env):
                     src_icl_example, trg_icl_example = url.split('\t')
 
                     if remove_overlapping_actions and _translation_candidate == src_icl_example:
-                        self.logger_wrapper(gym.logger.info, "Removing overlapping action: %s", src_icl_example)
+                        self.logger_wrapper(gym.logger.debug, "Removing overlapping action: %s", src_icl_example)
 
                         overlapping_hits += 1
                         d[idx2] = np.finfo(np.float32).max
