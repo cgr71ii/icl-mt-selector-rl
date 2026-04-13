@@ -111,7 +111,8 @@ def main():
     # set defaults in case they are not provided
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
-    max_data_entries_dev = 50
+    #max_data_entries_dev = 50
+    max_data_entries_dev = 100
 
     if min_conf_debug:
         #max_data_entries = 1 # TODO remove
@@ -139,11 +140,13 @@ def main():
     data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
+
+    if state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+        process_token_time_step = False
+
     parsed_kwargs["process_token_time_step"] = process_token_time_step
     parsed_kwargs["num_icl_examples"] = len(data_icl_examples)
     parsed_kwargs["action_representation"] = "discrete_index"
-
-    process_token_time_step = False # TODO change when implemented and see how to feed time_steps (replay_buffer_kwargs is not an argument anymore)
 
     logger.info("parsed_kwargs: %s", parsed_kwargs)
 
@@ -152,7 +155,8 @@ def main():
     #save_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
-    eval_freq = 10000 # steps
+    #eval_freq = 10000 # steps
+    eval_freq = 20000 # steps
     save_path = f"./rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
@@ -206,15 +210,16 @@ def main():
     #max_steps = 20000 # steps while training
     #max_steps = 50000 # steps while training
     #max_steps = 100000 # steps while training
-    max_steps = 200000
+    #max_steps = 200000
+    max_steps = 1000000
     #max_steps = 10000000 # steps while training # TODO remove?
     max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
 
-    assert (n_steps * num_envs) % batch_size == 0, f"Expected n_steps * num_envs to be divisible by batch_size, but got n_steps={n_steps}, num_envs={num_envs}, batch_size={batch_size}"
-
     if min_conf_debug:
-        batch_size = 16 # TODO remove
+        batch_size = 25 # TODO remove
         max_steps = 200
+
+    assert (n_steps * num_envs) % batch_size == 0, f"Expected n_steps * num_envs to be divisible by batch_size, but got n_steps={n_steps}, num_envs={num_envs}, batch_size={batch_size}"
 
     total_evaluations = max_steps // eval_freq
 
@@ -228,7 +233,9 @@ def main():
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
+    parsed_kwargs["max_data_entries"] = max_data_entries_dev
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
+    parsed_kwargs["max_data_entries"] = max_data_entries
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 
@@ -242,8 +249,10 @@ def main():
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
     elif state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
         n_features = state_dim_per_token * 2 + (state_dim_per_token_time_step if process_token_time_step else 0)
-    elif state_representation == "representation_mean_75_perc_layer":
+    elif state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
         n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
+    elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+        n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
     else:
         n_features = 0
 
@@ -251,8 +260,10 @@ def main():
     #net_arch = [512, 256, 128]
     #net_arch = [1024, 512, 256]
     net_arch = {
-        "pi": [512, 256],
-        "qf": [512, 256]
+        #"pi": [512, 256],
+        #"qf": [512, 256]
+        "pi": [1024, 512],
+        "qf": [1024, 512]
     } # "pi" is actor and "qf" the critic
 
     logger.info("net_arch: %s", net_arch)
@@ -281,15 +292,20 @@ def main():
         skip_n = action_dim
 
         if state_representation == "representation_per_token_with_features":
+            step_embeddings = max_icl_examples + 1
             step_embeddings_dim = state_dim_per_token
             n -= step_embeddings_dim # "- step_embeddings_dim" to add the time_step embedding
             skip_n += state_dim_per_token * 2 # "state_dim_per_token * 2" to remove the time_step information
-        elif state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
+        elif state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
+            step_embeddings = max_icl_examples + 1
             step_embeddings_dim = state_dim_per_token_time_step
             #n -= state_dim_per_token_time_step
 
             if process_token_time_step:
                 skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
+        elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+            step_embeddings = 0
+            step_embeddings_dim = 0
         else:
             raise Exception()
 
@@ -298,11 +314,14 @@ def main():
             "skip_n": skip_n,
             "state_dim_per_token": state_dim_per_token,
             "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
-            "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
+            "step_embeddings": step_embeddings, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
             "step_embeddings_dim": step_embeddings_dim,
         }
 
     avoid_overlapping_action = True
+    #layer_norm_input = True
+    layer_norm_input = False
+    layer_norm_before_activation = True
 
     model_class = PPO
     model = model_class(
@@ -321,8 +340,8 @@ def main():
             },
             # Other
             "net_arch": dict(net_arch),
-            "layer_norm_input": True,
-            "layer_norm_before_activation": True,
+            "layer_norm_input": layer_norm_input,
+            "layer_norm_before_activation": layer_norm_before_activation,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
             "activation_fn": torch.nn.GELU,
@@ -330,11 +349,17 @@ def main():
         },
         gamma=gamma,
         device=device,
-        #replay_buffer_kwargs={"process_time_steps": process_token_time_step},
+        rollout_buffer_kwargs={"process_time_steps": process_token_time_step},
         #max_grad_norm=0.5,
         max_grad_norm=1.0,
         n_steps=n_steps,
-        n_epochs=4,
+        #n_epochs=4,
+        n_epochs=8,
+        #ent_coef=0.02,
+        #ent_coef=0.0,
+        #ent_coef=0.01,
+        ent_coef=0.05,
+        clip_range=0.1,
     )
 
     #assert init_training_episodes < max_episodes
@@ -399,8 +424,8 @@ def main():
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
             "net_arch": dict(net_arch),
-            "layer_norm_input": True,
-            "layer_norm_before_activation": True,
+            "layer_norm_input": layer_norm_input,
+            "layer_norm_before_activation": layer_norm_before_activation,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
             "activation_fn": torch.nn.GELU,
@@ -432,8 +457,8 @@ def main():
         lr_schedule=lambda foo: 100.0, # dummy callable
         policy_kwargs={
             "net_arch": dict(net_arch),
-            "layer_norm_input": True,
-            "layer_norm_before_activation": True,
+            "layer_norm_input": layer_norm_input,
+            "layer_norm_before_activation": layer_norm_before_activation,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
             "activation_fn": torch.nn.GELU,

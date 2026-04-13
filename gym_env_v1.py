@@ -203,7 +203,7 @@ class MTICLEnv(gym.Env):
 
         assert not self.select_max_icl_examples_randomly, "Watch out: you should adapt the code to work with the transformer to process the max number of steps per environment similarly to how time steps are processed"
 
-        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"), f"Unexpected state representation: {self.state_representation}"
+        assert self.state_representation in ("model_single_representation", "sentence_and_actions", "model_single_representation+sentence_and_actions", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples"), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 
         if self.state_representation == "model_single_representation" and self.state_window_length > 1:
@@ -234,11 +234,13 @@ class MTICLEnv(gym.Env):
 
             if not self.process_token_time_step:
                 self.state_window_length -= 1
-        elif self.state_representation == "representation_mean_75_perc_layer":
+        elif self.state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
             self.state_window_length = 3 # action representation, time_step, mean pooled embeddings
 
             if not self.process_token_time_step:
                 self.state_window_length -= 1
+        elif self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+            self.state_window_length = 4
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -281,6 +283,9 @@ class MTICLEnv(gym.Env):
             self.embedding_pooling_model_layer = "75%"
         elif self.state_representation == "representation_mean_75_perc_layer":
             self.embedding_pooling_model_method_state = "mean"
+            self.embedding_pooling_model_layer = "75%"
+        elif self.state_representation in ("representation_last_75_perc_layer", "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples"):
+            self.embedding_pooling_model_method_state = "last"
             self.embedding_pooling_model_layer = "75%"
 
         self.logger_wrapper(gym.logger.info, "Embeddings pooling and layer: %s %s", self.embedding_pooling_model_method_state, self.embedding_pooling_model_layer)
@@ -380,17 +385,29 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
 
+        self.num_icl_examples = utils.dict_or_default(kwargs, "num_icl_examples", None)
+        self.num_icl_examples = int(self.num_icl_examples) if self.num_icl_examples is not None else None
+
+        if self.num_icl_examples is not None:
+            if self.enable_eos_action:
+                self.num_icl_examples += 1
+
         if self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff"):
             self.state_dim = self.state_dim_per_token * 2 + self.state_dim_per_token_time_step + self.action_dim
 
             if not self.process_token_time_step:
                 self.state_dim -= self.state_dim_per_token_time_step
 
-        if self.state_representation == "representation_mean_75_perc_layer":
+        if self.state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
             self.state_dim = self.state_dim_per_token + self.state_dim_per_token_time_step + self.action_dim
 
             if not self.process_token_time_step:
                 self.state_dim -= self.state_dim_per_token_time_step
+
+        if self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+            assert self.num_icl_examples is not None
+
+            self.state_dim = self.state_dim_per_token + (self.max_icl_examples + 1) + self.action_dim + self.num_icl_examples
 
         if self.action_representation == "discrete_index" and self.apply_l2_normalization_action:
             self.logger_wrapper(gym.logger.warn, "L2 normalization of action embeddings should not be enabled when using 'discrete_index' action representation: disabling")
@@ -438,15 +455,10 @@ class MTICLEnv(gym.Env):
         #self.action_space = gym.spaces.Box(-1., 1., shape=(self.action_dim,)) # input/output model is expected to have tanh in order to be in [-1, 1]
 
         error_when_sampling = False
-        self.num_icl_examples = utils.dict_or_default(kwargs, "num_icl_examples", None)
-        self.num_icl_examples = int(self.num_icl_examples) if self.num_icl_examples is not None else None
 
         if self.action_representation == "discrete_index":
             assert self.action_dim == 1, self.action_dim
             assert self.num_icl_examples is not None
-
-            if self.enable_eos_action:
-                self.num_icl_examples += 1
 
             self.action_space = gym.spaces.Discrete(self.num_icl_examples, start=0, seed=self._seed)
 
@@ -716,7 +728,7 @@ class MTICLEnv(gym.Env):
         ## ICL examples
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d ICL examples", len(self.data_icl_examples))
 
-        if self.action_representation == "discrete_index":
+        if self.action_representation == "discrete_index" or self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
             assert self.num_icl_examples is not None
         elif self.num_icl_examples is None:
             self.num_icl_examples = len(self.data_icl_examples)
@@ -899,8 +911,13 @@ class MTICLEnv(gym.Env):
             if idx == 0:
                 # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
-            elif idx == 1 and self.process_token_time_step and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
-                self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
+            elif idx == 1 and ((self.process_token_time_step and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer")) or self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples"):
+                if self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+                    self.current_state_window.append(np.zeros(self.max_icl_examples + 1))
+                else:
+                    self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
+            elif idx == 3 and self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+                self.current_state_window.append(np.zeros(self.num_icl_examples))
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
@@ -1005,7 +1022,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last tokens: %s %s %s %s ... %s %s %s %s",
                                 self.current_state_window[1], self.current_state_window[2], self.current_state_window[3], self.current_state_window[4],
                                 self.current_state_window[-4], self.current_state_window[-3], self.current_state_window[-2], self.current_state_window[-1])
-        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
+        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
             token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
@@ -1028,8 +1045,29 @@ class MTICLEnv(gym.Env):
 
             self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
 
-            if self.state_representation != "representation_mean_75_perc_layer":
+            if self.state_representation not in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
                 assert np.allclose(self.current_state_window[data_idx + 1], np.zeros_like(self.current_state_window[data_idx + 1]))
+        elif self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+            token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
+
+            assert isinstance(token_representations, np.ndarray), type(token_representations)
+            assert len(token_representations.shape) == 1, f"Expected token_representations to be a 1D numpy array, got shape {token_representations.shape}: {token_representations}"
+            assert token_representations.shape[0] == self.state_dim_per_token, f"Token representations shape mismatch: {token_representations.shape[0]} vs model_hidden_size {self.state_dim_per_token}"
+
+            token_representations = token_representations.reshape(-1, self.state_dim_per_token) # (seq_len, dim)
+
+            assert token_representations.shape == (1, self.state_dim_per_token), token_representations.shape
+
+            self.current_state_window[1] = np.zeros(self.max_icl_examples + 1)
+            self.current_state_window[1][0] = 1.0 # representation time step (first time step)
+            self.current_state_window[2] = token_representations[0]
+
+            assert np.isclose(sum(self.current_state_window[1]), 1.0)
+            assert np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
+
+            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[1])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[3]))
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
         observation = self.postprocessing_observation(observation)
@@ -2083,7 +2121,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
+            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
@@ -2106,7 +2144,7 @@ class MTICLEnv(gym.Env):
 
         if self.state_representation == "representation_per_token_with_features":
             observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
-        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer"):
+        elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples"):
             pass
         elif self.time_step > 1:
             offset = 0 if self.state_representation != "model_single_representation+sentence_and_actions" or self.time_step < 2 else 1
@@ -2193,7 +2231,7 @@ class MTICLEnv(gym.Env):
 
             self.logger_wrapper(gym.logger.debug, "First ... last representations (current): %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
             self.logger_wrapper(gym.logger.debug, "First ... last representations (relative diff): %s ... %s", self.current_state_window[data_idx + 1][:10], self.current_state_window[data_idx + 1][-10:])
-        elif self.state_representation == "representation_mean_75_perc_layer":
+        elif self.state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
             assert len(observation.shape) == 1, observation.shape
 
             if self.process_token_time_step:
@@ -2209,6 +2247,31 @@ class MTICLEnv(gym.Env):
             self.current_state_window[data_idx] = observation
 
             self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
+        elif self.state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+            assert len(observation.shape) == 1, observation.shape
+            assert np.isclose(sum(self.current_state_window[1]), 1.0)
+            assert self.current_state_window[1][self.time_step - 1] == 1.0, f"{self.current_state_window[1]} vs time_step {self.time_step}"
+
+            self.current_state_window[1][self.time_step - 1] = 0.0 # reset one-hot representation of time step
+
+            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+
+            self.current_state_window[1][self.time_step] = 1.0 # set one-hot representation of time step
+            self.current_state_window[2] = observation
+            icl_example = '\t'.join(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1])
+            icl_idx = self.icl_example_representation_icl2idx[icl_example]
+            self.current_state_window[3][icl_idx] = 1.0 # set one-hot representation of selected ICL example
+
+            #self.logger_wrapper(gym.logger.debug, "Selected ICL example: %s (idx: %d): %s", icl_example, icl_idx, self.current_icl_examples)
+
+            current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
+
+            assert np.isclose(sum(self.current_state_window[3]), len(current_icl_examples_set)), f"{self.current_state_window[3]} vs {len(current_icl_examples_set)}"
+            assert not np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
+
+            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[1])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
+            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[3]))
         else:
             self.current_state_window[self.time_step] = observation
 
