@@ -37,8 +37,9 @@ def create_callback_episode_rewards(n_eval_episodes):
         episode_lengths = l["episode_lengths"]
         episode_rewards = []
         episode_lengths = []
-        all_rewards = env.unwrapped.get_attr("rewards")
-        gym.logger.error("wasd8686: %s", all_rewards)
+        all_rewards_data = env.unwrapped.get_attr("rewards")
+        #gym.logger.error("wasd8686: %s", all_rewards)
+        all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
         assert len(all_rewards) == len(n_eval_episodes)
 
@@ -49,6 +50,8 @@ def create_callback_episode_rewards(n_eval_episodes):
             assert len(all_rewards[i]) == n_eval_episodes[i]
 
             for j in range(len(all_rewards[i])):
+                assert isinstance(all_rewards[i][j], list)
+
                 episode_lengths.append(len(all_rewards[i][j]))
 
                 all_rewards[i][j] = sum(all_rewards[i][j])
@@ -61,8 +64,38 @@ def create_callback_episode_rewards(n_eval_episodes):
 
     return callback_compute_episode_rewards_and_lengths
 
-def inner_callback_after_eval(env):
-    env.env_method("reset_fake", increase_reset_times=False)
+def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
+
+    def inner_callback_after_eval(env):
+        all_rewards_data = env.get_attr("rewards") # reset rewards
+        all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
+
+        assert len(all_rewards_data) == n_envs
+
+        for n1 in range(n_envs):
+            assert isinstance(all_source_sentences_and_refs_data[n1], list)
+            all_source_sentences_and_refs_data[n1] = all_source_sentences_and_refs_data[n1][:n_eval_episodes[n1]]
+
+            assert len(all_source_sentences_and_refs_data[n1]) == n_eval_episodes[n1]
+
+            for n2 in range(len(all_source_sentences_and_refs_data[n1])):
+                assert isinstance(all_source_sentences_and_refs_data[n1][n2], list), f"{n1} {n2} {all_source_sentences_and_refs_data[n1]}"
+                assert len(set(all_source_sentences_and_refs_data[n1][n2])) in (0, 1), all_source_sentences_and_refs_data[n1][n2]
+
+                if len(set(all_source_sentences_and_refs_data[n1][n2])) == 0:
+                    del all_source_sentences_and_refs_data[n1][n2]
+                else:
+                    all_source_sentences_and_refs_data[n1][n2] = all_source_sentences_and_refs_data[n1][n2][0]
+
+        all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
+
+        assert len(all_source_sentences_and_refs_data) == len(data_to_be_translated), f"{len(all_source_sentences_and_refs_data)} vs {len(data_to_be_translated)}"
+        assert set(all_source_sentences_and_refs_data) == set(data_to_be_translated)
+
+        env.env_method("reset_fake", increase_reset_times=False)
+        env.set_attr("rewards", []) # reset rewards
+
+    return inner_callback_after_eval
 
 def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
@@ -114,6 +147,7 @@ def main():
         num_envs = 5 # TODO remove
         disable_eval = False # TODO remove
         store_model_on_eval = False # TODO remove
+        n_steps = 5
 
     logger.info("n_steps: %d; the model will be trained with %d data points (num_envs * n_steps)", n_steps, num_envs * n_steps)
 
@@ -472,7 +506,7 @@ def main():
         custom_callback_on_eval=custom_callback_on_eval,
         custom_logger=logger,
         evaluate_policy_kwargs={"callback_compute_episode_rewards_and_lengths": create_callback_episode_rewards(n_eval_episodes)},
-        inner_callback_after_eval=inner_callback_after_eval,
+        inner_callback_after_eval=get_callback_after_eval(num_envs, data_to_be_translated_dev, n_eval_episodes),
     ))
     callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
         save_freq=save_freq,

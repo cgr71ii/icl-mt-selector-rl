@@ -260,20 +260,39 @@ def main():
         },)
 
     episode_rewards = []
-    all_rewards = env_eval_dev.unwrapped.get_attr("rewards")
+    all_rewards_data = env_eval_dev.unwrapped.get_attr("rewards")
+    all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
+    all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
+    assert len(all_rewards_data) == num_envs
     assert len(all_rewards) == len(n_eval_episodes)
+    assert len(all_source_sentences_and_refs_data) == len(n_eval_episodes)
 
     for i in range(num_envs):
         # Remove extra evaluations
         all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
+        all_source_sentences_and_refs_data[i] = all_source_sentences_and_refs_data[i][:n_eval_episodes[i]]
 
         assert len(all_rewards[i]) == n_eval_episodes[i]
+        assert len(all_source_sentences_and_refs_data[i]) == n_eval_episodes[i]
 
         for j in range(len(all_rewards[i])):
             all_rewards[i][j] = sum(all_rewards[i][j])
 
+            assert isinstance(all_source_sentences_and_refs_data[i][j], list), f"{i} {j} {all_source_sentences_and_refs_data[i]}"
+            assert len(set(all_source_sentences_and_refs_data[i][j])) in (0, 1), all_source_sentences_and_refs_data[i][j]
+
+            if len(set(all_source_sentences_and_refs_data[i][j])) == 0:
+                del all_source_sentences_and_refs_data[i][j]
+            else:
+                all_source_sentences_and_refs_data[i][j] = all_source_sentences_and_refs_data[i][j][0]
+
         episode_rewards.extend(all_rewards[i])
+
+    all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
+
+    assert len(all_source_sentences_and_refs_data) == len(data_to_be_translated), f"{len(all_source_sentences_and_refs_data)} vs {len(data_to_be_translated)}"
+    assert set(all_source_sentences_and_refs_data) == set(data_to_be_translated)
 
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
