@@ -5,6 +5,7 @@ import base64
 import logging
 import hashlib
 from urllib3.util.retry import Retry
+from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
@@ -447,3 +448,11 @@ def get_lr_scheduler_and_optimizer_using_argparse_values(optimizer_str, schedule
     logger.debug("LR scheduler: '%s' optional args: %s", scheduler_str, str(scheduler_kwargs))
 
     return optimizer, scheduler
+
+@contextmanager
+def open_or_iter(fn, mode='r'):
+    if isinstance(fn, (str, bytes)):
+        with open(fn, mode=mode) as fd:
+            yield fd
+    else:
+        yield fn

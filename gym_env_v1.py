@@ -154,8 +154,11 @@ class MTICLEnv(gym.Env):
         self.custom_env_id = utils.dict_or_default(kwargs, "custom_env_id", "none")
         self._seed = utils.dict_or_default(kwargs, "_seed", None)
 
-        assert utils.file_exists(self.file_data), self.file_data
-        assert utils.file_exists(self.file_data_icl_examples), self.file_data_icl_examples
+        if isinstance(self.file_data, str):
+            assert utils.file_exists(self.file_data), self.file_data
+
+        if isinstance(self.file_data_icl_examples, str):
+            assert utils.file_exists(self.file_data_icl_examples), self.file_data_icl_examples
 
         self.reset_times = 0
         self.episode = 0
@@ -382,6 +385,7 @@ class MTICLEnv(gym.Env):
         self.best_reward_seen = {}
         self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
         self.state_dim_per_token_time_step = utils.dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
+        self.rewards = [] # for gathering the rewards from outside the environment
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
 
@@ -598,7 +602,7 @@ class MTICLEnv(gym.Env):
         #self.last_representation_str.append(representation)
         #self.last_representation_emb.append(action_url)
 
-        #self.rewards.append(reward)
+        self.rewards[-1].append(reward)
         self.logger_wrapper(gym.logger.info,
                             "Action in time step #%d (reward: %s; %s: %s; max_icl_examples: %s; translation_candidate: %s): %s",
                             self.time_step, reward, "similarity" if self.knn_distance_ip else "distance", action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)
@@ -951,7 +955,6 @@ class MTICLEnv(gym.Env):
         #self.current_translations = 0 # former self.current_downloaded_urls
         self.current_icl_examples = []
         self.current_state_window = collections.deque(maxlen=self.state_window_length)
-        #self.rewards = []
         self.early_stopping = False
         #self.last_representation_str = [] # former self.last_downloaded_url_representation_url
         #self.last_representation_emb = [] # former self.last_downloaded_url_representation
@@ -967,6 +970,8 @@ class MTICLEnv(gym.Env):
 
         # Select translation sentence for the episode
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
+
+        self.rewards.append([])
 
         # Get the initial observation
         src_sentence = self.data[self.translation_candidate][0]
@@ -1132,7 +1137,7 @@ class MTICLEnv(gym.Env):
 
         src_data_set = set()
 
-        with open(self.file_data, "rt") as fd:
+        with utils.open_or_iter(self.file_data, "rt") as fd:
             for idx, url_entry in enumerate(fd, 1):
                 # Format: source<tab>reference
 
@@ -1159,7 +1164,7 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Loading data: finished! %d entries read (%d URLs loaded)", idx, len(self.data))
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples)")
 
-        with open(self.file_data_icl_examples, "rt") as fd:
+        with utils.open_or_iter(self.file_data_icl_examples, "rt") as fd:
             for idx, url_entry in enumerate(fd, 1):
                 # Format: source<tab>reference
 

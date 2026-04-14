@@ -238,7 +238,9 @@ def main():
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
+    parsed_kwargs["max_data_entries"] = max_data_entries_dev
     env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
+    parsed_kwargs["max_data_entries"] = max_data_entries
 
     env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 

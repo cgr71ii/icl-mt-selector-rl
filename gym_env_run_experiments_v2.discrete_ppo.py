@@ -29,6 +29,41 @@ from stable_baselines3.common.policies import ContinuousCritic, ContinuousCritic
 import numpy as np
 import torch
 
+def create_callback_episode_rewards(n_eval_episodes):
+    def callback_compute_episode_rewards_and_lengths(l, g):
+        env = l["env"]
+        n_envs = l["n_envs"]
+        episode_rewards = l["episode_rewards"]
+        episode_lengths = l["episode_lengths"]
+        episode_rewards = []
+        episode_lengths = []
+        all_rewards = env.unwrapped.get_attr("rewards")
+        gym.logger.error("wasd8686: %s", all_rewards)
+
+        assert len(all_rewards) == len(n_eval_episodes)
+
+        for i in range(n_envs):
+            # Remove extra evaluations
+            all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
+
+            assert len(all_rewards[i]) == n_eval_episodes[i]
+
+            for j in range(len(all_rewards[i])):
+                episode_lengths.append(len(all_rewards[i][j]))
+
+                all_rewards[i][j] = sum(all_rewards[i][j])
+
+            episode_rewards.extend(all_rewards[i])
+
+            assert len(episode_rewards) == len(episode_lengths)
+
+        return episode_rewards, episode_lengths
+
+    return callback_compute_episode_rewards_and_lengths
+
+def inner_callback_after_eval(env):
+    env.env_method("reset_fake", increase_reset_times=False)
+
 def main():
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
 
@@ -42,18 +77,18 @@ def main():
     file_data_icl_examples = sys.argv[4]
     parsed_kwargs = utils.parse_args(sys.argv[5:])
 
-    assert len(file_data) in (1, 3), f"Expected 1 or 3 file paths for training, dev, and test sets, but got {len(file_data)}"
+    assert len(file_data) in (1, 2), f"Expected 1 or 2 file paths for training and dev sets, but got {len(file_data)}"
 
     # parse args
-    src_lang_training, src_lang_dev, src_lang_test = src_lang if len(src_lang) == 3 else (src_lang[0],) * 3
-    trg_lang_training, trg_lang_dev, trg_lang_test = trg_lang if len(trg_lang) == 3 else (trg_lang[0],) * 3
-    file_data_training, file_data_dev, file_data_test = file_data if len(file_data) == 3 else (file_data[0],) * 3
+    src_lang_training, src_lang_dev = src_lang if len(src_lang) == 2 else (src_lang[0],) * 2
+    trg_lang_training, trg_lang_dev = trg_lang if len(trg_lang) == 2 else (trg_lang[0],) * 2
+    file_data_training, file_data_dev = file_data if len(file_data) == 2 else (file_data[0],) * 2
 
     # read data
-    data_to_be_translated_training, data_to_be_translated_dev, data_to_be_translated_test = [], [], []
+    data_to_be_translated_training, data_to_be_translated_dev = [], []
     data_icl_examples = []
 
-    for _file_data, data_to_be_translated in ((file_data_training, data_to_be_translated_training), (file_data_dev, data_to_be_translated_dev), (file_data_test, data_to_be_translated_test)):
+    for _file_data, data_to_be_translated in ((file_data_training, data_to_be_translated_training), (file_data_dev, data_to_be_translated_dev)):
         with open(_file_data, "rt") as fd:
             for line in fd:
                 data_to_be_translated.append(line.rstrip("\r\n"))
@@ -76,7 +111,7 @@ def main():
         logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
 
     if min_conf_debug:
-        num_envs = 2 # TODO remove
+        num_envs = 5 # TODO remove
         disable_eval = False # TODO remove
         store_model_on_eval = False # TODO remove
 
@@ -112,7 +147,8 @@ def main():
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries_dev = 50
-    max_data_entries_dev = 100
+    #max_data_entries_dev = 100
+    max_data_entries_dev = -1
 
     if min_conf_debug:
         #max_data_entries = 1 # TODO remove
@@ -137,7 +173,6 @@ def main():
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
     data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
-    data_to_be_translated_test = data_to_be_translated_test[:max_data_entries if max_data_entries > 0 else None]
     data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
 
@@ -149,6 +184,54 @@ def main():
     parsed_kwargs["action_representation"] = "discrete_index"
 
     logger.info("parsed_kwargs: %s", parsed_kwargs)
+
+    # parallel eval dev
+
+    assert len(data_to_be_translated_dev) >= num_envs
+
+    file_data_per_env = {n: None for n in range(num_envs)}
+    bsz = len(data_to_be_translated_dev) // num_envs
+    start = 0
+    end = bsz
+    n_eval_episodes = [0 for _ in range(num_envs)]
+
+    assert (bsz + 1) * num_envs >= len(data_to_be_translated_dev), f"{bsz} * {num_envs} < {len(data_to_be_translated_dev)}"
+
+    for n in range(num_envs):
+        file_data_per_env[n] = list(data_to_be_translated_dev[start:end])
+        n_eval_episodes[n] = len(file_data_per_env[n])
+        start = end
+        end += bsz
+
+        assert n_eval_episodes[n] > 0, n
+
+    if start < len(data_to_be_translated_dev):
+        first = True
+        idx = 0
+
+        while sum(n_eval_episodes) < len(data_to_be_translated_dev):
+            if num_envs > 1 and first and n_eval_episodes[n] < n_eval_episodes[n-1]:
+                file_data_per_env[n].extend(data_to_be_translated_dev[start:start+1])
+                n_eval_episodes[n] = len(file_data_per_env[n])
+                start += 1
+
+                if n_eval_episodes[n] >= n_eval_episodes[n-1]:
+                    first = False
+
+            file_data_per_env[idx % num_envs].extend(data_to_be_translated_dev[start:start+1])
+            n_eval_episodes[idx % num_envs] = len(file_data_per_env[idx % num_envs])
+            idx += 1
+            start += 1
+
+    assert sum(n_eval_episodes) == len(data_to_be_translated_dev)
+
+    _all_data = [file_data_per_env[n] for n in range(num_envs)]
+    _all_data = sorted([x for xs in _all_data for x in xs])
+
+    assert len(_all_data) == len(data_to_be_translated_dev)
+    assert _all_data == sorted(data_to_be_translated_dev)
+
+    logger.info("num_envs: %s, data_to_be_translated_dev: %s, bsz: %s, n_eval_episodes: %s", num_envs, len(data_to_be_translated_dev), bsz, n_eval_episodes)
 
     # Other values
     filename_time = datetime.now().strftime("%Y%m%d_%H%M")
@@ -197,7 +280,6 @@ def main():
     # Environment
     env_class = MTICLEnv
     env_eval_dev_class = MTICLEvalEnv
-    env_eval_test_class = MTICLEvalEnv
     #vec_env_class = DummyVecEnv # debug
     vec_env_class = SubprocVecEnv
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
@@ -234,15 +316,15 @@ def main():
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
     env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
     parsed_kwargs["max_data_entries"] = max_data_entries_dev
-    env_eval_dev = Monitor(env_eval_dev_class(src_lang_dev, trg_lang_dev, file_data_dev, file_data_icl_examples, gym_logger_level=gym.logger.INFO, custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=monitor_filename, override_existing=True)
+    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"gym_logger_level": gym.logger.INFO, "custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, "_parallel_env": True, **parsed_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs), filename=monitor_filename, override_existing=True)
     parsed_kwargs["max_data_entries"] = max_data_entries
 
-    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={}) # env_eval_dev.get_closest_neighbors_urls() is available
+    env_eval_dev.unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-    action_dim = env_eval_dev.unwrapped.action_dim
-    state_dim_per_token = env_eval_dev.unwrapped.state_dim_per_token
-    state_window_length = env_eval_dev.unwrapped.state_window_length
-    state_dim_per_token_time_step = env_eval_dev.unwrapped.state_dim_per_token_time_step
+    action_dim = env_eval_dev.unwrapped.get_attr("action_dim")[0]
+    state_dim_per_token = env_eval_dev.unwrapped.get_attr("state_dim_per_token")[0]
+    state_window_length = env_eval_dev.unwrapped.get_attr("state_window_length")[0]
+    state_dim_per_token_time_step = env_eval_dev.unwrapped.get_attr("state_dim_per_token_time_step")[0]
     callbacks = []
 
     if state_representation == "representation_per_token_with_features":
@@ -371,13 +453,14 @@ def main():
     ## it does not evaluate the model performance when training finishes (we evaluate below)
     custom_callback_on_eval = None if not store_model_on_eval else lambda n_calls, eval_freq: store_model(save_path, name_prefix, f"eval-{n_calls // eval_freq}", model, logger)
     callbacks.append(DelayedEvalCallback(
-        env_eval_dev,
+        env_eval_dev.unwrapped,
         learning_starts=0,
         best_model_save_path=save_path,
         log_path=save_path,
         eval_freq=eval_freq,
         #n_eval_episodes=1,
-        n_eval_episodes=len(data_to_be_translated_dev),
+        #n_eval_episodes=len(data_to_be_translated_dev),
+        n_eval_episodes=[bsz + 1] * num_envs,
         callback_after_eval=stop_train_callback,
         deterministic=True,
         render=False,
@@ -388,6 +471,8 @@ def main():
         disable_eval=disable_eval,
         custom_callback_on_eval=custom_callback_on_eval,
         custom_logger=logger,
+        evaluate_policy_kwargs={"callback_compute_episode_rewards_and_lengths": create_callback_episode_rewards(n_eval_episodes)},
+        inner_callback_after_eval=inner_callback_after_eval,
     ))
     callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
         save_freq=save_freq,
@@ -437,44 +522,12 @@ def main():
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
-    mean_reward, std_reward = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated_dev),
+    mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev),
         predict_kwargs={
             "env_instance": env_eval_dev.unwrapped,
         },)
 
     print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
-
-    ## test: load model
-    logger.info("Loading last-step model (test): %s", model_path)
-
-    env_eval_test = env_eval_test_class(src_lang_test, trg_lang_test, file_data_test, file_data_icl_examples, gym_logger_level=gym.logger.INFO, custom_env_id="eval_test", is_eval_env=True, **parsed_kwargs)
-
-    env_eval_test._init_load_data_and_populate_knn_pool(options={})
-
-    model = model_class.load(
-        model_path,
-        learning_rate=lambda foo: 100.0, # dummy callable
-        lr_schedule=lambda foo: 100.0, # dummy callable
-        policy_kwargs={
-            "net_arch": dict(net_arch),
-            "layer_norm_input": layer_norm_input,
-            "layer_norm_before_activation": layer_norm_before_activation,
-            "features_extractor_class": features_extractor_class,
-            "features_extractor_kwargs": features_extractor_kwargs,
-            "activation_fn": torch.nn.GELU,
-            "avoid_overlapping_action": avoid_overlapping_action,
-        },
-    )
-
-    ## test: evaluate and report result
-    logger.info("Evaluating test")
-
-    mean_reward, std_reward = evaluate_policy(model, env_eval_test, n_eval_episodes=len(data_to_be_translated_test),
-        predict_kwargs={
-            "env_instance": env_eval_test,
-        },)
-
-    print(f"Mean reward test: {mean_reward} +/- {std_reward}")
 
 if __name__ == "__main__":
     main()

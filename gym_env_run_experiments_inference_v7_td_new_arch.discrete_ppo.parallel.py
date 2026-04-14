@@ -1,12 +1,14 @@
 
 import sys
+import random
 import logging
 
 import utils
 from gym_env_v1_eval import MTICLEvalEnv
 
-from gym_env_run_experiments import InverseSqrtWithWarmUpLRSchedule
+from gym_env_run_experiments import make_env
 import numpy as np
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 import gymnasium as gym
 from stable_baselines3 import DQN, PPO
@@ -47,7 +49,7 @@ def main():
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
-    #max_data_entries = 10 # TODO remove
+    #max_data_entries = 37 # TODO remove
     #max_data_icl_examples_entries = 100 # TODO remove
     #max_data_icl_examples_entries = 10 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
@@ -93,25 +95,85 @@ def main():
 
     utils.set_random_seed(seed)
 
+    num_envs = 80
+    vec_env_class = SubprocVecEnv
+    vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
+    randint_values = (1, 1000)
+    env_seeds = [random.randint(*randint_values) for _ in range(num_envs)]
+
+    for rank in range(1, num_envs):
+        while env_seeds[rank] in env_seeds[:rank]:
+            env_seeds[rank] = random.randint(*randint_values)
+
+    assert len(env_seeds) == len(set(env_seeds)) == num_envs
+
     # custom
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
 
     logger.info("Seed: %s", seed)
+    logger.info("Seed: %s (env_seeds: %s)", seed, env_seeds)
 
-    env_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
+    #env_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
+
+    assert len(data_to_be_translated) >= num_envs
+
+    file_data_per_env = {n: None for n in range(num_envs)}
+    bsz = len(data_to_be_translated) // num_envs
+    start = 0
+    end = bsz
+    n_eval_episodes = [0 for _ in range(num_envs)]
+
+    assert (bsz + 1) * num_envs >= len(data_to_be_translated), f"{bsz} * {num_envs} < {len(data_to_be_translated)}"
+
+    for n in range(num_envs):
+        file_data_per_env[n] = list(data_to_be_translated[start:end])
+        n_eval_episodes[n] = len(file_data_per_env[n])
+        start = end
+        end += bsz
+
+        assert n_eval_episodes[n] > 0, n
+
+    if start < len(data_to_be_translated):
+        first = True
+        idx = 0
+
+        while sum(n_eval_episodes) < len(data_to_be_translated):
+            if num_envs > 1 and first and n_eval_episodes[n] < n_eval_episodes[n-1]:
+                file_data_per_env[n].extend(data_to_be_translated[start:start+1])
+                n_eval_episodes[n] = len(file_data_per_env[n])
+                start += 1
+
+                if n_eval_episodes[n] >= n_eval_episodes[n-1]:
+                    first = False
+
+            file_data_per_env[idx % num_envs].extend(data_to_be_translated[start:start+1])
+            n_eval_episodes[idx % num_envs] = len(file_data_per_env[idx % num_envs])
+            idx += 1
+            start += 1
+
+    assert sum(n_eval_episodes) == len(data_to_be_translated)
+
+    _all_data = [file_data_per_env[n] for n in range(num_envs)]
+    _all_data = sorted([x for xs in _all_data for x in xs])
+
+    assert len(_all_data) == len(data_to_be_translated)
+    assert _all_data == sorted(data_to_be_translated)
+
+    logger.info("num_envs: %s, data_to_be_translated: %s, bsz: %s, n_eval_episodes: %s", num_envs, len(data_to_be_translated), bsz, n_eval_episodes)
 
     ## load model
     logger.info("Loading model: %s", best_model_path)
 
     env_eval_dev_class = MTICLEvalEnv
-    env_eval_dev = Monitor(env_eval_dev_class(*list(env_args), custom_env_id="eval_dev", is_eval_env=True, **parsed_kwargs), filename=None, override_existing=True)
+    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, **parsed_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs))
 
-    env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={})
+    #env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={})
+    env_eval_dev.unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={})
 
-    action_dim = env_eval_dev.action_dim
-    state_dim_per_token = env_eval_dev.state_dim_per_token
-    state_window_length = env_eval_dev.state_window_length
-    state_dim_per_token_time_step = env_eval_dev.state_dim_per_token_time_step
+    action_dim = env_eval_dev.unwrapped.get_attr("action_dim")[0]
+    state_dim_per_token = env_eval_dev.unwrapped.get_attr("state_dim_per_token")[0]
+    state_window_length = env_eval_dev.unwrapped.get_attr("state_window_length")[0]
+    state_dim_per_token_time_step = env_eval_dev.unwrapped.get_attr("state_dim_per_token_time_step")[0]
 
     if state_representation == "representation_per_token_with_features":
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
@@ -192,10 +254,27 @@ def main():
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated))
-    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev, n_eval_episodes=len(data_to_be_translated), return_episode_rewards=True,
+    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=[bsz + 1] * num_envs, return_episode_rewards=True,
         predict_kwargs={
             "env_instance": env_eval_dev.unwrapped,
         },)
+
+    episode_rewards = []
+    all_rewards = env_eval_dev.unwrapped.get_attr("rewards")
+
+    assert len(all_rewards) == len(n_eval_episodes)
+
+    for i in range(num_envs):
+        # Remove extra evaluations
+        all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
+
+        assert len(all_rewards[i]) == n_eval_episodes[i]
+
+        for j in range(len(all_rewards[i])):
+            all_rewards[i][j] = sum(all_rewards[i][j])
+
+        episode_rewards.extend(all_rewards[i])
+
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
     mean_length = np.mean(episode_lengths)

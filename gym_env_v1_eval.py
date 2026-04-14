@@ -28,9 +28,40 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
 
         BE AWARE that many variables might not work as intended as we inherit from the training environment and we might have not updated some variables properly
     """
+    def __init__(self, *args, _parallel_env=False, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self._parallel_env = _parallel_env
 
     def logger_wrapper(self, callback, _str, *args, **kwargs):
         super().logger_wrapper(callback, f"[EVALENV] {_str}", *args, **kwargs)
+
+    def reset_fake(self, increase_reset_times=True):
+        reward_sum = sum(self.translation_candidates_reward_mean_episode)
+        reward_steps = len(self.translation_candidates_reward_mean_episode)
+        reward_mean = statistics.mean(self.translation_candidates_reward_mean_episode) if reward_steps > 0 else -100.0
+        reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
+
+        self.logger_wrapper(gym.logger.info, "All episodes statistics (eval): {'sum': %s, 'mean': %s, 'stdev': %s}", reward_sum, reward_mean, reward_stdev)
+
+        # Reset
+        self._init_translation_candidate_variables()
+
+        self.episode = 0
+
+        if increase_reset_times:
+            self.reset_times += 1 # to avoid infinite loop
+
+        # Reset state (self.current_state_window)
+        self._reset_state()
+
+        # Return observation
+        observation = self.state_window_type_callback(self.current_state_window)
+        info = {}
+
+        self.logger_wrapper(gym.logger.info, "Resetting environment (fake)")
+
+        return observation, info # fake
 
     def reset(self, seed=None, options=None):
         assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
@@ -43,34 +74,14 @@ class MTICLEvalEnv(gym_env.MTICLEnv):
 
             if "shuffle_all_data" not in options:
                 options["shuffle_all_data"] = False # deterministic sweeping
-        elif (self.reset_times + 1) % (len(self.data) + 1) == 0: # this avoids off-by-one problem with self.episode since EvalCallback does a last reset...
-            reward_sum = sum(self.translation_candidates_reward_mean_episode)
-            reward_steps = len(self.translation_candidates_reward_mean_episode)
-            reward_mean = statistics.mean(self.translation_candidates_reward_mean_episode) if reward_steps > 0 else -100.0
-            reward_stdev = statistics.stdev(self.translation_candidates_reward_mean_episode) if reward_steps > 1 else -100.0
-
-            self.logger_wrapper(gym.logger.info, "All episodes statistics (eval): {'sum': %s, 'mean': %s, 'stdev': %s}", reward_sum, reward_mean, reward_stdev)
-
-            # Reset
-            self._init_translation_candidate_variables()
-
-            self.episode = 0
-            self.reset_times += 1 # to avoid infinite loop
-
-            # Reset state (self.current_state_window)
-            self._reset_state()
-
-            # Return observation
-            observation = self.state_window_type_callback(self.current_state_window)
-            info = {}
-
-            self.logger_wrapper(gym.logger.info, "Resetting environment (fake)")
-
-            return observation, info # fake
+        elif not self._parallel_env:
+            if (self.reset_times + 1) % (len(self.data) + 1) == 0: # this avoids off-by-one problem with self.episode since EvalCallback does a last reset...
+                return self.reset_fake()
 
         observation, info = super().reset(seed=_seed, options=options)
 
-        assert self.translation_candidate == self.episode - 1, f"Expected translation candidate to be {self.episode - 1}, but got {self.translation_candidate}"
+        if not self._parallel_env:
+            assert self.translation_candidate == self.episode - 1, f"Expected translation candidate to be {self.episode - 1}, but got {self.translation_candidate}"
 
         return observation, info
 
