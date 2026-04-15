@@ -602,7 +602,8 @@ class MTICLEnv(gym.Env):
         #self.last_representation_str.append(representation)
         #self.last_representation_emb.append(action_url)
 
-        self.rewards[-1].append(reward)
+        src_sentence_and_ref = '\t'.join(self.data[self.translation_candidate])
+        self.rewards[-1].append((reward, src_sentence_and_ref))
         self.logger_wrapper(gym.logger.info,
                             "Action in time step #%d (reward: %s; %s: %s; max_icl_examples: %s; translation_candidate: %s): %s",
                             self.time_step, reward, "similarity" if self.knn_distance_ip else "distance", action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)

@@ -109,6 +109,8 @@ def main():
 
     # custom
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
+    linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
+    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("rl_activation_fn", "gelu"))
 
     logger.info("Seed: %s", seed)
     logger.info("Seed: %s (env_seeds: %s)", seed, env_seeds)
@@ -194,7 +196,7 @@ def main():
         "qf": [1024, 512]
     } # "pi" is actor and "qf" the critic
 
-    logger.info("net_arch: %s", net_arch)
+    logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
 
     if n_features <= 0:
         features_extractor_class = FlattenExtractor
@@ -229,6 +231,8 @@ def main():
             "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
             "step_embeddings": step_embeddings, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
             "step_embeddings_dim": step_embeddings_dim,
+            "linear_bottleneck": linear_bottleneck,
+            "activation_fn": activation_fn,
         }
 
     model_class = PPO
@@ -240,10 +244,11 @@ def main():
             "net_arch": dict(net_arch),
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
+            "share_features_extractor": True,
             #"layer_norm_input": True,
-            "layer_norm_input": False,
+            "layer_norm_input": True if linear_bottleneck > 0 else False,
             "layer_norm_before_activation": True,
-            "activation_fn": torch.nn.GELU,
+            "activation_fn": activation_fn,
             "avoid_overlapping_action": True,
         },
         device=device,

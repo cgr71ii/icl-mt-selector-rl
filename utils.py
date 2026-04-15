@@ -456,3 +456,13 @@ def open_or_iter(fn, mode='r'):
             yield fd
     else:
         yield fn
+
+def get_activation_cls(activation: str):
+    if activation == "tanh":
+        return torch.nn.Tanh
+    elif activation == "relu":
+        return torch.nn.ReLU
+    elif activation == "gelu":
+        return torch.nn.GELU
+
+    raise RuntimeError(f"activation not listed: {activation}")

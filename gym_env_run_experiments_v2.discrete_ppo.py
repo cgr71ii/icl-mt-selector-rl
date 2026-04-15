@@ -132,7 +132,7 @@ def main():
 
     # default values
     min_conf_debug = False
-    #min_conf_debug = True
+    min_conf_debug = True
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
@@ -330,6 +330,8 @@ def main():
     max_steps = 1000000
     #max_steps = 10000000 # steps while training # TODO remove?
     max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
+    linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
+    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("rl_activation_fn", "gelu"))
 
     if min_conf_debug:
         batch_size = 25 # TODO remove
@@ -382,7 +384,7 @@ def main():
         "qf": [1024, 512]
     } # "pi" is actor and "qf" the critic
 
-    logger.info("net_arch: %s", net_arch)
+    logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
 
     warmup_steps = 0
     #actor_learning_rate = 1e-3
@@ -432,11 +434,13 @@ def main():
             "check_zeros": True if state_representation == "representation_per_token_with_features" else False,
             "step_embeddings": step_embeddings, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
             "step_embeddings_dim": step_embeddings_dim,
+            "linear_bottleneck": linear_bottleneck,
+            "activation_fn": activation_fn,
         }
 
     avoid_overlapping_action = True
     #layer_norm_input = True
-    layer_norm_input = False
+    layer_norm_input = True if linear_bottleneck > 0 else False
     layer_norm_before_activation = True
 
     model_class = PPO
@@ -460,7 +464,8 @@ def main():
             "layer_norm_before_activation": layer_norm_before_activation,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
-            "activation_fn": torch.nn.GELU,
+            "share_features_extractor": True,
+            "activation_fn": activation_fn,
             "avoid_overlapping_action": avoid_overlapping_action, # It assumes that the first element in the observation is the representation of the source sentence being translated
         },
         gamma=gamma,
@@ -547,7 +552,8 @@ def main():
             "layer_norm_before_activation": layer_norm_before_activation,
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
-            "activation_fn": torch.nn.GELU,
+            "share_features_extractor": True,
+            "activation_fn": activation_fn,
             "avoid_overlapping_action": avoid_overlapping_action,
         },
     )
