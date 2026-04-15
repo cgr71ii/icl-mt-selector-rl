@@ -335,7 +335,7 @@ def main(*main_args, **main_kwargs):
     #max_steps = 50000 # steps while training
     #max_steps = 100000 # steps while training
     #max_steps = 200000
-    max_steps = int(parsed_kwargs.pop("linear_bottleneck", 1000000))
+    max_steps = int(parsed_kwargs.pop("max_steps", 1000000))
     #max_steps = 10000000 # steps while training # TODO remove?
     max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
     linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 512))
