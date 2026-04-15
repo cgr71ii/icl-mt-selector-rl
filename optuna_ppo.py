@@ -30,12 +30,11 @@ def objective(trial):
     parsed_kwargs["max_steps"] = 500000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 3
+    parsed_kwargs["patience"] = 5
     parsed_kwargs["eval_freq"] = 20000
 
     # Build params
     environment_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
-    environment_kwargs = parsed_kwargs
 
     # Hyperparameters to optimize
     learning_rate = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
@@ -96,7 +95,7 @@ def objective(trial):
     else:
         parsed_kwargs["target_kl"] = None
 
-    # Set hyperparameters in environment_kwargs
+    # Set hyperparameters
     parsed_kwargs["rl_activation_fn"] = activation_fn
     parsed_kwargs["ent_coef"] = ent_coef
     parsed_kwargs["net_arch"] = net_arch
@@ -129,14 +128,14 @@ def objective(trial):
                 root_logger.addHandler(file_handler)
                 root_logger.setLevel(logging.DEBUG)
 
-            assert "redirect_output_filename" not in environment_kwargs
+            assert "redirect_output_filename" not in parsed_kwargs
 
-            environment_kwargs["redirect_output_filename"] = filename
+            parsed_kwargs["redirect_output_filename"] = filename
 
             print(f"Trial {trial.number} ({current_datetime})")
 
             try:
-                final_reward = environment_script.main(*environment_args, **environment_kwargs)
+                final_reward = environment_script.main(*environment_args, **parsed_kwargs)
             except Exception as e:
                 print(f"Trial {trial.number} failed with exception: {e}")
 
@@ -163,6 +162,7 @@ if __name__ == "__main__":
         study_name = f"ppo_hyperparameter_optimization_{current_datetime}"
         sampler = optuna.samplers.TPESampler()
 
+    save_path = "optuna_data"
     #pruner = optuna.pruners.MedianPruner()
     pruner = None # let's rely on early stopping based on patience instead of pruning
     study = optuna.create_study(sampler=sampler, pruner=pruner, study_name=study_name, storage="sqlite:///db.ppo.sqlite3",
@@ -176,7 +176,7 @@ if __name__ == "__main__":
     finally:
         sampler_fn = f"{study.study_name}_sampler.pkl"
 
-        with open(sampler_fn, "wb") as fd:
+        with open(os.path.join(save_path, sampler_fn), "wb") as fd:
             pickle.dump(study.sampler, fd)
 
         print(f"Study name: {study.study_name}")
