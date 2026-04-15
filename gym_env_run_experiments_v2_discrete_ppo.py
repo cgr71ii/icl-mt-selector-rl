@@ -97,18 +97,22 @@ def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
 
     return inner_callback_after_eval
 
-def main():
+def main(*main_args, **main_kwargs):
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
 
-    logger.info("Provided args: %s", sys.argv)
+    if len(main_args) == 0:
+        logger.info("Provided args (main params): %s %s", main_args, main_kwargs)
+    else:
+        logger.info("Provided args (sys.argv): %s", sys.argv)
+
     logger.info("In this script we assume that data (both translation sentences and ICL examples) and kNN elements are shared among all training environments and evaluation environment")
 
     # args
-    src_lang = sys.argv[1].split(':')
-    trg_lang = sys.argv[2].split(':')
-    file_data = sys.argv[3].split(':')
-    file_data_icl_examples = sys.argv[4]
-    parsed_kwargs = utils.parse_args(sys.argv[5:])
+    src_lang =                           (sys.argv if len(main_args) == 0 else main_args)[1 - (0 if len(main_args) == 0 else 1)].split(':')
+    trg_lang =                           (sys.argv if len(main_args) == 0 else main_args)[2 - (0 if len(main_args) == 0 else 1)].split(':')
+    file_data =                          (sys.argv if len(main_args) == 0 else main_args)[3 - (0 if len(main_args) == 0 else 1)].split(':')
+    file_data_icl_examples =             (sys.argv if len(main_args) == 0 else main_args)[4 - (0 if len(main_args) == 0 else 1)]
+    parsed_kwargs = utils.parse_args(sys.argv[5:]) if len(main_args) == 0 else main_kwargs
 
     assert len(file_data) in (1, 2), f"Expected 1 or 2 file paths for training and dev sets, but got {len(file_data)}"
 
@@ -132,13 +136,14 @@ def main():
 
     # default values
     min_conf_debug = False
-    min_conf_debug = True
+    #min_conf_debug = True
     num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
     max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
     disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
     store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
     n_steps = int(parsed_kwargs.pop("n_steps", 25))
+    ent_coef = float(parsed_kwargs.pop("ent_coef", 0.02))
 
     if min_conf_debug:
         logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -210,7 +215,7 @@ def main():
     data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
 
-    if state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+    if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         process_token_time_step = False
 
     parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -273,8 +278,8 @@ def main():
     save_freq = 1e1000 # disabled
     #eval_freq = max(100, len(data_to_be_translated_training) * max_icl_examples // num_envs) # steps (approx. once per epoch)
     #eval_freq = 10000 # steps
-    eval_freq = 20000 # steps
-    save_path = f"./rl_models_{filename_time}/"
+    eval_freq = int(parsed_kwargs.pop("eval_freq", 20000)) # steps
+    save_path = f"./all_rl_models/rl_models_{filename_time}/"
     name_prefix = f"rl_{filename_time}"
     #monitor_filename = f"{save_path}{name_prefix}_eval.log"
     monitor_filename = None # pickle serialization doesn't allow to have an opened file descriptor (EvalCallback)
@@ -282,7 +287,7 @@ def main():
     max_episodes = len(data_to_be_translated_training) * max_episodes_epochs
     patience = -1 # early stopping patience (number of evals with no improvement; disabled if < 0)
     enable_eval = not disable_eval
-    patience = 100000
+    patience = int(parsed_kwargs.pop("patience", 1000000))
 
     if min_conf_debug:
         #eval_freq = 500 # TODO remove
@@ -293,7 +298,7 @@ def main():
         #eval_freq = 200 # TODO remove
         #patience = 6 #  TODO remove
         #patience = 3 # TODO remove?
-        patience = 100
+        #patience = 100
 
     if not enable_eval:
         logger.warning("Evaluation (dev set) disabled: no best model will be available, only last model")
@@ -319,6 +324,9 @@ def main():
     vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
     #batch_size = 256
     batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 200)))
+    net_arch = parsed_kwargs.pop("net_arch", None)
+    gae_lambda = float(parsed_kwargs.pop("gae_lambda", 0.95))
+    clip_range = float(parsed_kwargs.pop("clip_range", 0.1))
     gamma = 1.0
     #gamma = 0.99
     #max_steps = 1e100 # fake value due to callback StopTrainingOnMaxEpisodes
@@ -327,11 +335,15 @@ def main():
     #max_steps = 50000 # steps while training
     #max_steps = 100000 # steps while training
     #max_steps = 200000
-    max_steps = 1000000
+    max_steps = int(parsed_kwargs.pop("linear_bottleneck", 1000000))
     #max_steps = 10000000 # steps while training # TODO remove?
     max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
-    linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
+    linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 512))
     activation_fn = utils.get_activation_cls(parsed_kwargs.pop("rl_activation_fn", "gelu"))
+    redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
+    n_epochs = int(parsed_kwargs.pop("n_epochs", 8))
+    vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
+    target_kl = parsed_kwargs.pop("target_kl", None)
 
     if min_conf_debug:
         batch_size = 25 # TODO remove
@@ -350,9 +362,9 @@ def main():
 
     env_args = [src_lang_training, trg_lang_training, file_data_training, file_data_icl_examples]
     env_kwargs = {"gym_logger_level": gym.logger.DEBUG, **parsed_kwargs}
-    env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs)
+    env = vec_env_class([make_env(rank, env_class, list(env_args), dict({"custom_env_id": str(rank), **env_kwargs}), seed=env_seeds[rank], redirect_output_filename=redirect_output_filename) for rank in range(num_envs)], **vec_env_kwargs)
     parsed_kwargs["max_data_entries"] = max_data_entries_dev
-    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"gym_logger_level": gym.logger.INFO, "custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, "_parallel_env": True, **parsed_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs), filename=monitor_filename, override_existing=True)
+    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"gym_logger_level": gym.logger.INFO, "custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, "_parallel_env": True, **parsed_kwargs}), seed=env_seeds[rank], redirect_output_filename=redirect_output_filename) for rank in range(num_envs)], **vec_env_kwargs), filename=monitor_filename, override_existing=True)
     parsed_kwargs["max_data_entries"] = max_data_entries
 
     env_eval_dev.unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={}) # env_eval_dev.get_closest_neighbors_urls() is available
@@ -369,7 +381,7 @@ def main():
         n_features = state_dim_per_token * 2 + (state_dim_per_token_time_step if process_token_time_step else 0)
     elif state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
         n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
-    elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+    elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
     else:
         n_features = 0
@@ -377,12 +389,13 @@ def main():
     #net_arch = [512, 128, 32]
     #net_arch = [512, 256, 128]
     #net_arch = [1024, 512, 256]
-    net_arch = {
-        #"pi": [512, 256],
-        #"qf": [512, 256]
-        "pi": [1024, 512],
-        "qf": [1024, 512]
-    } # "pi" is actor and "qf" the critic
+    if net_arch is None:
+        net_arch = {
+            #"pi": [512, 256],
+            #"vf": [512, 256]
+            "pi": [1024, 512],
+            "vf": [1024, 512]
+        } # "pi" is actor and "vf" the critic
 
     logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
 
@@ -396,7 +409,8 @@ def main():
 
     logger.info("Warmup steps: %d", warmup_steps)
 
-    min_critic_learning_rate = critic_learning_rate / 10
+    #min_critic_learning_rate = critic_learning_rate / 10
+    min_critic_learning_rate = 0.0
     total_steps = max(int(max_steps / num_envs + 0.5), 1)
     critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
 
@@ -421,7 +435,7 @@ def main():
 
             if process_token_time_step:
                 skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-        elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+        elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             step_embeddings = 0
             step_embeddings_dim = 0
         else:
@@ -471,16 +485,20 @@ def main():
         gamma=gamma,
         device=device,
         rollout_buffer_kwargs={"process_time_steps": process_token_time_step},
-        #max_grad_norm=0.5,
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
+        #max_grad_norm=1.0,
         n_steps=n_steps,
         #n_epochs=4,
-        n_epochs=8,
+        n_epochs=n_epochs,
         #ent_coef=0.02,
         #ent_coef=0.0,
         #ent_coef=0.01,
-        ent_coef=0.05,
-        clip_range=0.1,
+        #ent_coef=0.05,
+        ent_coef=ent_coef,
+        clip_range=clip_range,
+        gae_lambda=gae_lambda,
+        vf_coef=vf_coef,
+        target_kl=target_kl,
     )
 
     #assert init_training_episodes < max_episodes
@@ -536,11 +554,13 @@ def main():
 
     # Evaluate
     ## do not evaluate best_model as the result is already in the log (unless eval is disabled and best model is unknown)
+    ## load best model
+    model_path = model_path if disable_eval else os.path.join(save_path, "best_model.zip")
     assert utils.file_exists(model_path), f"Model not found: {model_path}"
 
     ## dev: load model
-    #logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", best_model_path)
-    logger.info("Loading last-step model (dev): %s", model_path)
+    logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", model_path)
+    #logger.info("Loading last-step model (dev): %s", model_path)
 
     model = model_class.load(
         model_path,
@@ -568,6 +588,8 @@ def main():
         },)
 
     print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
+
+    return mean_reward * 100.0
 
 if __name__ == "__main__":
     main()

@@ -330,8 +330,14 @@ class LinearDecayScheduler:
 
         return new_value
 
-def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False):
+def make_env(rank, env_cls, env_args, env_kwargs, seed=None, seed_add_rank=False, redirect_output_filename=None):
     def _init():
+        import sys
+
+        if redirect_output_filename is not None:
+            sys.stdout = open(redirect_output_filename, "at", buffering=1) # line buffering
+            sys.stderr = sys.stdout
+
         sys.stderr.flush()
         env = env_cls(*env_args, **{"_seed": seed + (rank if seed_add_rank else 0) if seed is not None else rank, **env_kwargs})
 

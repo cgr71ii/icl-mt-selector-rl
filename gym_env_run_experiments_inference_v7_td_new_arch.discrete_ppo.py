@@ -75,7 +75,7 @@ def main():
 
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
 
-    if state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+    if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         process_token_time_step = False
 
     parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -121,7 +121,7 @@ def main():
         n_features = state_dim_per_token * 2 + (state_dim_per_token_time_step if process_token_time_step else 0)
     elif state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
         n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
-    elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+    elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
     else:
         n_features = 0
@@ -131,8 +131,8 @@ def main():
 
     net_arch = {
         "pi": [1024, 512],
-        "qf": [1024, 512]
-    } # "pi" is actor and "qf" the critic
+        "vf": [1024, 512]
+    } # "pi" is actor and "vf" the critic
 
     logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
 
@@ -156,7 +156,7 @@ def main():
 
             if process_token_time_step:
                 skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-        elif state_representation == "representation_last_75_perc_layer_with_one_hot_representation_time_and_selected_icl_examples":
+        elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             step_embeddings = 0
             step_embeddings_dim = 0
         else:
