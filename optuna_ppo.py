@@ -319,7 +319,7 @@ if __name__ == "__main__":
     # MedianPruner: prune trials that have intermediate results worse than the median of previous trials at the same step (with "step" we mean the parameter passed to trial.report)
     ## n_startup_trials trials before pruning, n_warmup_steps intermediate evaluation steps before pruning, evaluate every interval_steps evaluation steps, n_min_trials reported intermediate results at each step before pruning
     ## 3 complete trials, check pruning after 1 intermediate evaluation step at each trial, check pruning every 1 step, require at least 1 intermediate results at the step before pruning in that step
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1, interval_steps=1, n_min_trials=1)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1, interval_steps=1, n_min_trials=1)
     study = optuna.create_study(sampler=sampler, pruner=pruner, study_name=study_name, storage="sqlite:///db.ppo.sqlite3",
                                 direction="maximize", load_if_exists=load_study)
 

@@ -1,5 +1,6 @@
 
 import os
+import gc
 import sys
 import random
 import logging
@@ -152,7 +153,7 @@ def main(*main_args, **main_kwargs):
 
         # default values
         min_conf_debug = False
-        min_conf_debug = True
+        #min_conf_debug = True
         num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
         device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
         max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
@@ -624,12 +625,29 @@ def main(*main_args, **main_kwargs):
         if "env" in locals():
             env.close()
 
+        if "model" in locals():
+            del model
+
+        if "callback" in locals():
+            del callback
+
+        if "callbacks" in locals():
+            del callbacks
+
+        if "env_eval_dev" in locals():
+            del env_eval_dev
+
+        if "env" in locals():
+            del env
+
         if "logger" in locals():
             handlers = logger.handlers[:]
 
             for handler in handlers:
                 handler.close()
                 logger.removeHandler(handler)
+
+        gc.collect()
 
     if "mean_reward" not in locals():
         raise Exception("mean_reward not computed")
