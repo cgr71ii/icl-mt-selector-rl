@@ -28,9 +28,14 @@ from stable_baselines3.common.buffers import NStepReplayBuffer, MonteCarloReplay
 from stable_baselines3.common.policies import ContinuousCritic, ContinuousCriticTower
 import numpy as np
 import torch
+import optuna
 
-def create_callback_episode_rewards(n_eval_episodes):
+def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
+    step = 0
+
     def callback_compute_episode_rewards_and_lengths(l, g):
+        nonlocal step
+
         env = l["env"]
         n_envs = l["n_envs"]
         episode_rewards = l["episode_rewards"]
@@ -59,6 +64,14 @@ def create_callback_episode_rewards(n_eval_episodes):
             episode_rewards.extend(all_rewards[i])
 
             assert len(episode_rewards) == len(episode_lengths)
+
+        if optuna_trial is not None:
+            optuna_trial.report(np.mean(episode_rewards), step=step)
+
+            if optuna_trial.should_prune():
+                raise optuna.TrialPruned()
+
+        step += 1
 
         return episode_rewards, episode_lengths
 
@@ -139,7 +152,7 @@ def main(*main_args, **main_kwargs):
 
         # default values
         min_conf_debug = False
-        #min_conf_debug = True
+        min_conf_debug = True
         num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
         device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
         max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
@@ -147,6 +160,8 @@ def main(*main_args, **main_kwargs):
         store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
         n_steps = int(parsed_kwargs.pop("n_steps", 25))
         ent_coef = float(parsed_kwargs.pop("ent_coef", 0.02))
+        optuna_trial = parsed_kwargs.pop("optuna_trial", None)
+        skip_last_eval = parsed_kwargs.pop("skip_last_eval", False) # it will return a reward of 0
 
         if min_conf_debug:
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -536,7 +551,7 @@ def main(*main_args, **main_kwargs):
             disable_eval=disable_eval,
             custom_callback_on_eval=custom_callback_on_eval,
             custom_logger=logger,
-            evaluate_policy_kwargs={"callback_compute_episode_rewards_and_lengths": create_callback_episode_rewards(n_eval_episodes)},
+            evaluate_policy_kwargs={"callback_compute_episode_rewards_and_lengths": create_callback_episode_rewards(n_eval_episodes, optuna_trial=optuna_trial)},
             inner_callback_after_eval=get_callback_after_eval(num_envs, data_to_be_translated_dev, n_eval_episodes),
         ))
         callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
@@ -561,41 +576,47 @@ def main(*main_args, **main_kwargs):
         model_path = store_model(save_path, name_prefix, "last-step", model, logger)
 
         # Evaluate
-        ## do not evaluate best_model as the result is already in the log (unless eval is disabled and best model is unknown)
-        ## load best model
-        model_path = model_path if disable_eval else os.path.join(save_path, "best_model.zip")
-        assert utils.file_exists(model_path), f"Model not found: {model_path}"
+        if not skip_last_eval:
+            ## do not evaluate best_model as the result is already in the log (unless eval is disabled and best model is unknown)
+            ## load best model
+            model_path = model_path if disable_eval else os.path.join(save_path, "best_model.zip")
+            assert utils.file_exists(model_path), f"Model not found: {model_path}"
 
-        ## dev: load model
-        logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", model_path)
-        #logger.info("Loading last-step model (dev): %s", model_path)
+            ## dev: load model
+            logger.info("Loading %s model (dev): %s", "best" if patience >= 0 else "last-step", model_path)
+            #logger.info("Loading last-step model (dev): %s", model_path)
 
-        model = model_class.load(
-            model_path,
-            learning_rate=lambda foo: 100.0, # dummy callable
-            lr_schedule=lambda foo: 100.0, # dummy callable
-            policy_kwargs={
-                "net_arch": dict(net_arch),
-                "layer_norm_input": layer_norm_input,
-                "layer_norm_before_activation": layer_norm_before_activation,
-                "features_extractor_class": features_extractor_class,
-                "features_extractor_kwargs": features_extractor_kwargs,
-                "share_features_extractor": True,
-                "activation_fn": activation_fn,
-                "avoid_overlapping_action": avoid_overlapping_action,
-            },
-        )
+            model = model_class.load(
+                model_path,
+                learning_rate=lambda foo: 100.0, # dummy callable
+                lr_schedule=lambda foo: 100.0, # dummy callable
+                policy_kwargs={
+                    "net_arch": dict(net_arch),
+                    "layer_norm_input": layer_norm_input,
+                    "layer_norm_before_activation": layer_norm_before_activation,
+                    "features_extractor_class": features_extractor_class,
+                    "features_extractor_kwargs": features_extractor_kwargs,
+                    "share_features_extractor": True,
+                    "activation_fn": activation_fn,
+                    "avoid_overlapping_action": avoid_overlapping_action,
+                },
+            )
 
-        ## dev: evaluate and report result
-        logger.info("Evaluating dev")
+            ## dev: evaluate and report result
+            logger.info("Evaluating dev")
 
-        #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
-        mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev),
-            predict_kwargs={
-                "env_instance": env_eval_dev.unwrapped,
-            },)
+            #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
+            mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev),
+                predict_kwargs={
+                    "env_instance": env_eval_dev.unwrapped,
+                },)
+        else:
+            mean_reward = 0.0
+            std_reward = 0.0
 
         print(f"Mean reward dev: {mean_reward} +/- {std_reward}")
+    except optuna.TrialPruned as e:
+        raise e
     finally:
         if "env_eval_dev" in locals():
             env_eval_dev.close()
@@ -610,8 +631,8 @@ def main(*main_args, **main_kwargs):
                 handler.close()
                 logger.removeHandler(handler)
 
-        if "mean_reward" not in locals():
-            raise Exception("mean_reward not computed")
+    if "mean_reward" not in locals():
+        raise Exception("mean_reward not computed")
 
     return mean_reward * 100.0
 

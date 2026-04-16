@@ -1,4 +1,5 @@
 
+import math
 import sys
 from datetime import datetime
 import contextlib
@@ -14,6 +15,7 @@ import gym_env_run_experiments_v2_discrete_ppo as environment_script
 
 import optuna
 import psutil
+import numpy as np
 
 current_datetime = datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -111,12 +113,17 @@ def objective(trial):
     assert "disable_eval" not in parsed_kwargs
     assert "patience" not in parsed_kwargs
     assert "eval_freq" not in parsed_kwargs
+    assert "optuna_trial" not in parsed_kwargs
+    assert "skip_last_eval" not in parsed_kwargs
 
-    parsed_kwargs["max_steps"] = 500000
+    skip_last_eval = True
+    parsed_kwargs["max_steps"] = 200000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 3
+    parsed_kwargs["patience"] = 99999 # disable -> rely on pruning
     parsed_kwargs["eval_freq"] = 20000
+    parsed_kwargs["optuna_trial"] = trial
+    parsed_kwargs["skip_last_eval"] = skip_last_eval
 
     # Build params
     environment_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
@@ -199,6 +206,33 @@ def objective(trial):
     print(f"Trial {trial.number}: logging to {filename}")
     print_process_resources(f"Start of trial {trial.number}")
 
+    # Check intermediate values for MedianPruner (optional, for debugging)
+    if trial.study.pruner is not None and isinstance(trial.study.pruner, optuna.pruners.MedianPruner):
+        if trial.number > 0:
+            #print(f"Trial {trial.number}: checking intermediate values for MedianPruner")
+
+            # Code adapted from https://optuna.readthedocs.io/en/stable/_modules/optuna/pruners/_percentile.html#PercentilePruner
+
+            completed_trials = trial.study.get_trials(deepcopy=False, states=(optuna.trial._state.TrialState.COMPLETE,))
+            direction = trial.study.direction
+            _percentile = trial.study.pruner._percentile
+            _n_min_trials = trial.study.pruner._n_min_trials
+            percentile_results = {}
+            percentile_result = 0.0
+            step = 0
+
+            while not math.isnan(percentile_result):
+                percentile_result = optuna.pruners._percentile._get_percentile_intermediate_result_over_trials(completed_trials, direction, step, _percentile, _n_min_trials)
+
+                if not math.isnan(percentile_result):
+                    percentile_results[step] = percentile_result
+
+                step += 1
+        else:
+            percentile_results = {}
+
+        print(f"Trial {trial.number}: MedianPruner intermediate results at each step: {percentile_results}")
+
     sys.stdout.flush()
     sys.stderr.flush()
 
@@ -249,6 +283,16 @@ def objective(trial):
     time.sleep(2) # give some time for file handlers to release the files
     print_process_resources(f"End of trial {trial.number} (after cleanup)")
 
+    frozen_trial = trial.study._storage.get_trial(trial._trial_id)
+    final_reward2 = optuna.pruners._percentile._get_best_intermediate_result_over_steps(frozen_trial, trial.study.direction)
+
+    if skip_last_eval:
+        assert np.isclose(final_reward, 0.0), f"final_reward from environment_script should be 0.0 when skip_last_eval is True, but got {final_reward}"
+
+        final_reward = final_reward2
+    else:
+        assert np.isclose(final_reward, final_reward2), f"final_reward from environment_script ({final_reward}) does not match best intermediate result from Optuna ({final_reward2})"
+
     return final_reward
 
 if __name__ == "__main__":
@@ -271,13 +315,16 @@ if __name__ == "__main__":
         sampler = optuna.samplers.TPESampler()
 
     save_path = "optuna_data"
-    #pruner = optuna.pruners.MedianPruner()
-    pruner = None # let's rely on early stopping based on patience instead of pruning
+    #pruner = None # let's rely on early stopping based on patience instead of pruning
+    # MedianPruner: prune trials that have intermediate results worse than the median of previous trials at the same step (with "step" we mean the parameter passed to trial.report)
+    ## n_startup_trials trials before pruning, n_warmup_steps intermediate evaluation steps before pruning, evaluate every interval_steps evaluation steps, n_min_trials reported intermediate results at each step before pruning
+    ## 3 complete trials, check pruning after 1 intermediate evaluation step at each trial, check pruning every 1 step, require at least 1 intermediate results at the step before pruning in that step
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=1, interval_steps=1, n_min_trials=1)
     study = optuna.create_study(sampler=sampler, pruner=pruner, study_name=study_name, storage="sqlite:///db.ppo.sqlite3",
                                 direction="maximize", load_if_exists=load_study)
 
-    print(f"Sampler is {study.sampler.__class__.__name__}")
-    print(f"Pruner is {study.pruner.__class__.__name__}{' (disabled)' if pruner is None else ''}")
+    print(f"Sampler is {study.sampler.__class__.__name__}: {study.sampler.__dict__}")
+    print(f"Pruner is {study.pruner.__class__.__name__}{' (disabled)' if pruner is None else ''}: {study.pruner.__dict__ if study.pruner is not None else '-'}")
 
     try:
         study.optimize(objective, n_trials=500, show_progress_bar=False, n_jobs=1)
