@@ -2,6 +2,7 @@
 import sys
 import json
 import time
+import copy
 import pickle
 import base64
 import random
@@ -128,6 +129,12 @@ class ActionBoxSampleFromList(gym.spaces.Box):
     def __str__(self):
         return "ActionBoxSampleFromList"
 
+def _dict_or_default(*args, **kwargs):
+    if "remove_value_from_dict" not in kwargs:
+        return utils.dict_or_default(*args, remove_value_from_dict=True, **kwargs)
+    else:
+        return utils.dict_or_default(*args, **kwargs)
+
 class MTICLEnv(gym.Env):
     """Custom Environment for selecting ICL examples for MT using LLMs that follows gym interface."""
 
@@ -145,14 +152,16 @@ class MTICLEnv(gym.Env):
     def __init__(self, src_lang, trg_lang, file_data, file_data_icl_examples, **kwargs):
         super().__init__()
 
-        gym.logger.set_level(utils.dict_or_default(kwargs, "gym_logger_level", gym.logger.INFO))
+        kwargs = copy.deepcopy(kwargs)
+
+        gym.logger.set_level(_dict_or_default(kwargs, "gym_logger_level", gym.logger.INFO))
 
         self.src_lang = src_lang
         self.trg_lang = trg_lang
         self.file_data = file_data # format: source<tab>reference
         self.file_data_icl_examples = file_data_icl_examples # format: source<tab>reference
-        self.custom_env_id = utils.dict_or_default(kwargs, "custom_env_id", "none")
-        self._seed = utils.dict_or_default(kwargs, "_seed", None)
+        self.custom_env_id = _dict_or_default(kwargs, "custom_env_id", "none")
+        self._seed = _dict_or_default(kwargs, "_seed", None)
 
         if isinstance(self.file_data, str):
             assert utils.file_exists(self.file_data), self.file_data
@@ -169,8 +178,8 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples = []
         self.data_icl_examples_bm25_corpus = []
         self.data_icl_examples_bm25_corpus_tokenized = []
-        self.knn_always_add_eos_action = utils.dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
-        self.knn_distance_ip = utils.dict_or_default(kwargs, "knn_distance_ip", False) # if True, inner product (IP) will be used as distance metric for kNN search; if False, L2 distance will be used
+        self.knn_always_add_eos_action = _dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
+        self.knn_distance_ip = _dict_or_default(kwargs, "knn_distance_ip", False) # if True, inner product (IP) will be used as distance metric for kNN search; if False, L2 distance will be used
 
         if self.knn_distance_ip:
             self.logger_wrapper(gym.logger.info, "Using inner product (IP) as distance metric for kNN search. This is equivalent to using cosine similarity if L2 normalization is applied to embeddings.")
@@ -178,23 +187,23 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.info, "Using L2 distance as distance metric for kNN search.")
 
         # Log args
-        initial_sample_list_actions = utils.dict_or_default(kwargs, "initial_sample_list_actions", None)
+        initial_sample_list_actions = _dict_or_default(kwargs, "initial_sample_list_actions", None)
 
         if "initial_sample_list_actions" in kwargs:
             del kwargs["initial_sample_list_actions"] # self.logger_wrapper message TOO long...
 
         self.logger_wrapper(gym.logger.info, "Provided arguments: %s", kwargs)
 
-        self.state_window_length = utils.dict_or_default(kwargs, "state_window_length", 4)
-        self.max_icl_examples = utils.dict_or_default(kwargs, "max_icl_examples", 4)
-        self.max_data_entries = utils.dict_or_default(kwargs, "max_data_entries", -1)
-        self.max_data_icl_examples_entries = utils.dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
-        self.state_representation = utils.dict_or_default(kwargs, "state_representation", "model_single_representation")
-        self.action_representation = utils.dict_or_default(kwargs, "action_representation", "llm")
-        self.action_sampling_strategy = utils.dict_or_default(kwargs, "action_sampling_strategy", "none") # used by td3.py
-        self.select_max_icl_examples_randomly = utils.dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
+        self.state_window_length = _dict_or_default(kwargs, "state_window_length", 4)
+        self.max_icl_examples = _dict_or_default(kwargs, "max_icl_examples", 4)
+        self.max_data_entries = _dict_or_default(kwargs, "max_data_entries", -1)
+        self.max_data_icl_examples_entries = _dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
+        self.state_representation = _dict_or_default(kwargs, "state_representation", "model_single_representation")
+        self.action_representation = _dict_or_default(kwargs, "action_representation", "llm")
+        self.action_sampling_strategy = _dict_or_default(kwargs, "action_sampling_strategy", "none") # used by td3.py
+        self.select_max_icl_examples_randomly = _dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
         self.current_max_icl_examples = self.max_icl_examples
-        self.process_token_time_step = bool(int(utils.dict_or_default(kwargs, "process_token_time_step", True)))
+        self.process_token_time_step = bool(int(_dict_or_default(kwargs, "process_token_time_step", True)))
 
         if self.select_max_icl_examples_randomly:
             if self.state_representation != "representation_per_token_with_features":
@@ -250,11 +259,11 @@ class MTICLEnv(gym.Env):
             self.state_window_length = self.max_icl_examples
 
         # API URLs
-        self.translate_model_api = utils.dict_or_default(kwargs, "translate_model_api", "http://127.0.0.1:8000/translate")
-        self.embedding_single_token_model_api = utils.dict_or_default(kwargs, "embedding_single_token_model_api", "http://127.0.0.1:8000/get_embedding_from_model_embedding_matrix")
-        self.embedding_pooling_model_api = utils.dict_or_default(kwargs, "embedding_pooling_model_api", "http://127.0.0.1:8000/get_embedding_pooling")
-        self.eval_model_api = utils.dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
-        self.embedding_external_system = utils.dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model", f=lambda s: s.rstrip('/'))
+        self.translate_model_api = _dict_or_default(kwargs, "translate_model_api", "http://127.0.0.1:8000/translate")
+        self.embedding_single_token_model_api = _dict_or_default(kwargs, "embedding_single_token_model_api", "http://127.0.0.1:8000/get_embedding_from_model_embedding_matrix")
+        self.embedding_pooling_model_api = _dict_or_default(kwargs, "embedding_pooling_model_api", "http://127.0.0.1:8000/get_embedding_pooling")
+        self.eval_model_api = _dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
+        self.embedding_external_system = _dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model", f=lambda s: s.rstrip('/'))
 
         assert isinstance(self.translate_model_api, str), f"translate_model_api: {type(self.translate_model_api)}: {self.translate_model_api}"
         assert isinstance(self.embedding_single_token_model_api, str), f"embedding_single_token_model_api: {type(self.embedding_single_token_model_api)}: {self.embedding_single_token_model_api}"
@@ -273,7 +282,7 @@ class MTICLEnv(gym.Env):
         ## Other API parameters
         self.embedding_pooling_model_method_state = "last"
         self.embedding_pooling_model_method_action = "mean"
-        self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
+        self.embedding_pooling_model_layer = _dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
 
         #if self.state_representation == "representation_per_token":
         if self.state_representation == "representation_per_token_with_features":
@@ -288,8 +297,8 @@ class MTICLEnv(gym.Env):
             self.embedding_pooling_model_method_state = "mean"
             self.embedding_pooling_model_layer = "75%"
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
-            self.embedding_pooling_model_method_state = utils.dict_or_default(kwargs, "embedding_pooling_model_method_state", "last")
-            self.embedding_pooling_model_layer = utils.dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
+            self.embedding_pooling_model_method_state = _dict_or_default(kwargs, "embedding_pooling_model_method_state", "last")
+            self.embedding_pooling_model_layer = _dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
 
             if self.embedding_pooling_model_layer[-1] != '%':
                 self.embedding_pooling_model_layer = int(self.embedding_pooling_model_layer)
@@ -299,12 +308,12 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Embeddings pooling and layer: %s %s", self.embedding_pooling_model_method_state, self.embedding_pooling_model_layer)
 
         # Model conf
-        self.batch_size = utils.dict_or_default(kwargs, "batch_size", 16)
-        self.device = torch.device(utils.dict_or_default(kwargs, "device", "cuda"))
-        self.model_hidden_size = utils.dict_or_default(kwargs, "model_hidden_size", 1536) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
-        self.model_hidden_size_action_src_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, f=int)
-        self.model_hidden_size_action_trg_sentence = utils.dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, f=int)
-        self.eos_token_str = utils.dict_or_default(kwargs, "eos_token_str", "</s>")
+        self.batch_size = _dict_or_default(kwargs, "batch_size", 16)
+        self.device = torch.device(_dict_or_default(kwargs, "device", "cuda"))
+        self.model_hidden_size = _dict_or_default(kwargs, "model_hidden_size", 1536) # (former self.max_transformer_output_length) https://huggingface.co/meta-llama/Llama-2-7b-chat-hf/blob/main/config.json#L9
+        self.model_hidden_size_action_src_sentence = _dict_or_default(kwargs, "model_hidden_size_action_src_sentence", self.model_hidden_size, f=int)
+        self.model_hidden_size_action_trg_sentence = _dict_or_default(kwargs, "model_hidden_size_action_trg_sentence", self.model_hidden_size, f=int)
+        self.eos_token_str = _dict_or_default(kwargs, "eos_token_str", "</s>")
 
         if self.state_representation == "representation_per_token_with_features":
             self.state_dim = 4 # 4 features per token: constant, observed, most_likely, entropy
@@ -371,30 +380,30 @@ class MTICLEnv(gym.Env):
 
         # Other
         self.data_already_loaded = False
-        self.translation_candidates_exploration_rate = utils.dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
-        self.translation_candidates_reward_mean_exponential_decay_alpha = utils.dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
-        self.repeat_translation_candidates = utils.dict_or_default(kwargs, "repeat_translation_candidates", False) # reward-based repetition
-        self.repeat_translation_candidates_times = utils.dict_or_default(kwargs, "repeat_translation_candidates_times", -1)
+        self.translation_candidates_exploration_rate = _dict_or_default(kwargs, "translation_candidates_exploration_rate", 1.0) # UCB c
+        self.translation_candidates_reward_mean_exponential_decay_alpha = _dict_or_default(kwargs, "translation_candidates_reward_mean_exponential_decay_alpha", 0.1) # alpha for exponential decay
+        self.repeat_translation_candidates = _dict_or_default(kwargs, "repeat_translation_candidates", False) # reward-based repetition
+        self.repeat_translation_candidates_times = _dict_or_default(kwargs, "repeat_translation_candidates_times", -1)
         self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
-        self.apply_l2_normalization_state = utils.dict_or_default(kwargs, "apply_l2_normalization_state", True)
-        self.apply_l2_normalization_action = utils.dict_or_default(kwargs, "apply_l2_normalization_action", True)
-        self.eval_strategy_training = utils.dict_or_default(kwargs, "eval_strategy_training", "chrf2")
-        self.eval_strategy_eval = utils.dict_or_default(kwargs, "eval_strategy_eval", "chrf2")
-        self.initial_time_sleep = utils.dict_or_default(kwargs, "initial_time_sleep", 5)
-        self.is_eval_env = utils.dict_or_default(kwargs, "is_eval_env", False)
-        self.enable_eos_action = utils.dict_or_default(kwargs, "enable_eos_action", True)
-        self.translation_candidate_strategy = utils.dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
-        self.reward_power = utils.dict_or_default(kwargs, "reward_power", 1)
-        self.reward_division = int(utils.dict_or_default(kwargs, "reward_division", 1.0))
-        self.actions_without_replacement = utils.dict_or_default(kwargs, "actions_without_replacement", False)
+        self.apply_l2_normalization_state = _dict_or_default(kwargs, "apply_l2_normalization_state", True)
+        self.apply_l2_normalization_action = _dict_or_default(kwargs, "apply_l2_normalization_action", True)
+        self.eval_strategy_training = _dict_or_default(kwargs, "eval_strategy_training", "chrf2")
+        self.eval_strategy_eval = _dict_or_default(kwargs, "eval_strategy_eval", "chrf2")
+        self.initial_time_sleep = _dict_or_default(kwargs, "initial_time_sleep", 5)
+        self.is_eval_env = _dict_or_default(kwargs, "is_eval_env", False)
+        self.enable_eos_action = _dict_or_default(kwargs, "enable_eos_action", True)
+        self.translation_candidate_strategy = _dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
+        self.reward_power = _dict_or_default(kwargs, "reward_power", 1)
+        self.reward_division = int(_dict_or_default(kwargs, "reward_division", 1.0))
+        self.actions_without_replacement = _dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
-        self.current_icl_examples_prepend = utils.dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
-        self.state_dim_per_token_time_step = utils.dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
+        self.current_icl_examples_prepend = _dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
+        self.state_dim_per_token_time_step = _dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
         self.rewards = [] # for gathering the rewards from outside the environment
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
 
-        self.num_icl_examples = utils.dict_or_default(kwargs, "num_icl_examples", None)
+        self.num_icl_examples = _dict_or_default(kwargs, "num_icl_examples", None)
         self.num_icl_examples = int(self.num_icl_examples) if self.num_icl_examples is not None else None
 
         if self.num_icl_examples is not None:
@@ -502,6 +511,8 @@ class MTICLEnv(gym.Env):
             self.action_space = ActionBoxSampleFromList(-1., 1., shape=(self.action_dim,), sample_p=1.0, error_when_sampling=error_when_sampling, seed=self._seed, **action_space_kwargs)
 
         self.observation_space = gym.spaces.Box(-1., 1., shape=(self.state_dim,), seed=self._seed) # input/output model is expected to have tanh in order to be in [-1, 1]
+
+        assert len(kwargs) == 0, f"Unexpected arguments: {kwargs}"
 
     def get_int_env_id(self):
         try:
@@ -948,7 +959,7 @@ class MTICLEnv(gym.Env):
         assert isinstance(options, dict) or isinstance(options, type(None)), f"Options must be a dictionary or None, got {type(options)}: {options}"
 
         options = {} if options is None else options
-        is_hard_reset = utils.dict_or_default(options, "reset_from_hard_reset", False)
+        is_hard_reset = utils.dict_or_default(options, "reset_from_hard_reset", False, remove_value_from_dict=False)
         is_soft_reset = not is_hard_reset
 
         if is_soft_reset:
@@ -1103,7 +1114,7 @@ class MTICLEnv(gym.Env):
 
             utils.set_random_seed(seed, using_cuda=self.device.type == torch.device("cuda").type)
 
-        if not options.get("skip_hard_reset", False) and (self.reset_times == 0 or utils.dict_or_default(options, "always_hard_reset", False)):
+        if not options.get("skip_hard_reset", False) and (self.reset_times == 0 or utils.dict_or_default(options, "always_hard_reset", False, remove_value_from_dict=False)):
             observation, info = self._hard_reset(seed=seed, options=options)
         else:
             # After first reset, _soft_reset is the default option if "always_hard_reset" is not defined in options

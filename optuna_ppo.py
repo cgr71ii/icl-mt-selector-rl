@@ -5,13 +5,98 @@ import contextlib
 import logging
 import pickle
 import os
+import time
+import socket
+from collections import Counter
 
 import utils
 import gym_env_run_experiments_v2_discrete_ppo as environment_script
 
 import optuna
+import psutil
 
 current_datetime = datetime.now().strftime("%Y%m%d_%H%M")
+
+def print_open_files(tag=""):
+    process = psutil.Process(os.getpid())
+    num_files = process.num_fds()
+
+    print(f"[{tag}] Currently open files: {num_files}")
+
+def print_process_resources(tag="", max_items=10):
+    print(f"\n[{tag}] Resource usage for process {os.getpid()}:")
+
+    p = psutil.Process(os.getpid())
+
+    try:
+        num_fds = p.num_fds()
+    except Exception as e:
+        num_fds = f"unavailable ({e})"
+
+    print(f"[{tag}] PID={p.pid} num_fds={num_fds}")
+
+    # 1) Regular files opened by this process
+    try:
+        files = p.open_files()
+    except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
+        files = []
+        print(f"[{tag}] open_files unavailable: {e}")
+
+    print(f"[{tag}] open_files count: {len(files)}")
+    for f in files[:max_items]:
+        # f has: path, fd, position, mode, flags
+        print(f"[{tag}]   file fd={f.fd} mode={f.mode} path={f.path}")
+
+    # 2) Socket connections owned by this process
+    try:
+        if hasattr(p, "net_connections"):
+            conns = p.net_connections(kind="all")
+        else:
+            conns = p.connections(kind="all")
+    except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
+        conns = []
+        print(f"[{tag}] connections unavailable: {e}")
+
+    print(f"[{tag}] connections count: {len(conns)}")
+
+    status_counts = Counter(c.status for c in conns)
+    family_counts = Counter(
+        "AF_UNIX" if c.family == socket.AF_UNIX else
+        "AF_INET" if c.family == socket.AF_INET else
+        "AF_INET6" if c.family == socket.AF_INET6 else
+        str(c.family)
+        for c in conns
+    )
+    type_counts = Counter(
+        "STREAM" if c.type == socket.SOCK_STREAM else
+        "DGRAM" if c.type == socket.SOCK_DGRAM else
+        str(c.type)
+        for c in conns
+    )
+
+    print(f"[{tag}] connection status counts: {dict(status_counts)}")
+    print(f"[{tag}] connection family counts: {dict(family_counts)}")
+    print(f"[{tag}] connection type counts: {dict(type_counts)}")
+
+    for c in conns[:max_items]:
+        # c has: fd, family, type, laddr, raddr, status, pid
+        print(
+            f"[{tag}]   conn fd={c.fd} family={c.family} type={c.type} "
+            f"status={c.status} laddr={c.laddr} raddr={c.raddr}"
+        )
+
+    # 3) Child processes
+    print(f"[{tag}] Child process count: {len(p.children(recursive=True))}")
+
+    for child in p.children(recursive=True)[:max_items]:
+        try:
+            child_info = f"pid={child.pid} name={child.name()} status={child.status()}"
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            child_info = f"pid={child.pid} info unavailable: {e}"
+
+        print(f"[{tag}]   child process: {child_info}")
+
+    print(f"[{tag}] End of resource report\n")
 
 def objective(trial):
     src_lang = sys.argv[1]
@@ -30,7 +115,7 @@ def objective(trial):
     parsed_kwargs["max_steps"] = 500000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 5
+    parsed_kwargs["patience"] = 3
     parsed_kwargs["eval_freq"] = 20000
 
     # Build params
@@ -75,7 +160,8 @@ def objective(trial):
         raise ValueError(f"Invalid net_arch_str: {net_arch_str}")
 
     # Check that the hyperparameters are not already set in parsed_kwargs
-    assert "rl_activation_fn" not in parsed_kwargs
+    assert "learning_rate" not in parsed_kwargs
+    assert "activation_fn" not in parsed_kwargs
     assert "ent_coef" not in parsed_kwargs
     assert "net_arch" not in parsed_kwargs
     assert "linear_bottleneck" not in parsed_kwargs
@@ -96,7 +182,8 @@ def objective(trial):
         parsed_kwargs["target_kl"] = None
 
     # Set hyperparameters
-    parsed_kwargs["rl_activation_fn"] = activation_fn
+    parsed_kwargs["learning_rate"] = learning_rate
+    parsed_kwargs["activation_fn"] = activation_fn
     parsed_kwargs["ent_coef"] = ent_coef
     parsed_kwargs["net_arch"] = net_arch
     parsed_kwargs["linear_bottleneck"] = linear_bottleneck
@@ -110,36 +197,57 @@ def objective(trial):
     parsed_kwargs["vf_coef"] = vf_coef
 
     print(f"Trial {trial.number}: logging to {filename}")
+    print_process_resources(f"Start of trial {trial.number}")
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    logger_modules = (None, "MT_ICL.rl_experiments", "gymnasium", "stable_baselines3")
 
     # Run training and evaluation
     with open(filename, "wt") as fd:
-        with contextlib.redirect_stdout(fd), contextlib.redirect_stderr(fd):
-            for logger_name in (None, "MT_ICL.rl_experiments", "gymnasium", "stable_baselines3"):
+        try:
+            with contextlib.redirect_stdout(fd), contextlib.redirect_stderr(fd):
+                for logger_name in logger_modules:
+                    root_logger = logging.getLogger(logger_name)
+                
+                    # remove existing handlers
+                    for h in root_logger.handlers[:]:
+                        h.close()
+                        root_logger.removeHandler(h)
+
+                    # add file handler
+                    file_handler = logging.FileHandler(filename)
+                    file_handler.setLevel(logging.DEBUG)
+
+                    root_logger.addHandler(file_handler)
+                    root_logger.setLevel(logging.DEBUG)
+
+                assert "redirect_output_filename" not in parsed_kwargs
+
+                parsed_kwargs["redirect_output_filename"] = filename
+
+                print(f"Trial {trial.number} ({current_datetime})")
+
+                try:
+                    final_reward = environment_script.main(*environment_args, **parsed_kwargs)
+                except Exception as e:
+                    print(f"Trial {trial.number} failed with exception: {e}")
+
+                    raise e
+        finally:
+            for logger_name in logger_modules:
                 root_logger = logging.getLogger(logger_name)
-            
-                # remove existing handlers
+
+                # remove file handlers
                 for h in root_logger.handlers[:]:
+                    h.close()
                     root_logger.removeHandler(h)
 
-                # add file handler
-                file_handler = logging.FileHandler(filename)
-                file_handler.setLevel(logging.DEBUG)
+            logging.shutdown()
 
-                root_logger.addHandler(file_handler)
-                root_logger.setLevel(logging.DEBUG)
-
-            assert "redirect_output_filename" not in parsed_kwargs
-
-            parsed_kwargs["redirect_output_filename"] = filename
-
-            print(f"Trial {trial.number} ({current_datetime})")
-
-            try:
-                final_reward = environment_script.main(*environment_args, **parsed_kwargs)
-            except Exception as e:
-                print(f"Trial {trial.number} failed with exception: {e}")
-
-                raise e
+    time.sleep(2) # give some time for file handlers to release the files
+    print_process_resources(f"End of trial {trial.number} (after cleanup)")
 
     return final_reward
 
