@@ -120,7 +120,7 @@ def objective(trial):
     parsed_kwargs["max_steps"] = 200000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 99999 # disable -> rely on pruning
+    parsed_kwargs["patience"] = 3 # rely on pruning and patience
     parsed_kwargs["eval_freq"] = 20000
     parsed_kwargs["optuna_trial"] = trial
     parsed_kwargs["skip_last_eval"] = skip_last_eval

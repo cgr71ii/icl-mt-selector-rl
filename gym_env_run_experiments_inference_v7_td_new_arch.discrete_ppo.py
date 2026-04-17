@@ -58,7 +58,8 @@ def main():
     parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
     parsed_kwargs["device"] = device
     parsed_kwargs["state_representation"] = state_representation
-    parsed_kwargs["eval_strategy"] = parsed_kwargs.get("eval_strategy", "api-eval")
+    parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "chrf2")
+    parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
