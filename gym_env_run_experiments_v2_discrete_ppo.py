@@ -168,7 +168,7 @@ def main(*main_args, **main_kwargs):
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
 
         if min_conf_debug:
-            num_envs = 5 # TODO remove
+            num_envs = 10 # TODO remove
             disable_eval = False # TODO remove
             store_model_on_eval = False # TODO remove
             n_steps = 5
@@ -626,6 +626,11 @@ def main(*main_args, **main_kwargs):
             env.close()
 
         if "model" in locals():
+            if hasattr(model, "env") and model.env is not None:
+                model.env.close()
+
+                del model.env
+
             del model
 
         if "callback" in locals():

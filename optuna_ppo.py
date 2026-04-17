@@ -285,6 +285,10 @@ def objective(trial):
 
     frozen_trial = trial.study._storage.get_trial(trial._trial_id)
     final_reward2 = optuna.pruners._percentile._get_best_intermediate_result_over_steps(frozen_trial, trial.study.direction)
+    intermediate_results = np.asarray(list(frozen_trial.intermediate_values.values()), dtype=float)
+
+    assert len(intermediate_results.shape) == 1, f"Expected intermediate_results to be 1D array, but got shape {intermediate_results.shape}"
+    assert intermediate_results.shape[0] > 0, "Expected at least one intermediate result, but got zero"
 
     if skip_last_eval:
         assert np.isclose(final_reward, 0.0), f"final_reward from environment_script should be 0.0 when skip_last_eval is True, but got {final_reward}"
@@ -293,9 +297,30 @@ def objective(trial):
     else:
         assert np.isclose(final_reward, final_reward2), f"final_reward from environment_script ({final_reward}) does not match best intermediate result from Optuna ({final_reward2})"
 
+    best_trial_strategy = os.environ["OPTUNA_BEST_TRIAL_STRATEGY"] if "OPTUNA_BEST_TRIAL_STRATEGY" in os.environ else "mean_intermediate_result_last_2"
+
+    if best_trial_strategy == "best_intermediate_result":
+        final_reward = final_reward2
+    elif best_trial_strategy == "final_reward":
+        final_reward = intermediate_results[-1].item()
+    elif best_trial_strategy == "mean_intermediate_result_last_2":
+        final_reward = np.mean(intermediate_results[-2:]).item()
+    else:
+        raise Exception("Invalid OPTUNA_BEST_TRIAL_STRATEGY: %s", best_trial_strategy)
+
+    intermediate_results_dict = {step: reward for step, reward in frozen_trial.intermediate_values.items()}
+
+    print(f"Trial {trial.number}: intermediate results (strategy: {best_trial_strategy}) at each step: {intermediate_results_dict}")
+    print(f"Trial {trial.number}: best intermediate result: {final_reward2}")
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+
     return final_reward
 
 if __name__ == "__main__":
+    sampler = None
+
     if "OPTUNA_LOAD_STUDY_NAME" in os.environ:
         load_study = True
         study_name = os.environ["OPTUNA_LOAD_STUDY_NAME"]
@@ -312,14 +337,16 @@ if __name__ == "__main__":
     else:
         load_study = False
         study_name = f"ppo_hyperparameter_optimization_{current_datetime}"
-        sampler = optuna.samplers.TPESampler()
+
+    if sampler is None:
+        sampler = optuna.samplers.TPESampler(n_startup_trials=30, multivariate=True, seed=42)
 
     save_path = "optuna_data"
     #pruner = None # let's rely on early stopping based on patience instead of pruning
     # MedianPruner: prune trials that have intermediate results worse than the median of previous trials at the same step (with "step" we mean the parameter passed to trial.report)
     ## n_startup_trials trials before pruning, n_warmup_steps intermediate evaluation steps before pruning, evaluate every interval_steps evaluation steps, n_min_trials reported intermediate results at each step before pruning
-    ## 3 complete trials, check pruning after 1 intermediate evaluation step at each trial, check pruning every 1 step, require at least 1 intermediate results at the step before pruning in that step
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1, interval_steps=1, n_min_trials=1)
+    ## 3 complete trials, check pruning after 1 intermediate evaluation step at each trial, check pruning every 1 step, require at least 5 intermediate results at the step before pruning in that step
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1, interval_steps=1, n_min_trials=5)
     study = optuna.create_study(sampler=sampler, pruner=pruner, study_name=study_name, storage="sqlite:///db.ppo.sqlite3",
                                 direction="maximize", load_if_exists=load_study)
 
