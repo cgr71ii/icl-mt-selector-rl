@@ -73,12 +73,7 @@ def translate(model, tokenizer, prompts, max_new_tokens=1024, stopping_criteria=
     all_outputs, all_original_outputs = [], []
 
     # Tokenize
-    if lock is not None:
-        lock.acquire()
-    inputs = tokenizer(prompts, padding="longest", return_tensors="pt", padding_side="left")
-    if lock is not None:
-        lock.release()
-
+    inputs = tokenize_prompts(prompts, tokenizer, lock=lock)
     inputs = inputs.to(model.device)
 
     # Generate with beam search
@@ -127,12 +122,12 @@ def tokenize_prompts(prompts, tokenizer, lock=None):
     if lock is not None:
         lock.release()
 
-    assert inputs.input_ids.shape[0] == len(prompts)
-    assert len(inputs.input_ids.shape) == 2 # batch_size, seq_len
+    assert inputs.input_ids.shape[0] == len(prompts), f"Batch size mismatch between tokenized inputs and prompts: {inputs.input_ids.shape[0]} vs {len(prompts)}"
+    assert len(inputs.input_ids.shape) == 2, inputs.input_ids.shape # batch_size, seq_len
 
     return inputs
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None):
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None, target_sentence_n_tokens=None):
     # Tokenize
     if lock is not None:
         lock.acquire()
@@ -182,7 +177,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
         attention_mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
 
-        assert attention_mask_expanded.shape == hidden_states.shape, f"attention_mask_expanded and hidden_states shape mismatch: {attention_mask_expanded.shape} vs {hidden_states.shape}"
+    assert attention_mask_expanded.shape == hidden_states.shape, f"attention_mask_expanded and hidden_states shape mismatch: {attention_mask_expanded.shape} vs {hidden_states.shape}"
 
     if pooling == "mean":
         # Mean pooling
@@ -231,6 +226,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
                             shift_targets,
                             mask,
                             eps=smallest_normal,
+                            features=features,
                         )
         for feature_name, feature in batch_features.items():
             idx = features.index(feature_name)
@@ -258,6 +254,65 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         mean_pooled_embeddings = sum_embeddings / sum_mask
         last_token_embeddings = hidden_states[:, -1, :]
         pooled_embeddings = torch.cat([mean_pooled_embeddings, last_token_embeddings], dim=-1)
+    elif pooling == "target_sentence_probs_mean_reward":
+        # Get the probabilities of the target sentence tokens (after removing padding with attention mask)
+
+        assert target_sentence_n_tokens is not None
+        assert isinstance(target_sentence_n_tokens, list), f"target_sentence_n_tokens must be a list; got: {type(target_sentence_n_tokens)}"
+        assert len(target_sentence_n_tokens) == hidden_states.shape[0], f"target_sentence_n_tokens length mismatch with batch size: {len(target_sentence_n_tokens)} vs {hidden_states.shape[0]}"
+        assert all(isinstance(t, int) for t in target_sentence_n_tokens), f"All target_sentence_n_tokens must be integers: {target_sentence_n_tokens}"
+        assert all(t > 0 for t in target_sentence_n_tokens), f"All target_sentence_n_tokens must be positive: {target_sentence_n_tokens}"
+
+        logits = outputs.logits
+        target_ids = input_ids.clone()
+        attention_mask = attention_mask.clone()
+
+        # Shift logits, targets, mask and hidden states (code adapted from https://github.com/jogonba2/llmixtic/blob/911bd990e84060ea25d18a783436b621bbb6e954/src/vectorizer.py#L197)
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_targets = target_ids[..., 1:].contiguous()
+        mask = attention_mask[..., 1:].contiguous()
+
+        # Get probabilities
+        probs = shift_logits.softmax(dim=-1)
+        smallest_normal = torch.finfo(
+            type=probs.dtype
+        ).smallest_normal
+        probs[probs == 0] = smallest_normal
+
+        assert len(probs.shape) == 3, f"probs expected shape: (batch_size, seq_len - 1, vocab_size); got: {probs.shape}"
+
+        batch_features = compute_features(
+                            probs,
+                            shift_targets,
+                            mask,
+                            eps=smallest_normal,
+                            features=["observed"],
+                        )
+        token_log_probs = batch_features["observed"]
+
+        assert len(token_log_probs.shape) == 3, f"token_log_probs expected shape: (batch_size, seq_len - 1, 1); got: {token_log_probs.shape}"
+        assert token_log_probs.shape == (hidden_states.shape[0], hidden_states.shape[1] - 1, 1), f"token_log_probs shape mismatch: {token_log_probs.shape} vs {(hidden_states.shape[0], hidden_states.shape[1] - 1, 1)}"
+        assert token_log_probs.shape[1] == attention_mask_expanded.shape[1] - 1, f"token_log_probs and attention_mask_expanded sequence length mismatch: {token_log_probs.shape[1]} vs {attention_mask_expanded.shape[1] - 1}"
+        assert len(target_sentence_n_tokens) == token_log_probs.shape[0], f"target_sentence_n_tokens length mismatch with batch size: {len(target_sentence_n_tokens)} vs {token_log_probs.shape[0]}"
+
+        token_log_probs = token_log_probs.squeeze(-1)
+        rewards = []
+
+        # Get the probs only for the target sentence tokens for the valid tokens
+        for i, n_tokens in enumerate(target_sentence_n_tokens):
+            valid_positions = token_log_probs[i][attention_mask[i, 1:].bool()]
+
+            assert len(valid_positions) >= n_tokens, f"Number of valid tokens must be greater than or equal to target_sentence_n_tokens for input idx {i}: {len(valid_positions)} vs {n_tokens}"
+
+            target_only = valid_positions[-n_tokens:]
+
+            # exp(log_prob) -> probabilities
+            rewards.append(target_only.exp().mean())
+
+        pooled_embeddings = torch.stack(rewards, dim=0).unsqueeze(-1)
+
+        assert len(pooled_embeddings.shape) == 2, f"pooled_embeddings expected shape: (batch_size, 1); got: {pooled_embeddings.shape}"
+        assert pooled_embeddings.shape == (hidden_states.shape[0], 1), f"pooled_embeddings shape mismatch: {pooled_embeddings.shape} vs {(hidden_states.shape[0], 1)}"
     else:
         raise ValueError(f"Unknown pooling method: {pooling}")
 
@@ -299,36 +354,52 @@ def compute_features(
     shift_targets,
     mask,
     eps=1e-14,
+    features=["constant", "observed", "most_likely", "entropy"],
     ):
-    # Feature 0: Constant feature (all zeros)
-    constant = torch.zeros_like(shift_targets).float()
-    constant = constant * mask
+    features = set(features)
+    features_result = {}
 
-    # Feature 1: Log probability of the observed token
-    observed = torch.log(
-            torch.gather(
-                probs, dim=-1, index=shift_targets.unsqueeze(dim=-1)
-            ).squeeze(dim=-1)
-            + eps
-        )
-    observed = observed * mask
+    if "constant" in features:
+        features.remove("constant")
 
-    # Feature 2: Log probability of the most likely token (according to the model)
-    most_likely = torch.log(torch.max(probs, dim=-1).values + eps)
-    most_likely = most_likely * mask
+        # Feature 0: Constant feature (all zeros)
+        constant = torch.zeros_like(shift_targets).float()
+        constant = constant * mask
+        features_result["constant"] = constant.unsqueeze(dim=-1)
 
-    # Feature 3: Entropy of the distribution at each position
-    entropy = -torch.sum(probs * torch.log2(probs + eps), dim=-1)
-    entropy = entropy * mask
+    if "observed" in features:
+        features.remove("observed")
 
-    features = {
-        "constant": constant.unsqueeze(dim=-1),
-        "observed": observed.unsqueeze(dim=-1),
-        "most_likely": most_likely.unsqueeze(dim=-1),
-        "entropy": entropy.unsqueeze(dim=-1),
-    }
+        # Feature 1: Log probability of the observed token
+        observed = torch.log(
+                torch.gather(
+                    probs, dim=-1, index=shift_targets.unsqueeze(dim=-1)
+                ).squeeze(dim=-1)
+                + eps
+            )
+        observed = observed * mask
+        features_result["observed"] = observed.unsqueeze(dim=-1)
 
-    return features
+    if "most_likely" in features:
+        features.remove("most_likely")
+
+        # Feature 2: Log probability of the most likely token (according to the model)
+        most_likely = torch.log(torch.max(probs, dim=-1).values + eps)
+        most_likely = most_likely * mask
+        features_result["most_likely"] = most_likely.unsqueeze(dim=-1)
+
+    if "entropy" in features:
+        features.remove("entropy")
+
+        # Feature 3: Entropy of the distribution at each position
+        entropy = -torch.sum(probs * torch.log2(probs + eps), dim=-1)
+        entropy = entropy * mask
+        features_result["entropy"] = entropy.unsqueeze(dim=-1)
+
+    if len(features) > 0:
+        logger.error("Some features were not computed: %s", features)
+
+    return features_result
 
 def get_token_embedding(token: str, tokenizer, model):
     token_id = tokenizer.convert_tokens_to_ids(token)

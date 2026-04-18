@@ -387,7 +387,7 @@ class MTICLEnv(gym.Env):
         self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
         self.apply_l2_normalization_state = _dict_or_default(kwargs, "apply_l2_normalization_state", True)
         self.apply_l2_normalization_action = _dict_or_default(kwargs, "apply_l2_normalization_action", True)
-        self.eval_strategy_training = _dict_or_default(kwargs, "eval_strategy_training", "chrf2")
+        self.eval_strategy_training = _dict_or_default(kwargs, "eval_strategy_training", "target_sentence_probs_mean")
         self.eval_strategy_eval = _dict_or_default(kwargs, "eval_strategy_eval", "chrf2")
         self.initial_time_sleep = _dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = _dict_or_default(kwargs, "is_eval_env", False)
@@ -1258,6 +1258,8 @@ class MTICLEnv(gym.Env):
                 reward = score.score # scale is 0--100
             elif eval_strategy == "actions-bm25":
                 reward = self.get_score_from_icl_example_bm25()
+            elif eval_strategy == "target_sentence_probs_mean":
+                reward = self.get_score_from_icl_example_target_sentence_probs_mean()
             else:
                 raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
 
@@ -1533,13 +1535,23 @@ class MTICLEnv(gym.Env):
 
         return self.get_translations(*args, only_representation=True, **kwargs)
 
-    def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True, api_idx=None):
+    def get_score_from_icl_example_target_sentence_probs_mean(self):
+        current_src_sentence, current_trg_sentence = self.data[self.translation_candidate]
+        current_icl_examples = self.data_icl_examples
+        reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling="target_sentence_probs_mean", _layer=-1, trg_sentences=[current_trg_sentence])
+
+        assert len(reward.shape) == 1, reward.shape
+        assert reward.shape[0] == 1, reward.shape
+
+        return reward[0].item()
+
+    def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True, api_idx=None, _pooling=None, _layer=None, trg_sentences=None):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
         ## len(icl_examples) must be equal to len(src_sentences)
 
         assert isinstance(src_sentences, list), f"Expected src_sentences to be a list, got {type(src_sentences)}: {src_sentences}"
         assert len(src_sentences) > 0, "src_sentences must not be an empty list"
-        assert isinstance(src_sentences[0], str), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
+        assert all(isinstance(s, str) for s in src_sentences), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
 
         url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
         url_idx = self.get_int_env_id() if api_idx is None else api_idx
@@ -1548,6 +1560,18 @@ class MTICLEnv(gym.Env):
         batch_size = self.batch_size
         translations = []
         data = [{"src_sentence": utils.encode_base64(s), "src_examples": [], "trg_examples": [], "icl_idx_src_sentence": []} for s in src_sentences]
+        _pooling = self.embedding_pooling_model_method_state if _pooling is None else _pooling
+        _layer = self.embedding_pooling_model_layer if _layer is None else _layer
+
+        if trg_sentences is not None:
+            assert isinstance(trg_sentences, list), f"Expected trg_sentences to be a list, got {type(trg_sentences)}: {trg_sentences}"
+            assert len(trg_sentences) == len(src_sentences), f"trg_sentences length mismatch: {len(trg_sentences)} vs {len(src_sentences)}"
+            assert all(isinstance(t, str) for t in trg_sentences), f"Expected trg_sentences to be a list of strings, got {type(trg_sentences[0])}: {trg_sentences[0]}"
+
+            for idx, trg_sentence in enumerate(trg_sentences):
+                assert "trg_sentence" not in data[idx]
+
+                data[idx]["trg_sentence"] = utils.encode_base64(trg_sentence)
 
         if icl_examples is not None:
             assert isinstance(icl_examples, list), f"Expected icl_examples to be a list, got {type(icl_examples)}: {icl_examples}"
@@ -1577,14 +1601,19 @@ class MTICLEnv(gym.Env):
                 payload.append(('trg_lang', self.trg_lang))
                 payload.append(('src_sentence', sample["src_sentence"]))
 
+                if trg_sentences is not None and len(trg_sentences) > 0:
+                    assert len(sample["trg_sentence"]) == len(trg_sentences[idx]), f"trg_sentence length mismatch: {len(sample['trg_sentence'])} vs {len(trg_sentences[idx])} (idx: {idx})"
+
+                    payload.append(('trg_sentence', sample["trg_sentence"]))
+
                 for src_example, trg_example, icl_idx in zip(sample["src_examples"], sample["trg_examples"], sample["icl_idx_src_sentence"]):
                     payload.append(('src_example', src_example))
                     payload.append(('trg_example', trg_example))
                     payload.append(('icl_idx_src_sentence', icl_idx))
 
             if only_representation:
-                payload.append(('pooling', self.embedding_pooling_model_method_state))
-                payload.append(('layer', self.embedding_pooling_model_layer))
+                payload.append(('pooling', _pooling))
+                payload.append(('layer', _layer))
 
             response = utils.requests_post(url, data=payload)
 
