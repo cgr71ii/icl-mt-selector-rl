@@ -298,6 +298,8 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         token_log_probs = token_log_probs.squeeze(-1)
         rewards = []
 
+        assert len(target_sentence_n_tokens) == len(prompts)
+
         # Get the probs only for the target sentence tokens for the valid tokens
         for i, n_tokens in enumerate(target_sentence_n_tokens):
             valid_positions = token_log_probs[i][attention_mask[i, 1:].bool()]

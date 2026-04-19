@@ -502,7 +502,7 @@ def translate_batch(data):
         assert teacher_forcing
         assert get_representation
         assert add_eos_token
-        assert layer in (-1, "100%"), layer
+        assert layer in (-1, "100%", "-1"), layer
 
     lazy_load_llm()
 
@@ -576,6 +576,8 @@ def translate_batch(data):
 
                     if lock is not None:
                         lock.release()
+
+                    assert len(target_sentence_n_tokens) == len(prompts)
 
                 all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer, lock=global_conf["lock"], _inputs=inputs, _masks=masks, target_sentence_n_tokens=target_sentence_n_tokens)
 

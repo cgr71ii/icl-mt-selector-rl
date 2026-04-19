@@ -298,7 +298,6 @@ class MTICLEnv(gym.Env):
             self.embedding_pooling_model_layer = "75%"
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             self.embedding_pooling_model_method_state = _dict_or_default(kwargs, "embedding_pooling_model_method_state", "last")
-            self.embedding_pooling_model_layer = _dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
 
             if self.embedding_pooling_model_layer[-1] != '%':
                 self.embedding_pooling_model_layer = int(self.embedding_pooling_model_layer)
@@ -387,7 +386,7 @@ class MTICLEnv(gym.Env):
         self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
         self.apply_l2_normalization_state = _dict_or_default(kwargs, "apply_l2_normalization_state", True)
         self.apply_l2_normalization_action = _dict_or_default(kwargs, "apply_l2_normalization_action", True)
-        self.eval_strategy_training = _dict_or_default(kwargs, "eval_strategy_training", "target_sentence_probs_mean")
+        self.eval_strategy_training = _dict_or_default(kwargs, "eval_strategy_training", "target_sentence_probs_mean_reward")
         self.eval_strategy_eval = _dict_or_default(kwargs, "eval_strategy_eval", "chrf2")
         self.initial_time_sleep = _dict_or_default(kwargs, "initial_time_sleep", 5)
         self.is_eval_env = _dict_or_default(kwargs, "is_eval_env", False)
@@ -455,8 +454,8 @@ class MTICLEnv(gym.Env):
 
         self.multi_step_eval_strategies = ("actions-bm25",) # reward will be computed for all steps in the episode for these strategies
 
-        assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_training
-        assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25"), self.eval_strategy_eval
+        assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward"), self.eval_strategy_training
+        assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward"), self.eval_strategy_eval
         assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "choice_with_replacement"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
@@ -1258,8 +1257,8 @@ class MTICLEnv(gym.Env):
                 reward = score.score # scale is 0--100
             elif eval_strategy == "actions-bm25":
                 reward = self.get_score_from_icl_example_bm25()
-            elif eval_strategy == "target_sentence_probs_mean":
-                reward = self.get_score_from_icl_example_target_sentence_probs_mean()
+            elif eval_strategy == "target_sentence_probs_mean_reward":
+                reward = self.get_score_from_icl_example_target_sentence_probs_mean_reward()
             else:
                 raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
 
@@ -1535,15 +1534,15 @@ class MTICLEnv(gym.Env):
 
         return self.get_translations(*args, only_representation=True, **kwargs)
 
-    def get_score_from_icl_example_target_sentence_probs_mean(self):
+    def get_score_from_icl_example_target_sentence_probs_mean_reward(self):
         current_src_sentence, current_trg_sentence = self.data[self.translation_candidate]
-        current_icl_examples = self.data_icl_examples
-        reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling="target_sentence_probs_mean", _layer=-1, trg_sentences=[current_trg_sentence])
+        current_icl_examples = self.current_icl_examples
+        reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling="target_sentence_probs_mean_reward", _layer=-1, trg_sentences=[current_trg_sentence])
 
-        assert len(reward.shape) == 1, reward.shape
-        assert reward.shape[0] == 1, reward.shape
+        assert len(reward.shape) == 2, reward.shape
+        assert reward.shape == (1, 1), reward.shape
 
-        return reward[0].item()
+        return reward[0, 0].item()
 
     def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True, api_idx=None, _pooling=None, _layer=None, trg_sentences=None):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]
@@ -1602,7 +1601,9 @@ class MTICLEnv(gym.Env):
                 payload.append(('src_sentence', sample["src_sentence"]))
 
                 if trg_sentences is not None and len(trg_sentences) > 0:
-                    assert len(sample["trg_sentence"]) == len(trg_sentences[idx]), f"trg_sentence length mismatch: {len(sample['trg_sentence'])} vs {len(trg_sentences[idx])} (idx: {idx})"
+                    assert "trg_sentence" in sample, f"trg_sentence is missing in sample: {sample} (idx: {idx})"
+                    assert isinstance(sample["trg_sentence"], str), f"Expected trg_sentence to be a string, got {type(sample['trg_sentence'])}: {sample['trg_sentence']} (idx: {idx})"
+                    assert len(sample["trg_sentence"]) > 0, f"trg_sentence is empty in sample: {sample} (idx: {idx})"
 
                     payload.append(('trg_sentence', sample["trg_sentence"]))
 
@@ -1644,37 +1645,41 @@ class MTICLEnv(gym.Env):
             else:
                 assert len(translations.shape) == 2, f"Translations shape mismatch for representation: {translations.shape}"
 
-            assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token_with_features first dimension: {translations.shape} vs {len(src_sentences)}"
-            assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch for representation_per_token_with_features last dimension: {translations.shape} vs {self.state_dim_per_token}"
-
             if numpy:
                 translations = translations.numpy()
 
-            if self.apply_l2_normalization_state:
-                if self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
-                    assert translations.shape[-1] % 2 == 0, translations.shape
+            assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token_with_features first dimension: {translations.shape} vs {len(src_sentences)}"
 
-                    translations1 = utils.l2_normalize(translations[:,:translations.shape[-1] // 2])
-                    translations2 = utils.l2_normalize(translations[:,translations.shape[-1] // 2:])
-
-                    if numpy:
-                        translations = np.concatenate((translations1, translations2), axis=1)
-                    else:
-                        translations = torch.cat((translations1, translations2), dim=1)
-                else:
-                    translations = utils.l2_normalize(translations)
-
-            if self.state_representation == "representation_per_token_with_features":
-                translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
-                new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
-                max_dim = min(translations.shape[-1], self.state_dim)
-                max_dim = min(max_dim, (self.state_window_length - 1 - 1 - 1) * self.state_dim_per_token)
-                new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
-                translations = new_translations
-
-                assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+            if _pooling == "target_sentence_probs_mean_reward":
+                assert translations.shape[-1] == 1, f"Translations shape mismatch for target_sentence_probs_mean_reward: {translations.shape} vs (num_sentences, 1)"
             else:
-                assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim_per_token)}"
+                assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch for representation_per_token_with_features last dimension: {translations.shape} vs {self.state_dim_per_token}"
+
+                if self.apply_l2_normalization_state:
+                    if self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
+                        assert translations.shape[-1] % 2 == 0, translations.shape
+
+                        translations1 = utils.l2_normalize(translations[:,:translations.shape[-1] // 2])
+                        translations2 = utils.l2_normalize(translations[:,translations.shape[-1] // 2:])
+
+                        if numpy:
+                            translations = np.concatenate((translations1, translations2), axis=1)
+                        else:
+                            translations = torch.cat((translations1, translations2), dim=1)
+                    else:
+                        translations = utils.l2_normalize(translations)
+
+                if self.state_representation == "representation_per_token_with_features":
+                    translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
+                    new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
+                    max_dim = min(translations.shape[-1], self.state_dim)
+                    max_dim = min(max_dim, (self.state_window_length - 1 - 1 - 1) * self.state_dim_per_token)
+                    new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
+                    translations = new_translations
+
+                    assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+                else:
+                    assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim_per_token)}"
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
@@ -2332,10 +2337,10 @@ class MTICLEnv(gym.Env):
 
         if terminated or truncated:
             # Generate translation
-            if eval_strategy == "actions-bm25":
+            if eval_strategy in ("actions-bm25", "target_sentence_probs_mean_reward"):
                 translation = ["none"]
 
-                self.logger_wrapper(gym.logger.debug, "Translation not generated: eval_strategy == 'actions-bm25'")
+                self.logger_wrapper(gym.logger.debug, "Translation not generated: eval_strategy == '%s'", eval_strategy)
             else:
                 translation = self.get_translations([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
