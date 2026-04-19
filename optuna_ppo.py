@@ -356,9 +356,9 @@ if __name__ == "__main__":
     try:
         study.optimize(objective, n_trials=500, show_progress_bar=False, n_jobs=1)
     finally:
-        sampler_fn = f"{study.study_name}_sampler.pkl"
+        sampler_fn = os.path.join(save_path, f"{study.study_name}_sampler.pkl")
 
-        with open(os.path.join(save_path, sampler_fn), "wb") as fd:
+        with open(sampler_fn, "wb") as fd:
             pickle.dump(study.sampler, fd)
 
         print(f"Study name: {study.study_name}")

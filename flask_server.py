@@ -556,8 +556,16 @@ def translate_batch(data):
                 target_sentence_n_tokens = None
 
                 if pooling == "target_sentence_probs_mean_reward":
+                    lock = global_conf["lock"]
+
+                    if lock is not None:
+                        lock.acquire()
+
                     target_sentence_n_tokens = [tokenizer(trg_sentence, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1] for trg_sentence in trg_sentences]
                     target_sentence_n_tokens = [t + (1 if add_eos_token else 0) for t in target_sentence_n_tokens]
+
+                    if lock is not None:
+                        lock.release()
 
                 all_outputs = mt_icl.get_embedding_pooling(model, tokenizer, prompts, pooling=pooling, layer=layer, lock=global_conf["lock"], _inputs=inputs, _masks=masks, target_sentence_n_tokens=target_sentence_n_tokens)
 
