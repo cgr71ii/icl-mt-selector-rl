@@ -94,6 +94,7 @@ def info():
             "/get_embedding_from_model_embedding_matrix": ["GET", "POST"],
             "/get_embedding_pooling": ["GET", "POST"],
             "/get_embedding_from_given_model": ["GET", "POST"],
+            "/get_reward": ["GET", "POST"],
             "/template_info": ["GET"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
@@ -427,6 +428,177 @@ def get_embedding_pooling():
 
     disable_streamer = global_conf["disable_streamer"]
     get_results = global_conf["streamer_llm_embedding"].predict if not disable_streamer else translate_batch
+    data = list(zip(src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences))
+    results = get_results(data)
+
+    if get_representation[0]:
+        if not disable_streamer and isinstance(results, list):
+            results = torch.stack(results, dim=0)
+
+        assert isinstance(results, torch.Tensor), f"Expected results to be a torch.Tensor, got: {type(results)}: {results}"
+
+        if pooling[0] in ("none", "features"):
+            assert len(results.shape) == 3, f"Expected results shape: (batch_size, seq_len, dim), got: {results.shape}"
+        else:
+            assert len(results.shape) == 2, f"Expected results shape: (batch_size, hidden_dim), got: {results.shape}"
+
+    # Return results
+    if len(results) != len(src_sentences):
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                     len(results), len(src_sentences), results, src_sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(results)} vs {len(src_sentences)}",
+        })
+
+    for idx, (src_sentence, result, trg_sentence, _get_representation) in enumerate(zip(src_sentences, results, trg_sentences, get_representation), 1):
+        logger.debug("Results #%d (path: %s ; representation: %s ; target: %s): %s\t%s%s", idx, route_name, str(_get_representation), str(trg_sentence is not None), src_sentence, result, f"\t{trg_sentence}" if trg_sentence is not None else '')
+
+    if get_representation[0]:
+        logger.debug("Results shape: %s", results.shape)
+
+        results = pickle.dumps(results)
+        results = base64.b64encode(results).decode() # base64 tensor
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+@app.route('/get_reward', methods=["GET", "POST"])
+def get_reward():
+    route_name = request.base_url.rstrip('/').split('/')[-1]
+
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.error("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        src_lang = utils.string2list(request_method.getlist("src_lang"))
+        trg_lang = utils.string2list(request_method.getlist("trg_lang"))
+        src_sentences = utils.string2list(request_method.getlist("src_sentence"))
+        src_examples = utils.string2list(request_method.getlist("src_example"))
+        trg_examples = utils.string2list(request_method.getlist("trg_example"))
+        icl_idx_src_sentences = utils.string2list(request_method.getlist("icl_idx_src_sentence"))
+        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
+    except KeyError as e:
+        logger.error("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    pooling = utils.string2list(request_method.getlist("pooling"))
+    layer = utils.string2list(request_method.getlist("layer"))
+    get_representation = True
+    get_representation = [get_representation] * len(src_sentences)
+
+    if pooling is None or len(pooling) == 0:
+        pooling = ["target_sentence_probs_mean_reward"] * len(src_sentences)
+
+    if layer is None or len(layer) == 0:
+        layer = [-1] * len(src_sentences)
+
+    if len(src_sentences) == 0 or len(src_lang) == 0 or len(trg_lang) == 0:
+        logger.error("No sentences: %s", src_sentences)
+
+        return jsonify({"ok": "null", "err": "'src_sentence', 'src_lang' and 'trg_lang' are mandatory fields that cannot be empty"})
+
+    logger.debug("Got %d sentences", len(src_sentences))
+
+    if (len(src_lang) != 1 and len(src_lang) != len(src_sentences)) or (len(trg_lang) != 1 and len(trg_lang) != len(src_sentences)):
+        logger.error("src_lang: %s vs trg_lang: %s", src_lang, trg_lang)
+
+        return jsonify({"ok": "null", "err": "'src_lang' and 'trg_lang' should be lists with a single element or the same length as 'src_sentence'"})
+
+    if (len(pooling) != 1 and len(pooling) != len(src_sentences)) or (len(layer) != 1 and len(layer) != len(src_sentences)):
+        logger.error("pooling: %s layer: %s vs %d", pooling, layer, len(src_sentences))
+
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
+
+    for idx, p in enumerate(pooling):
+        if p not in ("target_sentence_probs_mean_reward",):
+            logger.error("Unknown pooling method (for get_reward): %s (idx: %d)", p, idx)
+
+            return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
+
+    if len(src_lang) == 1:
+        src_lang = [src_lang[0]] * len(src_sentences)
+    if len(trg_lang) == 1:
+        trg_lang = [trg_lang[0]] * len(src_sentences)
+    if len(pooling) == 1:
+        pooling = [pooling[0]] * len(src_sentences)
+    if len(layer) == 1:
+        layer = [layer[0]] * len(src_sentences)
+
+    if len(set(pooling)) > 1 or len(set(layer)) > 1:
+        # Although it is possible to have different pooling and layer values, this would make inference slower due to batches of different sizes (even 1)
+
+        logger.error("pooling: %s vs layer: %s", pooling, layer)
+
+        return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be a list with a single element or all the same values"})
+
+    if len(src_sentences) != len(trg_sentences) and len(trg_sentences) > 0:
+        logger.error("Results length mismatch with the provided sentences: %d vs %d: %s vs %s",
+                    len(src_sentences), len(trg_sentences), src_sentences, trg_sentences)
+
+        return jsonify({
+            "ok": "null",
+            "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
+        })
+
+    if len(trg_sentences) == 0:
+        trg_sentences = [None] * len(src_sentences)
+
+    try:
+        src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
+        src_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_examples]
+        trg_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_examples]
+
+        if trg_sentences[0] is not None:
+            trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    icl_idx_src_sentences = list(map(lambda d: int(d) - 1, icl_idx_src_sentences)) # the number begins with 1, but we work with 0-based indexes
+    icl_examples = [[] for _ in range(len(src_sentences))]
+
+    if len(src_examples) != len(trg_examples):
+        return jsonify({"ok": "null", "err": f"src_examples: {len(src_examples)} vs trg_examples: {len(trg_examples)}"})
+
+    if len(src_examples) != len(icl_idx_src_sentences):
+        return jsonify({"ok": "null", "err": f"src_examples: {len(src_examples)} vs icl_idx_src_sentences: {len(icl_idx_src_sentences)}"})
+
+    if len(icl_idx_src_sentences) > 0:
+        _min = min(icl_idx_src_sentences)
+        _max = max(icl_idx_src_sentences)
+
+        if 0 <= _min <= _max < len(src_sentences):
+            pass
+        else:
+            return jsonify({"ok": "null", "err": f"icl_idx_src_sentences: {_min} vs {_max} vs {len(src_sentences)}: {icl_idx_src_sentences} vs {src_sentences}"})
+
+        for icl_idx, src_example, trg_example in zip(icl_idx_src_sentences, src_examples, trg_examples):
+            assert isinstance(icl_idx, int), f"icl_idx: {icl_idx} is not an integer: {icl_idx_src_sentences}"
+            assert 0 <= icl_idx < len(src_sentences), f"icl_idx: {icl_idx} vs {len(src_sentences)}: {src_sentences}"
+
+            icl_examples[icl_idx].append([src_example, trg_example])
+
+    # Inference
+
+    disable_streamer = global_conf["disable_streamer"]
+    get_results = global_conf["streamer_get_reward"].predict if not disable_streamer else translate_batch
     data = list(zip(src_sentences, icl_examples, src_lang, trg_lang, pooling, layer, get_representation, trg_sentences))
     results = get_results(data)
 
@@ -1055,6 +1227,7 @@ def main(args):
     global_conf["streamer_llm_embedding"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["streamer_llm_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["streamer_embedding"] = ThreadedStreamer(embedding_from_given_model_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
+    global_conf["streamer_get_reward"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()

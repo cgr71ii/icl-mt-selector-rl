@@ -5,6 +5,7 @@ import sys
 import random
 import logging
 from datetime import datetime
+import copy
 
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -27,6 +28,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.torch_layers import FlattenExtractor, NoFlattenExtractor, TransformerExtractor, NFeaturesExtractor, NFeaturesExtractorWithTimeStepEmbeddings
 from stable_baselines3.common.buffers import NStepReplayBuffer, MonteCarloReplayBuffer
 from stable_baselines3.common.policies import ContinuousCritic, ContinuousCriticTower
+from stable_baselines3.common.vec_env.vec_normalize import VecNormalizeRangeAndRewardSentenceLevelICL
 import numpy as np
 import torch
 import optuna
@@ -111,6 +113,23 @@ def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
 
     return inner_callback_after_eval
 
+def _custom_callback_on_eval(store_model_on_eval, save_path, name_prefix, model, eval_env, logger):
+    def f(n_calls, eval_freq):
+        if store_model_on_eval:
+            store_model(save_path, name_prefix, f"eval-{n_calls // eval_freq}", model, logger)
+
+        if model.get_vec_normalize_env() is not None:
+            logger.info("Loading VecNormalize statistics before evaluation onto the eval environment")
+
+            assert isinstance(eval_env, VecNormalizeRangeAndRewardSentenceLevelICL), f"Expected eval_env to be an instance of VecNormalizeRangeAndRewardSentenceLevelICL, but got {type(eval_env)}"
+
+            # Code adapted from sync_envs_normalization
+            eval_env.obs_rms = copy.deepcopy(model.get_vec_normalize_env().obs_rms)
+            eval_env.ret_rms = copy.deepcopy(model.get_vec_normalize_env().ret_rms)
+            eval_env.training = False
+
+    return f
+
 def main(*main_args, **main_kwargs):
     try:
         logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
@@ -159,10 +178,11 @@ def main(*main_args, **main_kwargs):
         max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
         disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
         store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
-        n_steps = int(parsed_kwargs.pop("n_steps", 25))
-        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.02))
+        n_steps = int(parsed_kwargs.pop("n_steps", 100))
+        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.03755))
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
         skip_last_eval = parsed_kwargs.pop("skip_last_eval", False) # it will return a reward of 0
+        use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
 
         if min_conf_debug:
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -240,6 +260,10 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["process_token_time_step"] = process_token_time_step
         parsed_kwargs["num_icl_examples"] = len(data_icl_examples)
         parsed_kwargs["action_representation"] = "discrete_index"
+
+        if use_vec_normalize:
+            logger.info("Using VecNormalize for normalizing observations and rewards")
+            parsed_kwargs["apply_l2_normalization_state"] = False
 
         # parallel eval dev
 
@@ -340,7 +364,7 @@ def main(*main_args, **main_kwargs):
         vec_env_class = SubprocVecEnv
         vec_env_kwargs = {"start_method": "forkserver"} if vec_env_class is SubprocVecEnv else {}
         #batch_size = 256
-        batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 200)))
+        batch_size = max(1, int(parsed_kwargs.pop("rl_batch_size", 400)))
         net_arch = parsed_kwargs.pop("net_arch", None)
         gae_lambda = float(parsed_kwargs.pop("gae_lambda", 0.95))
         clip_range = float(parsed_kwargs.pop("clip_range", 0.1))
@@ -356,10 +380,10 @@ def main(*main_args, **main_kwargs):
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 512))
-        activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "gelu"))
+        activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
-        n_epochs = int(parsed_kwargs.pop("n_epochs", 8))
-        vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
+        n_epochs = int(parsed_kwargs.pop("n_epochs", 11))
+        vf_coef = float(parsed_kwargs.pop("vf_coef", 0.187))
         target_kl = parsed_kwargs.pop("target_kl", None)
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 1e-4))
         actor_learning_rate = critic_learning_rate
@@ -390,13 +414,14 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["max_data_entries"] = max_data_entries_dev
         env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"gym_logger_level": gym.logger.INFO, "custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, "_parallel_env": True, **parsed_kwargs}), seed=env_seeds[rank], redirect_output_filename=redirect_output_filename) for rank in range(num_envs)], **vec_env_kwargs), filename=monitor_filename, override_existing=True)
         parsed_kwargs["max_data_entries"] = max_data_entries
+        env_eval_dev_unwrapped = env_eval_dev.unwrapped
 
-        env_eval_dev.unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={}) # env_eval_dev.get_closest_neighbors_urls() is available
+        env_eval_dev_unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={}) # env_eval_dev.get_closest_neighbors_urls() is available
 
-        action_dim = env_eval_dev.unwrapped.get_attr("action_dim")[0]
-        state_dim_per_token = env_eval_dev.unwrapped.get_attr("state_dim_per_token")[0]
-        state_window_length = env_eval_dev.unwrapped.get_attr("state_window_length")[0]
-        state_dim_per_token_time_step = env_eval_dev.unwrapped.get_attr("state_dim_per_token_time_step")[0]
+        action_dim = env_eval_dev_unwrapped.get_attr("action_dim")[0]
+        state_dim_per_token = env_eval_dev_unwrapped.get_attr("state_dim_per_token")[0]
+        state_window_length = env_eval_dev_unwrapped.get_attr("state_window_length")[0]
+        state_dim_per_token_time_step = env_eval_dev_unwrapped.get_attr("state_dim_per_token_time_step")[0]
         callbacks = []
 
         if state_representation == "representation_per_token_with_features":
@@ -410,6 +435,22 @@ def main(*main_args, **main_kwargs):
         else:
             n_features = 0
 
+        if use_vec_normalize:
+            assert state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"
+
+            normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_obs": True, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 10.0}
+            normalize_kwargs["subtract_reward_mean"] = True
+            normalize_kwargs["start_idx"] = 1 + (max_icl_examples + 1) # at the beginning: discrete action (avoid duplicates) and time step representation
+            normalize_kwargs["offset"] = state_dim_per_token
+            env = VecNormalizeRangeAndRewardSentenceLevelICL(env, training=True, **normalize_kwargs)
+            # eval env should not be normalized. Training statistics should be used for normalizing the eval env
+            ## However, we initialize the eval env with training statistics, but later are updated!
+            env_eval_dev = VecNormalizeRangeAndRewardSentenceLevelICL(env_eval_dev, training=False, **normalize_kwargs)
+            env_eval_dev_unwrapped = env_eval_dev.unwrapped
+
+            assert isinstance(env_eval_dev, VecNormalizeRangeAndRewardSentenceLevelICL), f"Expected env_eval_dev to be an instance of VecNormalizeRangeAndRewardSentenceLevelICL, but got {type(env_eval_dev)}"
+            assert isinstance(env_eval_dev.unwrapped, vec_env_class), f"Expected env_eval_dev.unwrapped to be an instance of {vec_env_class}, but got {type(env_eval_dev.unwrapped.unwrapped)}"
+
         #net_arch = [512, 128, 32]
         #net_arch = [512, 256, 128]
         #net_arch = [1024, 512, 256]
@@ -419,8 +460,8 @@ def main(*main_args, **main_kwargs):
                 #"vf": [512, 256]
                 #"pi": [1024, 512],
                 #"vf": [1024, 512]
-                "pi": [256, 256],
-                "vf": [64, 64]
+                "pi": [1024, 1024],
+                "vf": [256, 256]
             } # "pi" is actor and "vf" the critic
 
         logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
@@ -532,9 +573,9 @@ def main(*main_args, **main_kwargs):
         # EvalCallback
         ## it returns the average "sum of undiscounted rewards" per episode (https://stable-baselines3.readthedocs.io/en/master/_modules/stable_baselines3/common/evaluation.html)
         ## it does not evaluate the model performance when training finishes (we evaluate below)
-        custom_callback_on_eval = None if not store_model_on_eval else lambda n_calls, eval_freq: store_model(save_path, name_prefix, f"eval-{n_calls // eval_freq}", model, logger)
+        custom_callback_on_eval = _custom_callback_on_eval(store_model_on_eval, save_path, name_prefix, model, env_eval_dev, logger)
         callbacks.append(DelayedEvalCallback(
-            env_eval_dev.unwrapped,
+            env_eval_dev_unwrapped,
             learning_starts=0,
             best_model_save_path=save_path,
             log_path=save_path,
@@ -547,13 +588,14 @@ def main(*main_args, **main_kwargs):
             render=False,
             verbose=1,
             predict_kwargs={
-                "env_instance": env_eval_dev.unwrapped,
+                "env_instance": env_eval_dev_unwrapped,
             },
             disable_eval=disable_eval,
             custom_callback_on_eval=custom_callback_on_eval,
             custom_logger=logger,
             evaluate_policy_kwargs={"callback_compute_episode_rewards_and_lengths": create_callback_episode_rewards(n_eval_episodes, optuna_trial=optuna_trial)},
             inner_callback_after_eval=get_callback_after_eval(num_envs, data_to_be_translated_dev, n_eval_episodes),
+            skip_vec_normalize_sync=use_vec_normalize, # if use_vec_normalize is True, we skip syncing the VecNormalize statistics between the training and eval envs after each evaluation, as we load the training statistics before each evaluation in the custom_callback_on_eval
         ))
         callbacks.append(sb3_cb.CheckpointCallback( # store training data in order to resume training later
             save_freq=save_freq,
@@ -606,10 +648,10 @@ def main(*main_args, **main_kwargs):
             ## dev: evaluate and report result
             logger.info("Evaluating dev")
 
-            #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
-            mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated_dev),
+            #mean_reward, std_reward = evaluate_policy(model, env_eval_dev_unwrapped, n_eval_episodes=len(data_to_be_translated_dev))
+            mean_reward, std_reward = evaluate_policy(model, env_eval_dev_unwrapped, n_eval_episodes=len(data_to_be_translated_dev),
                 predict_kwargs={
-                    "env_instance": env_eval_dev.unwrapped,
+                    "env_instance": env_eval_dev_unwrapped,
                 },)
         else:
             mean_reward = 0.0

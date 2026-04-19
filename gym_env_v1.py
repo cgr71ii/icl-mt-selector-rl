@@ -264,20 +264,23 @@ class MTICLEnv(gym.Env):
         self.embedding_pooling_model_api = _dict_or_default(kwargs, "embedding_pooling_model_api", "http://127.0.0.1:8000/get_embedding_pooling")
         self.eval_model_api = _dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
         self.embedding_external_system = _dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model", f=lambda s: s.rstrip('/'))
+        self.reward_model_api = _dict_or_default(kwargs, "reward_model_api", "http://127.0.0.1:8000/get_reward")
 
         assert isinstance(self.translate_model_api, str), f"translate_model_api: {type(self.translate_model_api)}: {self.translate_model_api}"
         assert isinstance(self.embedding_single_token_model_api, str), f"embedding_single_token_model_api: {type(self.embedding_single_token_model_api)}: {self.embedding_single_token_model_api}"
         assert isinstance(self.embedding_pooling_model_api, str), f"embedding_pooling_model_api: {type(self.embedding_pooling_model_api)}: {self.embedding_pooling_model_api}"
         assert isinstance(self.eval_model_api, str), f"eval_model_api: {type(self.eval_model_api)}: {self.eval_model_api}"
-
+        assert isinstance(self.reward_model_api, str), f"reward_model_api: {type(self.reward_model_api)}: {self.reward_model_api}"
         self.translate_model_api = self.translate_model_api.split('|')
         self.embedding_pooling_model_api = self.embedding_pooling_model_api.split('|')
         self.embedding_external_system = self.embedding_external_system.split('|')
+        self.reward_model_api = self.reward_model_api.split('|')
 
         self.logger_wrapper(gym.logger.debug, "translate_model_api (pool size: %d): %s", len(self.translate_model_api), self.translate_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_pooling_model_api (pool size: %d): %s", len(self.embedding_pooling_model_api), self.embedding_pooling_model_api)
         self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
+        self.logger_wrapper(gym.logger.debug, "reward_model_api (pool size: %d): %s", len(self.reward_model_api), self.reward_model_api)
 
         ## Other API parameters
         self.embedding_pooling_model_method_state = "last"
@@ -1552,15 +1555,21 @@ class MTICLEnv(gym.Env):
         assert len(src_sentences) > 0, "src_sentences must not be an empty list"
         assert all(isinstance(s, str) for s in src_sentences), f"Expected src_sentences to be a list of strings, got {type(src_sentences[0])}: {src_sentences[0]}"
 
-        url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
+        _pooling = self.embedding_pooling_model_method_state if _pooling is None else _pooling
+        _layer = self.embedding_pooling_model_layer if _layer is None else _layer
+
+        if _pooling in ("target_sentence_probs_mean_reward",):
+            assert only_representation
+            url = self.reward_model_api
+        else:
+            url = self.translate_model_api if not only_representation else self.embedding_pooling_model_api
+
         url_idx = self.get_int_env_id() if api_idx is None else api_idx
         url_idx = 0 if url_idx is None else url_idx % len(url)
         url = url[url_idx]
         batch_size = self.batch_size
         translations = []
         data = [{"src_sentence": utils.encode_base64(s), "src_examples": [], "trg_examples": [], "icl_idx_src_sentence": []} for s in src_sentences]
-        _pooling = self.embedding_pooling_model_method_state if _pooling is None else _pooling
-        _layer = self.embedding_pooling_model_layer if _layer is None else _layer
 
         if trg_sentences is not None:
             assert isinstance(trg_sentences, list), f"Expected trg_sentences to be a list, got {type(trg_sentences)}: {trg_sentences}"
