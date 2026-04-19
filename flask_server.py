@@ -146,11 +146,15 @@ def translate():
         src_examples = utils.string2list(request_method.getlist("src_example"))
         trg_examples = utils.string2list(request_method.getlist("trg_example"))
         icl_idx_src_sentences = utils.string2list(request_method.getlist("icl_idx_src_sentence"))
-        trg_sentences = []
     except KeyError as e:
         logger.error("KeyError: %s", e)
 
         return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    try:
+        trg_sentences = utils.string2list(request_method.getlist("trg_sentence"))
+    except KeyError as e:
+        trg_sentences = []
 
     pooling = utils.string2list(request_method.getlist("pooling"))
     layer = utils.string2list(request_method.getlist("layer"))
@@ -216,7 +220,8 @@ def translate():
             "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
         })
 
-    trg_sentences = [None] * len(src_sentences)
+    if len(trg_sentences) == 0:
+        trg_sentences = [None] * len(src_sentences)
 
     try:
         src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
@@ -379,11 +384,16 @@ def get_embedding_pooling():
             "err": f"results length mismatch with the provided URLs: {len(src_sentences)} vs {len(trg_sentences)}",
         })
 
+    if len(trg_sentences) == 0:
+        trg_sentences = [None] * len(src_sentences)
+
     try:
         src_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_sentences]
         src_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in src_examples]
         trg_examples = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_examples]
-        trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
+
+        if trg_sentences[0] is not None:
+            trg_sentences = [base64.b64decode(s.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for s in trg_sentences]
     except Exception as e:
         logger.error("Exception when decoding BASE64: %s", e)
 
