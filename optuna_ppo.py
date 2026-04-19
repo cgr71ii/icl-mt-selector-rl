@@ -115,15 +115,20 @@ def objective(trial):
     assert "eval_freq" not in parsed_kwargs
     assert "optuna_trial" not in parsed_kwargs
     assert "skip_last_eval" not in parsed_kwargs
+    assert "eval_strategy_training" not in parsed_kwargs
+    assert "eval_strategy_eval" not in parsed_kwargs
 
     skip_last_eval = True
     parsed_kwargs["max_steps"] = 200000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
     parsed_kwargs["patience"] = 3 # rely on pruning and patience
+    parsed_kwargs["patience"] -= 1
     parsed_kwargs["eval_freq"] = 20000
     parsed_kwargs["optuna_trial"] = trial
     parsed_kwargs["skip_last_eval"] = skip_last_eval
+    parsed_kwargs["eval_strategy_training"] = "target_sentence_probs_mean_reward"
+    parsed_kwargs["eval_strategy_eval"] = "chrf2"
 
     # Build params
     environment_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
@@ -133,17 +138,21 @@ def objective(trial):
     batch_size = trial.suggest_categorical("batch_size", [200, 400, 800])
     n_steps = trial.suggest_categorical("n_steps", [10, 20, 50, 100])
     ent_coef = trial.suggest_float("ent_coef", 1e-4, 5e-2, log=True)
-    clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
+    #clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
+    clip_range = "0.1"
     gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
     net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
-    activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "gelu"])
+    #activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "gelu"])
+    activation_fn = "tanh"
     #linear_bottleneck = trial.suggest_categorical("linear_bottleneck", [128, 256, 512])
     embedding_pooling_model_method_state = trial.suggest_categorical("embedding_pooling_model_method_state", ["last", "mean"])
     embedding_pooling_model_layer = trial.suggest_categorical("embedding_pooling_model_layer", ["50%", "60%", "70%", "80%", "90%", "100%"])
     n_epochs = trial.suggest_int("n_epochs", 4, 16)
     vf_coef = trial.suggest_float("vf_coef", 0.1, 1.0)
     pi_factor = 4
-    enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
+    #enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
+    normalize = trial.suggest_categorical("normalize", ["0:0", "1:0", "1:1"])
+    use_vec_normalize, subtract_reward_mean = normalize.split(":")
 
     if net_arch_str == "small":
         linear_bottleneck = 128
@@ -180,6 +189,10 @@ def objective(trial):
     assert "embedding_pooling_model_layer" not in parsed_kwargs
     assert "n_epochs" not in parsed_kwargs
     assert "vf_coef" not in parsed_kwargs
+    assert "use_vec_normalize" not in parsed_kwargs
+    assert "subtract_reward_mean" not in parsed_kwargs
+
+    enable_target_kl = False
 
     if enable_target_kl:
         assert "target_kl" not in parsed_kwargs
@@ -202,6 +215,8 @@ def objective(trial):
     parsed_kwargs["embedding_pooling_model_layer"] = embedding_pooling_model_layer
     parsed_kwargs["n_epochs"] = n_epochs
     parsed_kwargs["vf_coef"] = vf_coef
+    parsed_kwargs["use_vec_normalize"] = use_vec_normalize
+    parsed_kwargs["subtract_reward_mean"] = subtract_reward_mean
 
     print(f"Trial {trial.number}: logging to {filename}")
     print_process_resources(f"Start of trial {trial.number}")

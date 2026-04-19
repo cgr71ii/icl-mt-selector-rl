@@ -1537,7 +1537,7 @@ class MTICLEnv(gym.Env):
 
         return self.get_translations(*args, only_representation=True, **kwargs)
 
-    def get_score_from_icl_example_target_sentence_probs_mean_reward(self):
+    def get_score_from_icl_example_target_sentence_probs_mean_reward(self, return_percentage_instead=True):
         current_src_sentence, current_trg_sentence = self.data[self.translation_candidate]
         current_icl_examples = self.current_icl_examples
         reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling="target_sentence_probs_mean_reward", _layer=-1, trg_sentences=[current_trg_sentence])
@@ -1545,7 +1545,12 @@ class MTICLEnv(gym.Env):
         assert len(reward.shape) == 2, reward.shape
         assert reward.shape == (1, 1), reward.shape
 
-        return reward[0, 0].item()
+        score = reward[0, 0].item()
+
+        if return_percentage_instead:
+            score = score * 100
+
+        return score
 
     def get_translations(self, src_sentences, icl_examples=None, only_representation=False, numpy=True, api_idx=None, _pooling=None, _layer=None, trg_sentences=None):
         # format icl_examples if is not None: list of lists of (optionally) lists with two elements: [[[src11, trg11], [src12, trg12]], [], [[src31, trg31]], ...]

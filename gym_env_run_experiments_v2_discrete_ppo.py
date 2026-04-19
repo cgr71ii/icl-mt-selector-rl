@@ -183,6 +183,7 @@ def main(*main_args, **main_kwargs):
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
         skip_last_eval = parsed_kwargs.pop("skip_last_eval", False) # it will return a reward of 0
         use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
+        subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 1)))
 
         if min_conf_debug:
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -439,7 +440,7 @@ def main(*main_args, **main_kwargs):
             assert state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"
 
             normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_obs": True, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 10.0}
-            normalize_kwargs["subtract_reward_mean"] = True
+            normalize_kwargs["subtract_reward_mean"] = subtract_reward_mean
             normalize_kwargs["start_idx"] = 1 + (max_icl_examples + 1) # at the beginning: discrete action (avoid duplicates) and time step representation
             normalize_kwargs["offset"] = state_dim_per_token
             env = VecNormalizeRangeAndRewardSentenceLevelICL(env, training=True, **normalize_kwargs)
