@@ -254,7 +254,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         mean_pooled_embeddings = sum_embeddings / sum_mask
         last_token_embeddings = hidden_states[:, -1, :]
         pooled_embeddings = torch.cat([mean_pooled_embeddings, last_token_embeddings], dim=-1)
-    elif pooling == "target_sentence_probs_mean_reward":
+    elif pooling in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
         # Get the probabilities of the target sentence tokens (after removing padding with attention mask)
 
         assert target_sentence_n_tokens is not None
@@ -308,8 +308,13 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
             target_only = valid_positions[-n_tokens:]
 
-            # exp(log_prob) -> probabilities
-            rewards.append(target_only.exp().mean())
+            if pooling == "target_sentence_probs_mean_reward":
+                # exp(log_prob) -> probabilities
+                rewards.append(target_only.exp().mean())
+            elif pooling == "target_sentence_neg_ppl_reward":
+                rewards.append((target_only.mean() * -1).exp() * -1)
+            else:
+                raise ValueError(f"Unknown pooling method: {pooling}")
 
         pooled_embeddings = torch.stack(rewards, dim=0).unsqueeze(-1)
 

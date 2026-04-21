@@ -186,7 +186,7 @@ def translate():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none", "features", "mean+last", "target_sentence_probs_mean_reward"):
+        if p not in ("mean", "max", "last", "none", "features", "mean+last", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -331,8 +331,8 @@ def get_embedding_pooling():
     get_representation = True
     get_representation = [get_representation] * len(src_sentences)
 
-    if pooling is None or len(pooling) == 0:
-        pooling = ["mean"] * len(src_sentences)
+    assert pooling is not None, "pooling should not be None"
+    assert len(pooling) > 0, "pooling should not be empty"
 
     if layer is None or len(layer) == 0:
         layer = [-1] * len(src_sentences)
@@ -355,7 +355,7 @@ def get_embedding_pooling():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("mean", "max", "last", "none", "features", "mean+last", "target_sentence_probs_mean_reward"):
+        if p not in ("mean", "max", "last", "none", "features", "mean+last", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
             logger.error("Unknown pooling method: %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -502,8 +502,8 @@ def get_reward():
     get_representation = True
     get_representation = [get_representation] * len(src_sentences)
 
-    if pooling is None or len(pooling) == 0:
-        pooling = ["target_sentence_probs_mean_reward"] * len(src_sentences)
+    assert pooling is not None, "pooling should not be None"
+    assert len(pooling) > 0, "pooling should not be empty"
 
     if layer is None or len(layer) == 0:
         layer = [-1] * len(src_sentences)
@@ -526,7 +526,7 @@ def get_reward():
         return jsonify({"ok": "null", "err": "'pooling' and 'layer' should be lists with a single element or the same length as 'src_sentence'"})
 
     for idx, p in enumerate(pooling):
-        if p not in ("target_sentence_probs_mean_reward",):
+        if p not in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
             logger.error("Unknown pooling method (for get_reward): %s (idx: %d)", p, idx)
 
             return jsonify({"ok": "null", "err": f"unknown pooling method: {p} (idx: {idx})"})
@@ -668,9 +668,9 @@ def translate_batch(data):
     logger.debug("Teacher forcing: %s", str(teacher_forcing))
     logger.debug("Pooling/layer: %s %s", pooling, layer)
 
-    if pooling == "target_sentence_probs_mean_reward":
+    if pooling in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
         assert len(trg_sentences) == len(src_sentences), f"Expected trg_sentences to have the same length as src_sentences, got: {len(trg_sentences)} vs {len(src_sentences)}"
-        assert all((trg_sentence is not None for trg_sentence in trg_sentences)), f"Expected all trg_sentences to be not None for pooling method 'target_sentence_probs_mean_reward', got: {trg_sentences}"
+        assert all((trg_sentence is not None for trg_sentence in trg_sentences)), f"Expected all trg_sentences to be not None for pooling method '{pooling}', got: {trg_sentences}"
         assert teacher_forcing
         assert get_representation
         assert add_eos_token
@@ -737,7 +737,7 @@ def translate_batch(data):
                 # Get embeddings
                 target_sentence_n_tokens = None
 
-                if pooling == "target_sentence_probs_mean_reward":
+                if pooling in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
                     lock = global_conf["lock"]
 
                     if lock is not None:

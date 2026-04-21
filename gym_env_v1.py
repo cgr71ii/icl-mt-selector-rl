@@ -401,9 +401,13 @@ class MTICLEnv(gym.Env):
         self.best_reward_seen = {}
         self.current_icl_examples_prepend = _dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
         self.state_dim_per_token_time_step = _dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
+        self.multi_step_eval = bool(int(_dict_or_default(kwargs, "multi_step_eval", False))) # if True, the reward will be calculated at each step and not only at the end of the episode
         self.rewards = [] # for gathering the rewards from outside the environment
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
+
+        if self.multi_step_eval:
+            self.logger_wrapper(gym.logger.info, "Multi-step evaluation enabled (only training): reward will be calculated at each step and not only at the end of the episode")
 
         self.num_icl_examples = _dict_or_default(kwargs, "num_icl_examples", None)
         self.num_icl_examples = int(self.num_icl_examples) if self.num_icl_examples is not None else None
@@ -455,10 +459,8 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
-        self.multi_step_eval_strategies = ("actions-bm25",) # reward will be computed for all steps in the episode for these strategies
-
-        assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward"), self.eval_strategy_training
-        assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward"), self.eval_strategy_eval
+        assert self.eval_strategy_training in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"), self.eval_strategy_training
+        assert self.eval_strategy_eval in ("api-eval", "chrf2", "actions-bm25", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"), self.eval_strategy_eval
         assert self.translation_candidate_strategy in ("sequential", "sequential_shuffle_per_epoch", "choice_with_replacement"), self.translation_candidate_strategy
 
         self.str2representation_valid_actions_k = []
@@ -1244,13 +1246,16 @@ class MTICLEnv(gym.Env):
 
         eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
 
-        if translation is None and eval_strategy not in self.multi_step_eval_strategies:
+        if (translation is None and eval_strategy not in ("actions-bm25",)) or (self.multi_step_eval and not self.is_eval_env):
             reward = 0.0
         else:
             if eval_strategy == "api-eval":
+                assert translation is not None
+
                 avg_eval_values, single_eval_values = self.api_eval(src_sentence, translation, reference)
                 reward = avg_eval_values * 100.0 # scale to 0--100
             elif eval_strategy == "chrf2":
+                assert translation is not None
                 assert len(translation) == 1, len(translation)
                 assert len(reference) == 1, len(reference)
                 assert isinstance(translation[0], str), type(translation[0])
@@ -1260,8 +1265,9 @@ class MTICLEnv(gym.Env):
                 reward = score.score # scale is 0--100
             elif eval_strategy == "actions-bm25":
                 reward = self.get_score_from_icl_example_bm25()
-            elif eval_strategy == "target_sentence_probs_mean_reward":
-                reward = self.get_score_from_icl_example_target_sentence_probs_mean_reward()
+            elif eval_strategy in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
+                return_percentage_instead = eval_strategy == "target_sentence_probs_mean_reward"
+                reward = self.get_score_from_icl_example_target_sentence_reward(_pooling=eval_strategy, return_percentage_instead=return_percentage_instead)
             else:
                 raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
 
@@ -1537,10 +1543,10 @@ class MTICLEnv(gym.Env):
 
         return self.get_translations(*args, only_representation=True, **kwargs)
 
-    def get_score_from_icl_example_target_sentence_probs_mean_reward(self, return_percentage_instead=True):
+    def get_score_from_icl_example_target_sentence_reward(self, return_percentage_instead=True, _pooling="target_sentence_probs_mean_reward"):
         current_src_sentence, current_trg_sentence = self.data[self.translation_candidate]
         current_icl_examples = self.current_icl_examples
-        reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling="target_sentence_probs_mean_reward", _layer=-1, trg_sentences=[current_trg_sentence])
+        reward = self.get_translations([current_src_sentence], icl_examples=[current_icl_examples], only_representation=True, _pooling=_pooling, _layer=-1, trg_sentences=[current_trg_sentence])
 
         assert len(reward.shape) == 2, reward.shape
         assert reward.shape == (1, 1), reward.shape
@@ -1563,7 +1569,7 @@ class MTICLEnv(gym.Env):
         _pooling = self.embedding_pooling_model_method_state if _pooling is None else _pooling
         _layer = self.embedding_pooling_model_layer if _layer is None else _layer
 
-        if _pooling in ("target_sentence_probs_mean_reward",):
+        if _pooling in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
             assert only_representation
             url = self.reward_model_api
         else:
@@ -1664,8 +1670,8 @@ class MTICLEnv(gym.Env):
 
             assert translations.shape[0] == len(src_sentences), f"Translations shape mismatch for representation_per_token_with_features first dimension: {translations.shape} vs {len(src_sentences)}"
 
-            if _pooling == "target_sentence_probs_mean_reward":
-                assert translations.shape[-1] == 1, f"Translations shape mismatch for target_sentence_probs_mean_reward: {translations.shape} vs (num_sentences, 1)"
+            if _pooling in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
+                assert translations.shape[-1] == 1, f"Translations shape mismatch for {_pooling}: {translations.shape} vs (num_sentences, 1)"
             else:
                 assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch for representation_per_token_with_features last dimension: {translations.shape} vs {self.state_dim_per_token}"
 
@@ -2349,9 +2355,9 @@ class MTICLEnv(gym.Env):
         src_sentence, reference = self.data[self.translation_candidate]
         eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
 
-        if terminated or truncated:
+        if terminated or truncated or self.multi_step_eval:
             # Generate translation
-            if eval_strategy in ("actions-bm25", "target_sentence_probs_mean_reward"):
+            if eval_strategy in ("actions-bm25", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
                 translation = ["none"]
 
                 self.logger_wrapper(gym.logger.debug, "Translation not generated: eval_strategy == '%s'", eval_strategy)

@@ -18,6 +18,7 @@ from stable_baselines3.common.torch_layers import FlattenExtractor, NFeaturesExt
 from stable_baselines3.common.buffers import NStepReplayBuffer, MonteCarloReplayBuffer
 import torch
 from stable_baselines3.common.policies import ContinuousCritic, ContinuousCriticTower
+from stable_baselines3.common.vec_env.vec_normalize import VecNormalizeRangeAndRewardSentenceLevelICL
 
 def main():
     # Evaluate
@@ -111,7 +112,12 @@ def main():
     # custom
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
     linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
-    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "gelu"))
+    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
+    use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
+
+    if use_vec_normalize:
+        logger.info("Using VecNormalize for normalizing observations and rewards")
+        parsed_kwargs["apply_l2_normalization_state"] = False
 
     logger.info("Seed: %s", seed)
     logger.info("Seed: %s (env_seeds: %s)", seed, env_seeds)
@@ -189,14 +195,29 @@ def main():
     else:
         n_features = 0
 
+    assert best_model_path.endswith("_model.zip"), best_model_path
+
+    vec_normalize_path = best_model_path[:-len("_model.zip")] + "_vecnormalize.pkl"
+
+    if use_vec_normalize:
+        assert utils.file_exists(vec_normalize_path), f"VecNormalize file not found: {vec_normalize_path}"
+        assert state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"
+
+        env_eval_dev = VecNormalizeRangeAndRewardSentenceLevelICL.load(vec_normalize_path, env_eval_dev)
+
+        assert isinstance(env_eval_dev, VecNormalizeRangeAndRewardSentenceLevelICL), f"Expected env_eval_dev to be an instance of VecNormalizeRangeAndRewardSentenceLevelICL, but got {type(env_eval_dev)}"
+        assert isinstance(env_eval_dev.unwrapped, vec_env_class), f"Expected env_eval_dev.unwrapped to be an instance of {vec_env_class}, but got {type(env_eval_dev.unwrapped.unwrapped)}"
+    else:
+        assert not utils.file_exists(vec_normalize_path), f"VecNormalize file found but use_vec_normalize is False: {vec_normalize_path}"
+
     #net_arch = [512, 128, 32]
     #net_arch = [512, 256, 128]
 
     net_arch = {
         #"pi": [1024, 1024],
         #"vf": [256, 256]
-        "pi": [256, 256],
-        "vf": [64, 64]
+        "pi": [1024, 1024],
+        "vf": [256, 256]
     } # "pi" is actor and "vf" the critic
 
     logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)

@@ -151,8 +151,8 @@ def objective(trial):
     vf_coef = trial.suggest_float("vf_coef", 0.1, 1.0)
     pi_factor = 4
     #enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
-    normalize = trial.suggest_categorical("normalize", ["0:0", "1:0", "1:1"])
-    use_vec_normalize, subtract_reward_mean = normalize.split(":")
+    normalize = trial.suggest_categorical("normalize", ["0:0:0", "1:0:0", "1:1:0", "1:0:1", "1:1:1"])
+    use_vec_normalize, subtract_reward_mean, statistics_per_sentence = normalize.split(":")
 
     if net_arch_str == "small":
         linear_bottleneck = 128
@@ -191,7 +191,7 @@ def objective(trial):
     assert "vf_coef" not in parsed_kwargs
     assert "use_vec_normalize" not in parsed_kwargs
     assert "subtract_reward_mean" not in parsed_kwargs
-
+    assert "statistics_per_sentence" not in parsed_kwargs
     enable_target_kl = False
 
     if enable_target_kl:
@@ -217,7 +217,7 @@ def objective(trial):
     parsed_kwargs["vf_coef"] = vf_coef
     parsed_kwargs["use_vec_normalize"] = use_vec_normalize
     parsed_kwargs["subtract_reward_mean"] = subtract_reward_mean
-
+    parsed_kwargs["statistics_per_sentence"] = statistics_per_sentence
     print(f"Trial {trial.number}: logging to {filename}")
     print_process_resources(f"Start of trial {trial.number}")
 
@@ -312,7 +312,7 @@ def objective(trial):
     else:
         assert np.isclose(final_reward, final_reward2), f"final_reward from environment_script ({final_reward}) does not match best intermediate result from Optuna ({final_reward2})"
 
-    best_trial_strategy = os.environ["OPTUNA_BEST_TRIAL_STRATEGY"] if "OPTUNA_BEST_TRIAL_STRATEGY" in os.environ else "mean_intermediate_result_last_2"
+    best_trial_strategy = os.environ["OPTUNA_BEST_TRIAL_STRATEGY"] if "OPTUNA_BEST_TRIAL_STRATEGY" in os.environ else "best_intermediate_result"
 
     if best_trial_strategy == "best_intermediate_result":
         final_reward = final_reward2
@@ -321,7 +321,7 @@ def objective(trial):
     elif best_trial_strategy == "mean_intermediate_result_last_2":
         final_reward = np.mean(intermediate_results[-2:]).item()
     else:
-        raise Exception("Invalid OPTUNA_BEST_TRIAL_STRATEGY: %s", best_trial_strategy)
+        raise Exception(f"Invalid OPTUNA_BEST_TRIAL_STRATEGY: {best_trial_strategy}")
 
     intermediate_results_dict = {step: reward for step, reward in frozen_trial.intermediate_values.items()}
 
@@ -340,9 +340,9 @@ if __name__ == "__main__":
         load_study = True
         study_name = os.environ["OPTUNA_LOAD_STUDY_NAME"]
 
-        print("Loading study with name: %s", study_name)
+        print(f"Loading study with name: {study_name}")
 
-        if "OPTUNA_LOAD_STUDY_SAMPLER_FILENAME" in os.environ:
+        if False and "OPTUNA_LOAD_STUDY_SAMPLER_FILENAME" in os.environ:
             sampler_fn = os.environ["OPTUNA_LOAD_STUDY_SAMPLER_FILENAME"]
 
             with open(sampler_fn, "rb") as fd:
@@ -354,7 +354,8 @@ if __name__ == "__main__":
         study_name = f"ppo_hyperparameter_optimization_{current_datetime}"
 
     if sampler is None:
-        sampler = optuna.samplers.TPESampler(n_startup_trials=30, multivariate=True, seed=42)
+        #sampler = optuna.samplers.TPESampler(n_startup_trials=30, multivariate=True, seed=42)
+        sampler = optuna.samplers.RandomSampler(seed=42)
 
     save_path = "optuna_data"
     #pruner = None # let's rely on early stopping based on patience instead of pruning
