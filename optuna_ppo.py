@@ -127,32 +127,66 @@ def objective(trial):
     parsed_kwargs["eval_freq"] = 20000
     parsed_kwargs["optuna_trial"] = trial
     parsed_kwargs["skip_last_eval"] = skip_last_eval
-    parsed_kwargs["eval_strategy_training"] = "target_sentence_probs_mean_reward"
-    parsed_kwargs["eval_strategy_eval"] = "chrf2"
+    parsed_kwargs["eval_strategy_training"] = "target_sentence_neg_ppl_reward"
+    #parsed_kwargs["eval_strategy_eval"] = "chrf2"
+    parsed_kwargs["eval_strategy_eval"] = parsed_kwargs["eval_strategy_training"]
 
     # Build params
     environment_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
+    all_hyperparameters = True
+    #all_hyperparameters = False # TODO remove
 
     # Hyperparameters to optimize
-    learning_rate = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [200, 400, 800])
-    n_steps = trial.suggest_categorical("n_steps", [10, 20, 50, 100])
-    ent_coef = trial.suggest_float("ent_coef", 1e-4, 5e-2, log=True)
-    #clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
-    clip_range = "0.1"
-    gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
-    net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
-    #activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "gelu"])
-    activation_fn = "tanh"
-    #linear_bottleneck = trial.suggest_categorical("linear_bottleneck", [128, 256, 512])
-    embedding_pooling_model_method_state = trial.suggest_categorical("embedding_pooling_model_method_state", ["last", "mean"])
-    embedding_pooling_model_layer = trial.suggest_categorical("embedding_pooling_model_layer", ["50%", "60%", "70%", "80%", "90%", "100%"])
-    n_epochs = trial.suggest_int("n_epochs", 4, 16)
-    vf_coef = trial.suggest_float("vf_coef", 0.1, 1.0)
+    if all_hyperparameters:
+        learning_rate = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [200, 400, 800])
+        n_steps = trial.suggest_categorical("n_steps", [10, 20, 50, 100])
+        ent_coef = trial.suggest_float("ent_coef", 1e-4, 5e-2, log=True)
+        #clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
+        clip_range = "0.1"
+        #gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
+        gae_lambda = trial.suggest_categorical("gae_lambda", [0.8, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 1.0])
+        #net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
+        net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium"])
+        #activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "gelu"])
+        activation_fn = "tanh"
+        #linear_bottleneck = trial.suggest_categorical("linear_bottleneck", [128, 256, 512])
+        embedding_pooling_model_method_state = trial.suggest_categorical("embedding_pooling_model_method_state", ["last", "mean"])
+        #embedding_pooling_model_layer = trial.suggest_categorical("embedding_pooling_model_layer", ["50%", "60%", "70%", "80%", "90%", "100%"])
+        embedding_pooling_model_layer = "75%"
+        #n_epochs = trial.suggest_int("n_epochs", 4, 16)
+        n_epochs = 4
+        vf_coef = trial.suggest_float("vf_coef", 0.1, 1.0)
+        #enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
+        enable_target_kl = False
+        normalize = trial.suggest_categorical("normalize", ["0:0:0:0", "1:0:0:0", "1:1:0:0", "1:0:1:0", "1:1:1:0",
+                                                            "0:0:0:1", "1:0:0:1", "1:0:1:1"])
+        use_vec_normalize, subtract_reward_mean, statistics_per_sentence, multi_step_eval = normalize.split(":")
+        lr_linear_decay = bool(int(trial.suggest_categorical("lr_linear_decay", [True, False])))
+    else:
+        # Debug
+        learning_rate = 1e-4
+        batch_size = 400
+        n_steps = 20
+        ent_coef = 1e-3
+        clip_range = 0.1
+        gae_lambda = 0.95
+        net_arch_str = "medium"
+        activation_fn = "tanh"
+        embedding_pooling_model_method_state = "last"
+        embedding_pooling_model_layer = "80%"
+        n_epochs = 8
+        vf_coef = 0.5
+        enable_target_kl = False
+        use_vec_normalize = True
+        subtract_reward_mean = True
+        statistics_per_sentence = True
+        multi_step_eval = False
+        lr_linear_decay = True
+
+        # Custom hyperparameters for debugging here:
+
     pi_factor = 4
-    #enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
-    normalize = trial.suggest_categorical("normalize", ["0:0:0", "1:0:0", "1:1:0", "1:0:1", "1:1:1"])
-    use_vec_normalize, subtract_reward_mean, statistics_per_sentence = normalize.split(":")
 
     if net_arch_str == "small":
         linear_bottleneck = 128
@@ -192,7 +226,8 @@ def objective(trial):
     assert "use_vec_normalize" not in parsed_kwargs
     assert "subtract_reward_mean" not in parsed_kwargs
     assert "statistics_per_sentence" not in parsed_kwargs
-    enable_target_kl = False
+    assert "multi_step_eval" not in parsed_kwargs
+    assert "lr_linear_decay" not in parsed_kwargs
 
     if enable_target_kl:
         assert "target_kl" not in parsed_kwargs
@@ -218,6 +253,9 @@ def objective(trial):
     parsed_kwargs["use_vec_normalize"] = use_vec_normalize
     parsed_kwargs["subtract_reward_mean"] = subtract_reward_mean
     parsed_kwargs["statistics_per_sentence"] = statistics_per_sentence
+    parsed_kwargs["multi_step_eval"] = multi_step_eval
+    parsed_kwargs["lr_linear_decay"] = lr_linear_decay
+
     print(f"Trial {trial.number}: logging to {filename}")
     print_process_resources(f"Start of trial {trial.number}")
 
@@ -312,7 +350,7 @@ def objective(trial):
     else:
         assert np.isclose(final_reward, final_reward2), f"final_reward from environment_script ({final_reward}) does not match best intermediate result from Optuna ({final_reward2})"
 
-    best_trial_strategy = os.environ["OPTUNA_BEST_TRIAL_STRATEGY"] if "OPTUNA_BEST_TRIAL_STRATEGY" in os.environ else "best_intermediate_result"
+    best_trial_strategy = os.environ["OPTUNA_BEST_TRIAL_STRATEGY"] if "OPTUNA_BEST_TRIAL_STRATEGY" in os.environ else "mean_intermediate_result_last_2"
 
     if best_trial_strategy == "best_intermediate_result":
         final_reward = final_reward2

@@ -185,6 +185,7 @@ def main(*main_args, **main_kwargs):
         use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
         subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 1)))
         statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 1)))
+        lr_linear_decay = bool(int(parsed_kwargs.pop("lr_linear_decay", 1)))
 
         if min_conf_debug:
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -238,6 +239,7 @@ def main(*main_args, **main_kwargs):
             max_data_entries_dev = max_data_entries
 
         state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
+        multi_step_eval = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
         parsed_kwargs["device"] = device
         parsed_kwargs["max_icl_examples"] = max_icl_examples
         parsed_kwargs["max_data_entries"] = max_data_entries
@@ -255,6 +257,10 @@ def main(*main_args, **main_kwargs):
         data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
         data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
         process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
+
+        if multi_step_eval:
+            if use_vec_normalize:
+                assert not subtract_reward_mean
 
         if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             process_token_time_step = False
@@ -478,7 +484,7 @@ def main(*main_args, **main_kwargs):
         logger.info("Warmup steps: %d", warmup_steps)
 
         #min_critic_learning_rate = critic_learning_rate / 10
-        min_critic_learning_rate = 0.0
+        min_critic_learning_rate = 0.0 if lr_linear_decay else critic_learning_rate
         total_steps = max(int(max_steps / num_envs + 0.5), 1)
         critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
 

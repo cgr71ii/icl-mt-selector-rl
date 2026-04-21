@@ -1246,9 +1246,7 @@ class MTICLEnv(gym.Env):
 
         eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
 
-        if (translation is None and eval_strategy not in ("actions-bm25",)) or (self.multi_step_eval and not self.is_eval_env):
-            reward = 0.0
-        else:
+        if translation is not None or eval_strategy in ("actions-bm25",) or (self.multi_step_eval and not self.is_eval_env):
             if eval_strategy == "api-eval":
                 assert translation is not None
 
@@ -1270,6 +1268,8 @@ class MTICLEnv(gym.Env):
                 reward = self.get_score_from_icl_example_target_sentence_reward(_pooling=eval_strategy, return_percentage_instead=return_percentage_instead)
             else:
                 raise Exception(f"Unknown eval_strategy ({'eval' if self.is_eval_env else 'training'}): {eval_strategy}")
+        else:
+            reward = 0.0
 
         return reward
 
@@ -2355,7 +2355,7 @@ class MTICLEnv(gym.Env):
         src_sentence, reference = self.data[self.translation_candidate]
         eval_strategy = self.eval_strategy_eval if self.is_eval_env else self.eval_strategy_training
 
-        if terminated or truncated or self.multi_step_eval:
+        if terminated or truncated or (self.multi_step_eval and not self.is_eval_env):
             # Generate translation
             if eval_strategy in ("actions-bm25", "target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
                 translation = ["none"]
