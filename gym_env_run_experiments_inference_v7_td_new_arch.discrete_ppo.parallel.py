@@ -32,6 +32,8 @@ def main():
     assert best_model_path.endswith(".zip"), best_model_path
     assert utils.file_exists(best_model_path), f"Best model not found: {best_model_path}"
 
+    initial_parsed_kwargs = dict(parsed_kwargs)
+
     # read data
     data_to_be_translated = []
     _data_icl_examples = []
@@ -63,6 +65,8 @@ def main():
     parsed_kwargs["state_representation"] = state_representation
     parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "chrf2")
     parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
+    parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
+    parsed_kwargs["repeat_translation_candidates_times"] = int(parsed_kwargs.get("repeat_translation_candidates_times", 0))
     parsed_kwargs["gym_logger_level"] = parsed_kwargs.get("gym_logger_level", gym.logger.DEBUG)
     parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
@@ -114,6 +118,7 @@ def main():
     linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
     activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
     use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
+    available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
 
     if use_vec_normalize:
         logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -170,11 +175,16 @@ def main():
 
     logger.info("num_envs: %s, data_to_be_translated: %s, bsz: %s, n_eval_episodes: %s", num_envs, len(data_to_be_translated), bsz, n_eval_episodes)
 
+    parsed_kwargs_removed_elements = {k: initial_parsed_kwargs[k] for k in initial_parsed_kwargs.keys() if k not in parsed_kwargs.keys()}
+
+    logger.info("parsed_kwargs: %s", parsed_kwargs)
+    logger.info("parsed_kwargs_removed_elements: %s", parsed_kwargs_removed_elements)
+
     ## load model
     logger.info("Loading model: %s", best_model_path)
 
     env_eval_dev_class = MTICLEvalEnv
-    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, **parsed_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs))
+    env_eval_dev = Monitor(vec_env_class([make_env(rank, env_eval_dev_class, [src_lang, trg_lang, file_data_per_env[rank], file_data_icl_examples], dict({"custom_env_id": f"eval_dev_{str(rank)}", "is_eval_env": True, "_parallel_env": True, **parsed_kwargs}), seed=env_seeds[rank]) for rank in range(num_envs)], **vec_env_kwargs))
 
     #env_eval_dev.unwrapped._init_load_data_and_populate_knn_pool(options={})
     env_eval_dev.unwrapped.env_method("_init_load_data_and_populate_knn_pool", options={})
@@ -207,6 +217,8 @@ def main():
 
         assert isinstance(env_eval_dev, VecNormalizeRangeAndRewardSentenceLevelICL), f"Expected env_eval_dev to be an instance of VecNormalizeRangeAndRewardSentenceLevelICL, but got {type(env_eval_dev)}"
         assert isinstance(env_eval_dev.unwrapped, vec_env_class), f"Expected env_eval_dev.unwrapped to be an instance of {vec_env_class}, but got {type(env_eval_dev.unwrapped.unwrapped)}"
+
+        env_eval_dev.training = False
     else:
         assert not utils.file_exists(vec_normalize_path), f"VecNormalize file found but use_vec_normalize is False: {vec_normalize_path}"
 
@@ -245,6 +257,9 @@ def main():
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             step_embeddings = 0
             step_embeddings_dim = 0
+
+            if available_actions_strategy != "none":
+                    skip_n += len(data_icl_examples) # one-hot representation of available actions
         else:
             raise Exception()
 
@@ -274,6 +289,9 @@ def main():
             "layer_norm_before_activation": True,
             "activation_fn": activation_fn,
             "avoid_overlapping_action": True,
+            "icl_mask_duplicates_last_values_from_state": len(data_icl_examples),
+            "check_general_actions_masking": True,
+            "temperature": 2.0 if available_actions_strategy == "none" else 1.0,
         },
         device=device,
         rollout_buffer_kwargs={"process_time_steps": process_token_time_step},
@@ -283,12 +301,18 @@ def main():
     logger.info("Evaluating dev")
 
     #mean_reward, std_reward = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=len(data_to_be_translated))
-    episode_rewards, episode_lengths = evaluate_policy(model, env_eval_dev.unwrapped, n_eval_episodes=[bsz + 1] * num_envs, return_episode_rewards=True,
+    episode_rewards, episode_lengths = evaluate_policy(
+        model,
+        env_eval_dev.unwrapped,
+        n_eval_episodes=[bsz + 1] * num_envs,
+        return_episode_rewards=True,
         predict_kwargs={
             "env_instance": env_eval_dev.unwrapped,
-        },)
+        },
+    )
 
     episode_rewards = []
+    episode_lengths = []
     all_rewards_data = env_eval_dev.unwrapped.get_attr("rewards")
     all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
     all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
@@ -299,6 +323,8 @@ def main():
 
     for i in range(num_envs):
         # Remove extra evaluations
+        assert isinstance(all_source_sentences_and_refs_data[i], list)
+
         all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
         all_source_sentences_and_refs_data[i] = all_source_sentences_and_refs_data[i][:n_eval_episodes[i]]
 
@@ -306,6 +332,10 @@ def main():
         assert len(all_source_sentences_and_refs_data[i]) == n_eval_episodes[i]
 
         for j in range(len(all_rewards[i])):
+            assert isinstance(all_rewards[i][j], list)
+
+            episode_lengths.append(len(all_rewards[i][j]))
+
             all_rewards[i][j] = sum(all_rewards[i][j])
 
             assert isinstance(all_source_sentences_and_refs_data[i][j], list), f"{i} {j} {all_source_sentences_and_refs_data[i]}"
@@ -317,6 +347,8 @@ def main():
                 all_source_sentences_and_refs_data[i][j] = all_source_sentences_and_refs_data[i][j][0]
 
         episode_rewards.extend(all_rewards[i])
+
+        assert len(episode_rewards) == len(episode_lengths)
 
     all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
 

@@ -204,7 +204,7 @@ class MTICLEnv(gym.Env):
         self.select_max_icl_examples_randomly = _dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
         self.current_max_icl_examples = self.max_icl_examples
         self.process_token_time_step = bool(int(_dict_or_default(kwargs, "process_token_time_step", True)))
-        self.penalty_duplicate_example = _dict_or_default(kwargs, "penalty_duplicate_example", True)
+        self.penalty_duplicate_example = bool(int(_dict_or_default(kwargs, "penalty_duplicate_example", True)))
         self.available_actions_strategy = _dict_or_default(kwargs, "available_actions_strategy", "none")
         self.available_actions_strategy_n = _dict_or_default(kwargs, "available_actions_strategy_n", 10)
 
