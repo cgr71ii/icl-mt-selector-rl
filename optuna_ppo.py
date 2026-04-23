@@ -121,10 +121,10 @@ def objective(trial):
     assert "available_actions_strategy" not in parsed_kwargs
 
     skip_last_eval = True
-    parsed_kwargs["max_steps"] = 2000000
+    parsed_kwargs["max_steps"] = 1000000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 10 # rely on pruning and patience
+    parsed_kwargs["patience"] = 5 # rely on pruning and patience
     parsed_kwargs["patience"] -= 1
     parsed_kwargs["eval_freq"] = 20000
     parsed_kwargs["optuna_trial"] = trial
@@ -145,7 +145,7 @@ def objective(trial):
         learning_rate = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
         batch_size = trial.suggest_categorical("batch_size", [200, 400, 800])
         n_steps = trial.suggest_categorical("n_steps", [10, 20, 50, 100])
-        ent_coef = trial.suggest_float("ent_coef", 1e-2, 5e-2, log=True)
+        ent_coef = trial.suggest_float("ent_coef", 1e-4, 5e-2, log=True)
         #clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
         clip_range = "0.1"
         #gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)

@@ -489,6 +489,8 @@ def main(*main_args, **main_kwargs):
         min_critic_learning_rate = 0.0 if lr_linear_decay else critic_learning_rate
         total_steps = max(int(max_steps / num_envs + 0.5), 1)
         critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
+        clip_range = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=clip_range, total_steps=total_steps, logger=logger, min_lr_polyfit=clip_range / 10, str_id="clip_range", skip_update_learning_rate_param=True)
+        ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=ent_coef / 100, str_id="ent_coef", skip_update_learning_rate_param=True)
 
         if n_features <= 0:
             features_extractor_class = FlattenExtractor

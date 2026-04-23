@@ -80,7 +80,7 @@ class InverseSqrtWithWarmUpLRSchedule:
         return lr
 
 class LinearWithWarmUpLRSchedule:
-    def __init__(self, warmup_steps, initial_lr, total_steps, logger, min_lr=None, min_lr_polyfit=0.0, str_id="none"):
+    def __init__(self, warmup_steps, initial_lr, total_steps, logger, min_lr=None, min_lr_polyfit=0.0, str_id="none", skip_update_learning_rate_param=False):
         assert warmup_steps >= 0, warmup_steps
         assert min_lr_polyfit >= 0.0, min_lr_polyfit
 
@@ -91,6 +91,7 @@ class LinearWithWarmUpLRSchedule:
         self.step = 1
         self.logger = logger
         self.str_id = str_id
+        self.skip_update_learning_rate_param = skip_update_learning_rate_param
 
         if min_lr is None:
             min_lr = min_lr_polyfit
@@ -107,7 +108,7 @@ class LinearWithWarmUpLRSchedule:
     def __call__(self, _current_progress_remaining, _update_learning_rate=False):
         lr = self.get_lr()
 
-        if not _update_learning_rate:
+        if not self.skip_update_learning_rate_param and not _update_learning_rate:
             assert np.isclose(_current_progress_remaining, 1.0), _current_progress_remaining
             assert self.step == 1, self.step
 
