@@ -239,7 +239,6 @@ def main(*main_args, **main_kwargs):
             max_data_entries_dev = max_data_entries
 
         state_representation = parsed_kwargs.get("state_representation", "representation_per_token_with_features")
-        multi_step_eval = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
         parsed_kwargs["device"] = device
         parsed_kwargs["max_icl_examples"] = max_icl_examples
         parsed_kwargs["max_data_entries"] = max_data_entries
@@ -253,10 +252,12 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
         parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
         parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
+        parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
         data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
         data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
         data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
         process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
+        multi_step_eval = parsed_kwargs["multi_step_eval"]
 
         if multi_step_eval:
             if use_vec_normalize:
@@ -396,6 +397,7 @@ def main(*main_args, **main_kwargs):
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 1e-4))
         actor_learning_rate = critic_learning_rate
         available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
+        parsed_kwargs["available_actions_strategy"] = available_actions_strategy
 
         if min_conf_debug:
             batch_size = 25 # TODO remove

@@ -74,6 +74,8 @@ def main():
     parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     parsed_kwargs["action_representation"] = "discrete_index"
+    parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
+    multi_step_eval = parsed_kwargs["multi_step_eval"]
 
     if state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
         parsed_kwargs["model_hidden_size"] *= 2
@@ -119,6 +121,7 @@ def main():
     activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
     use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
     available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
+    parsed_kwargs["available_actions_strategy"] = available_actions_strategy
 
     if use_vec_normalize:
         logger.info("Using VecNormalize for normalizing observations and rewards")
