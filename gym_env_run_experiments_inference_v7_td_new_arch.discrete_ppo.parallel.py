@@ -216,7 +216,7 @@ def main():
     net_arch = {
         #"pi": [1024, 1024],
         #"vf": [256, 256]
-        "pi": [1024, 1024],
+        "pi": [256, 256],
         "vf": [256, 256]
     } # "pi" is actor and "vf" the critic
 
@@ -268,7 +268,7 @@ def main():
             "net_arch": dict(net_arch),
             "features_extractor_class": features_extractor_class,
             "features_extractor_kwargs": features_extractor_kwargs,
-            "share_features_extractor": True,
+            "share_features_extractor": False,
             #"layer_norm_input": True,
             "layer_norm_input": True if linear_bottleneck > 0 else False,
             "layer_norm_before_activation": True,

@@ -204,6 +204,12 @@ class MTICLEnv(gym.Env):
         self.select_max_icl_examples_randomly = _dict_or_default(kwargs, "select_max_icl_examples_randomly", False)
         self.current_max_icl_examples = self.max_icl_examples
         self.process_token_time_step = bool(int(_dict_or_default(kwargs, "process_token_time_step", True)))
+        self.penalty_duplicate_example = _dict_or_default(kwargs, "penalty_duplicate_example", True)
+        self.available_actions_strategy = _dict_or_default(kwargs, "available_actions_strategy", "none")
+        self.available_actions_strategy_n = _dict_or_default(kwargs, "available_actions_strategy_n", 10)
+
+        assert self.available_actions_strategy in ("none", "bm25"), self.available_actions_strategy
+        assert self.available_actions_strategy_n > 0, self.available_actions_strategy_n
 
         if self.select_max_icl_examples_randomly:
             if self.state_representation != "representation_per_token_with_features":
@@ -252,7 +258,7 @@ class MTICLEnv(gym.Env):
             if not self.process_token_time_step:
                 self.state_window_length -= 1
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
-            self.state_window_length = 4
+            self.state_window_length = 5
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
 
@@ -431,7 +437,7 @@ class MTICLEnv(gym.Env):
         if self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             assert self.num_icl_examples is not None
 
-            self.state_dim = self.state_dim_per_token + (self.max_icl_examples + 1) + self.action_dim + self.num_icl_examples
+            self.state_dim = self.state_dim_per_token + self.num_icl_examples + (self.max_icl_examples + 1) + self.action_dim + self.num_icl_examples
 
         if self.action_representation == "discrete_index" and self.apply_l2_normalization_action:
             self.logger_wrapper(gym.logger.warn, "L2 normalization of action embeddings should not be enabled when using 'discrete_index' action representation: disabling")
@@ -936,13 +942,12 @@ class MTICLEnv(gym.Env):
             if idx == 0:
                 # action (for removing the overlapping action, if needed)
                 self.current_state_window.append(np.zeros(self.action_dim))
-            elif idx == 1 and ((self.process_token_time_step and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer")) or self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"):
-                if self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
-                    self.current_state_window.append(np.zeros(self.max_icl_examples + 1))
-                else:
-                    self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
-            elif idx == 3 and self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
-                self.current_state_window.append(np.zeros(self.num_icl_examples))
+            elif idx == 1 and self.process_token_time_step and self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
+                self.current_state_window.append(np.zeros(self.state_dim_per_token_time_step))
+            elif idx == 2 and self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+                self.current_state_window.append(np.zeros(self.max_icl_examples + 1))
+            elif idx in (1, 4) and self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+                self.current_state_window.append(np.zeros(self.num_icl_examples)) # idx 1 for defining the set of available actions, idx 4 for selected ICL examples in the current episode
             else:
                 self.current_state_window.append(np.zeros(self.state_dim_per_token))
 
@@ -1084,16 +1089,34 @@ class MTICLEnv(gym.Env):
 
             assert token_representations.shape == (1, self.state_dim_per_token), token_representations.shape
 
-            self.current_state_window[1] = np.zeros(self.max_icl_examples + 1)
-            self.current_state_window[1][0] = 1.0 # representation time step (first time step)
-            self.current_state_window[2] = token_representations[0]
+            self.current_state_window[2] = np.zeros(self.max_icl_examples + 1)
+            self.current_state_window[2][0] = 1.0 # representation time step (first time step)
+            self.current_state_window[3] = token_representations[0]
 
-            assert np.isclose(sum(self.current_state_window[1]), 1.0)
-            assert np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
+            assert np.isclose(sum(self.current_state_window[2]), 1.0)
+            assert np.allclose(self.current_state_window[4], np.zeros_like(self.current_state_window[4]))
+            assert self.current_state_window[1].shape == (self.num_icl_examples,), f"{self.current_state_window[1].shape} vs {(self.num_icl_examples,)}"
+            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[1])
-            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
-            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[3]))
+            if self.available_actions_strategy == "bm25":
+                bm25_scores = self.get_scores_bm25()
+
+                assert bm25_scores.shape == (self.num_icl_examples,), f"Expected BM25 scores shape {(self.num_icl_examples,)}, got {bm25_scores.shape}"
+
+                top_n_indices = np.argpartition(bm25_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
+                self.current_state_window[1][top_n_indices] = 1.0
+                discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+
+                assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
+                assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
+            elif self.available_actions_strategy == "none":
+                self.current_state_window[1] = np.ones_like(self.current_state_window[1])
+            else:
+                raise ValueError(f"Invalid available_actions_strategy: {self.available_actions_strategy}")
+
+            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[2])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
+            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[4]))
 
         observation = self.state_window_type_callback(self.current_state_window).copy()
         observation = self.postprocessing_observation(observation)
@@ -2325,29 +2348,29 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[data_idx][:10], self.current_state_window[data_idx][-10:])
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             assert len(observation.shape) == 1, observation.shape
-            assert np.isclose(sum(self.current_state_window[1]), 1.0)
-            assert self.current_state_window[1][self.time_step - 1] == 1.0, f"{self.current_state_window[1]} vs time_step {self.time_step}"
+            assert np.isclose(sum(self.current_state_window[2]), 1.0)
+            assert self.current_state_window[2][self.time_step - 1] == 1.0, f"{self.current_state_window[2]} vs time_step {self.time_step}"
 
-            self.current_state_window[1][self.time_step - 1] = 0.0 # reset one-hot representation of time step
+            self.current_state_window[2][self.time_step - 1] = 0.0 # reset one-hot representation of time step
 
-            assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
+            assert np.allclose(self.current_state_window[2], np.zeros_like(self.current_state_window[2]))
 
-            self.current_state_window[1][self.time_step] = 1.0 # set one-hot representation of time step
-            self.current_state_window[2] = observation
+            self.current_state_window[2][self.time_step] = 1.0 # set one-hot representation of time step
+            self.current_state_window[3] = observation
             icl_example = '\t'.join(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1])
             icl_idx = self.icl_example_representation_icl2idx[icl_example]
-            self.current_state_window[3][icl_idx] = 1.0 # set one-hot representation of selected ICL example
+            self.current_state_window[4][icl_idx] += 1.0 # set one-hot representation of selected ICL example
 
             #self.logger_wrapper(gym.logger.debug, "Selected ICL example: %s (idx: %d): %s", icl_example, icl_idx, self.current_icl_examples)
 
-            current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
+            #current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
 
-            assert np.isclose(sum(self.current_state_window[3]), len(current_icl_examples_set)), f"{self.current_state_window[3]} vs {len(current_icl_examples_set)}"
-            assert not np.allclose(self.current_state_window[3], np.zeros_like(self.current_state_window[3]))
+            assert np.isclose(sum(self.current_state_window[4]), len(self.current_icl_examples)), f"{self.current_state_window[4]} vs {len(self.current_icl_examples)}"
+            assert not np.allclose(self.current_state_window[4], np.zeros_like(self.current_state_window[4]))
 
-            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[1])
-            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[2][:10], self.current_state_window[2][-10:])
-            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[3]))
+            self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[2])
+            self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
+            self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[4]))
         else:
             self.current_state_window[self.time_step] = observation
 
@@ -2366,6 +2389,30 @@ class MTICLEnv(gym.Env):
 
         # Compute reward
         reward = self.get_reward(src_sentence, reference, translation=translation)
+
+        if self.penalty_duplicate_example and not self.is_eval_env:
+            assert self.eval_strategy_training != "actions-bm25"
+
+            all_icl_examples_str = list(map(lambda i: '\t'.join(i), self.current_icl_examples))
+            last_icl_example_str = '\t'.join(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1])
+
+            assert all_icl_examples_str.count(last_icl_example_str) > 0, last_icl_example_str
+
+            add_penalty = all_icl_examples_str.count(last_icl_example_str) > 1
+
+            if add_penalty:
+                assert False, "This should not happen due to action masking" # TODO remove?
+
+                if self.eval_strategy_training == "target_sentence_neg_ppl_reward":
+                    # [-inf, 0]
+                    penalty = 10
+                else:
+                    # [0, 100]
+                    penalty = 100
+
+                self.logger_wrapper(gym.logger.info, "Penalty (=%s) for duplicate example applied: %s -> %s", penalty, reward, reward - penalty)
+
+                reward -= penalty
 
         if terminated or truncated:
             if self.translation_candidate not in self.best_reward_seen:
@@ -2391,8 +2438,8 @@ class MTICLEnv(gym.Env):
         assert isinstance(self.data[self.translation_candidate][0], str), type(self.data[self.translation_candidate][0])
         assert isinstance(self.str2representation_valid_actions_k, list), type(self.str2representation_valid_actions_k)
         assert len(self.current_icl_examples) == self.time_step
-        assert len(self.current_icl_examples[-1]) == 2, len(self.current_icl_examples[-1])
-        assert isinstance(self.current_icl_examples[-1][0], str), type(self.current_icl_examples[-1][0])
+        assert all(len(current_icl_example[-1]) == 2 for current_icl_example in self.current_icl_examples), len(self.current_icl_examples[-1])
+        assert all(isinstance(current_icl_example[0], str) for current_icl_example in self.current_icl_examples), type(self.current_icl_examples[-1][0])
 
         src_translation_candidate = str(self.data[self.translation_candidate][0])
         focus_icl_example = str(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1][0])
@@ -2416,6 +2463,45 @@ class MTICLEnv(gym.Env):
         focus_icl_example_score = scores[focus_icl_example_idx]
 
         return focus_icl_example_score
+
+    def get_scores_bm25(self, remove_overlapping_actions=True):
+        assert isinstance(self.translation_candidate, int), type(self.translation_candidate)
+        assert isinstance(self.current_icl_examples, list), type(self.current_icl_examples)
+        assert isinstance(self.data[self.translation_candidate][0], str), type(self.data[self.translation_candidate][0])
+        assert isinstance(self.str2representation_valid_actions_k, list), type(self.str2representation_valid_actions_k)
+        assert len(self.current_icl_examples) == self.time_step
+        assert all(len(current_icl_example[-1]) == 2 for current_icl_example in self.current_icl_examples), len(self.current_icl_examples[-1])
+        assert all(isinstance(current_icl_example[0], str) for current_icl_example in self.current_icl_examples), type(self.current_icl_examples[-1][0])
+
+        src_translation_candidate = str(self.data[self.translation_candidate][0])
+
+        # BM25
+        assert len(self.data_icl_examples_bm25_corpus) >= self.current_max_icl_examples
+
+        tokenized_query = src_translation_candidate.split()
+        scores = self.data_icl_examples_bm25.get_scores(tokenized_query)
+        #top_n = self.data_icl_examples_bm25.get_top_n(tokenized_query, corpus, n=len(scores)) # debug
+
+        assert isinstance(scores, np.ndarray), f"Expected BM25 scores to be a numpy array, got {type(scores)}: {scores}"
+
+        assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
+        assert len(scores) == len(self.data_icl_examples_bm25_corpus) == len(self.data_icl_examples_bm25_corpus_tokenized), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples_bm25_corpus_tokenized)}"
+
+        if remove_overlapping_actions:
+            found_idx = 0
+
+            for idx, current_icl_example in enumerate(self.current_icl_examples):
+                current_icl_example_str = str(current_icl_example[0])
+
+                if current_icl_example_str in self.data_icl_examples_bm25_corpus:
+                    idx2 = self.data_icl_examples_bm25_corpus.index(current_icl_example_str, found_idx)
+
+                    assert idx == idx2
+
+                    found_idx = idx2 + 1
+                    scores[idx2] = 0.0
+
+        return scores
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]

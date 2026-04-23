@@ -117,12 +117,14 @@ def objective(trial):
     assert "skip_last_eval" not in parsed_kwargs
     assert "eval_strategy_training" not in parsed_kwargs
     assert "eval_strategy_eval" not in parsed_kwargs
+    assert "penalty_duplicate_example" not in parsed_kwargs
+    assert "available_actions_strategy" not in parsed_kwargs
 
     skip_last_eval = True
-    parsed_kwargs["max_steps"] = 200000
+    parsed_kwargs["max_steps"] = 2000000
     parsed_kwargs["num_envs"] = 80
     parsed_kwargs["disable_eval"] = False
-    parsed_kwargs["patience"] = 3 # rely on pruning and patience
+    parsed_kwargs["patience"] = 10 # rely on pruning and patience
     parsed_kwargs["patience"] -= 1
     parsed_kwargs["eval_freq"] = 20000
     parsed_kwargs["optuna_trial"] = trial
@@ -130,6 +132,8 @@ def objective(trial):
     parsed_kwargs["eval_strategy_training"] = "target_sentence_neg_ppl_reward"
     #parsed_kwargs["eval_strategy_eval"] = "chrf2"
     parsed_kwargs["eval_strategy_eval"] = parsed_kwargs["eval_strategy_training"]
+    parsed_kwargs["penalty_duplicate_example"] = True
+    parsed_kwargs["available_actions_strategy"] = "bm25"
 
     # Build params
     environment_args = [src_lang, trg_lang, file_data, file_data_icl_examples]
@@ -141,28 +145,32 @@ def objective(trial):
         learning_rate = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
         batch_size = trial.suggest_categorical("batch_size", [200, 400, 800])
         n_steps = trial.suggest_categorical("n_steps", [10, 20, 50, 100])
-        ent_coef = trial.suggest_float("ent_coef", 1e-4, 5e-2, log=True)
+        ent_coef = trial.suggest_float("ent_coef", 1e-2, 5e-2, log=True)
         #clip_range = trial.suggest_categorical("clip_range", [0.1, 0.2])
         clip_range = "0.1"
         #gae_lambda = trial.suggest_float("gae_lambda", 0.95, 1.0)
         gae_lambda = trial.suggest_categorical("gae_lambda", [0.8, 0.9, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99, 1.0])
         #net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium", "large"])
-        net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium"])
+        #net_arch_str = trial.suggest_categorical("net_arch", ["small", "medium"])
         #activation_fn = trial.suggest_categorical("activation_fn", ["tanh", "gelu"])
         activation_fn = "tanh"
         #linear_bottleneck = trial.suggest_categorical("linear_bottleneck", [128, 256, 512])
-        embedding_pooling_model_method_state = trial.suggest_categorical("embedding_pooling_model_method_state", ["last", "mean"])
-        #embedding_pooling_model_layer = trial.suggest_categorical("embedding_pooling_model_layer", ["50%", "60%", "70%", "80%", "90%", "100%"])
-        embedding_pooling_model_layer = "75%"
+        #embedding_pooling_model_method_state = trial.suggest_categorical("embedding_pooling_model_method_state", ["last", "mean"])
+        embedding_pooling_model_method_state = "last"
+        #embedding_pooling_model_layer = trial.suggest_categorical("embedding_pooling_model_layer", ["60%", "70%", "80%", "90%", "100%"])
+        embedding_pooling_model_layer = "70%"
         #n_epochs = trial.suggest_int("n_epochs", 4, 16)
         n_epochs = 4
         vf_coef = trial.suggest_float("vf_coef", 0.1, 1.0)
         #enable_target_kl = trial.suggest_categorical("enable_target_kl", [True, False])
         enable_target_kl = False
-        normalize = trial.suggest_categorical("normalize", ["0:0:0:0", "1:0:0:0", "1:1:0:0", "1:0:1:0", "1:1:1:0",
-                                                            "0:0:0:1", "1:0:0:1", "1:0:1:1"])
+        #normalize = trial.suggest_categorical("normalize", ["0:0:0:0", "1:0:0:0", "1:1:0:0", "1:0:1:0", "1:1:1:0",
+        #                                                    "0:0:0:1", "1:0:0:1", "1:0:1:1"])
+        #normalize = trial.suggest_categorical("normalize", ["0:0:0:1", "1:0:0:1", "1:0:1:1"])
+        normalize = "1:0:0:1"
         use_vec_normalize, subtract_reward_mean, statistics_per_sentence, multi_step_eval = normalize.split(":")
-        lr_linear_decay = bool(int(trial.suggest_categorical("lr_linear_decay", [True, False])))
+        #lr_linear_decay = bool(int(trial.suggest_categorical("lr_linear_decay", [True, False])))
+        lr_linear_decay = True
     else:
         # Debug
         learning_rate = 1e-4
@@ -171,7 +179,7 @@ def objective(trial):
         ent_coef = 1e-3
         clip_range = 0.1
         gae_lambda = 0.95
-        net_arch_str = "medium"
+        #net_arch_str = "medium"
         activation_fn = "tanh"
         embedding_pooling_model_method_state = "last"
         embedding_pooling_model_layer = "80%"
@@ -186,28 +194,35 @@ def objective(trial):
 
         # Custom hyperparameters for debugging here:
 
-    pi_factor = 4
+#    pi_factor = 4
+#
+#    if net_arch_str == "small":
+#        linear_bottleneck = 128
+#        net_arch = {
+#            "pi": [64 * pi_factor, 64 * pi_factor],
+#            "vf": [64, 64]
+#        }
+#    elif net_arch_str == "medium":
+#        linear_bottleneck = 256
+#        net_arch = {
+#            "pi": [128 * pi_factor, 128 * pi_factor],
+#            "vf": [128, 128]
+#        }
+#    elif net_arch_str == "large":
+#        linear_bottleneck = 512
+#        net_arch = {
+#            "pi": [256 * pi_factor, 256 * pi_factor],
+#            "vf": [256, 256]
+#        }
+#    else:
+#        raise ValueError(f"Invalid net_arch_str: {net_arch_str}")
 
-    if net_arch_str == "small":
-        linear_bottleneck = 128
-        net_arch = {
-            "pi": [64 * pi_factor, 64 * pi_factor],
-            "vf": [64, 64]
-        }
-    elif net_arch_str == "medium":
-        linear_bottleneck = 256
-        net_arch = {
-            "pi": [128 * pi_factor, 128 * pi_factor],
-            "vf": [128, 128]
-        }
-    elif net_arch_str == "large":
-        linear_bottleneck = 512
-        net_arch = {
-            "pi": [256 * pi_factor, 256 * pi_factor],
-            "vf": [256, 256]
-        }
-    else:
-        raise ValueError(f"Invalid net_arch_str: {net_arch_str}")
+    #linear_bottleneck = 256
+    linear_bottleneck = 0
+    net_arch = {
+        "pi": [256, 256],
+        "vf": [256, 256]
+    }
 
     # Check that the hyperparameters are not already set in parsed_kwargs
     assert "learning_rate" not in parsed_kwargs
@@ -400,7 +415,7 @@ if __name__ == "__main__":
     # MedianPruner: prune trials that have intermediate results worse than the median of previous trials at the same step (with "step" we mean the parameter passed to trial.report)
     ## n_startup_trials trials before pruning, n_warmup_steps intermediate evaluation steps before pruning, evaluate every interval_steps evaluation steps, n_min_trials reported intermediate results at each step before pruning
     ## 3 complete trials, check pruning after 1 intermediate evaluation step at each trial, check pruning every 1 step, require at least 5 intermediate results at the step before pruning in that step
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1, interval_steps=1, n_min_trials=5)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=5, interval_steps=1, n_min_trials=5)
     study = optuna.create_study(sampler=sampler, pruner=pruner, study_name=study_name, storage="sqlite:///db.ppo.sqlite3",
                                 direction="maximize", load_if_exists=load_study)
 

@@ -387,7 +387,7 @@ def main(*main_args, **main_kwargs):
         max_steps = int(parsed_kwargs.pop("max_steps", 1000000))
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
-        linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 512))
+        linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
         activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
         n_epochs = int(parsed_kwargs.pop("n_epochs", 11))
@@ -395,6 +395,7 @@ def main(*main_args, **main_kwargs):
         target_kl = parsed_kwargs.pop("target_kl", None)
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 1e-4))
         actor_learning_rate = critic_learning_rate
+        available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
 
         if min_conf_debug:
             batch_size = 25 # TODO remove
@@ -450,6 +451,7 @@ def main(*main_args, **main_kwargs):
             normalize_kwargs["subtract_reward_mean"] = subtract_reward_mean
             normalize_kwargs["statistics_per_sentence"] = statistics_per_sentence
             normalize_kwargs["start_idx"] = 1 + (max_icl_examples + 1) # at the beginning: discrete action (avoid duplicates) and time step representation
+            normalize_kwargs["start_idx"] += len(data_icl_examples) # one-hot representation of available actions
             normalize_kwargs["offset"] = state_dim_per_token
             env = VecNormalizeRangeAndRewardSentenceLevelICL(env, training=True, **normalize_kwargs)
             # eval env should not be normalized. Training statistics should be used for normalizing the eval env
@@ -469,7 +471,7 @@ def main(*main_args, **main_kwargs):
                 #"vf": [512, 256]
                 #"pi": [1024, 512],
                 #"vf": [1024, 512]
-                "pi": [1024, 1024],
+                "pi": [256, 256],
                 "vf": [256, 256]
             } # "pi" is actor and "vf" the critic
 
@@ -512,6 +514,9 @@ def main(*main_args, **main_kwargs):
             elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
                 step_embeddings = 0
                 step_embeddings_dim = 0
+
+                if available_actions_strategy != "none":
+                    skip_n += len(data_icl_examples) # one-hot representation of available actions
             else:
                 raise Exception()
 
@@ -530,6 +535,12 @@ def main(*main_args, **main_kwargs):
         #layer_norm_input = True
         layer_norm_input = True if linear_bottleneck > 0 else False
         layer_norm_before_activation = True
+        #icl_mask_duplicates_last_values_from_state = 0
+        icl_mask_duplicates_last_values_from_state = len(data_icl_examples)
+        temperature = 2.0 if available_actions_strategy == "none" else 1.0
+        check_general_actions_masking = True
+
+        logger.info("temperature: %s, available_actions_strategy: %s", temperature, available_actions_strategy)
 
         model_class = PPO
         model = model_class(
@@ -552,9 +563,12 @@ def main(*main_args, **main_kwargs):
                 "layer_norm_before_activation": layer_norm_before_activation,
                 "features_extractor_class": features_extractor_class,
                 "features_extractor_kwargs": features_extractor_kwargs,
-                "share_features_extractor": True,
+                "share_features_extractor": False,
                 "activation_fn": activation_fn,
                 "avoid_overlapping_action": avoid_overlapping_action, # It assumes that the first element in the observation is the representation of the source sentence being translated
+                "icl_mask_duplicates_last_values_from_state": icl_mask_duplicates_last_values_from_state,
+                "temperature": temperature,
+                "check_general_actions_masking": check_general_actions_masking,
             },
             gamma=gamma,
             device=device,
@@ -648,9 +662,12 @@ def main(*main_args, **main_kwargs):
                     "layer_norm_before_activation": layer_norm_before_activation,
                     "features_extractor_class": features_extractor_class,
                     "features_extractor_kwargs": features_extractor_kwargs,
-                    "share_features_extractor": True,
+                    "share_features_extractor": False,
                     "activation_fn": activation_fn,
                     "avoid_overlapping_action": avoid_overlapping_action,
+                    "icl_mask_duplicates_last_values_from_state": icl_mask_duplicates_last_values_from_state,
+                    "temperature": temperature,
+                    "check_general_actions_masking": check_general_actions_masking,
                 },
             )
 
