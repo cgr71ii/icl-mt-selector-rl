@@ -127,7 +127,11 @@ def tokenize_prompts(prompts, tokenizer, lock=None):
 
     return inputs
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None, target_sentence_n_tokens=None, gamma=0.8):
+_gamma_factor_values = None
+
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None, target_sentence_n_tokens=None, gamma=0.8, log_instead_of_ppl=True):
+    global _gamma_factor_values
+
     # Tokenize
     if lock is not None:
         lock.acquire()
@@ -301,7 +305,9 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
         assert len(target_sentence_n_tokens) == len(prompts)
 
         max_n_tokens = max(target_sentence_n_tokens) + 1
-        gamma_factor_values = torch.tensor([gamma ** i for i in range(max_n_tokens)]).to(token_log_probs.device)
+
+        if _gamma_factor_values is None or _gamma_factor_values.shape[0] < max_n_tokens:
+            _gamma_factor_values = torch.tensor([gamma ** i for i in range(max_n_tokens)]).to(token_log_probs.device)
 
         # Get the probs only for the target sentence tokens for the valid tokens
         for i, n_tokens in enumerate(target_sentence_n_tokens):
@@ -311,15 +317,20 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
             target_only = valid_positions[-n_tokens:]
 
-            assert len(target_only) == len(gamma_factor_values[:n_tokens]), f"Length of target_only and gamma_factor_values must match for input idx {i}: {len(target_only)} vs {len(gamma_factor_values[:n_tokens])}"
+            assert len(target_only) == len(_gamma_factor_values[:n_tokens]), f"Length of target_only and _gamma_factor_values must match for input idx {i}: {len(target_only)} vs {len(_gamma_factor_values[:n_tokens])}"
 
-            target_only = target_only * gamma_factor_values[:n_tokens]
+            #target_only = target_only * _gamma_factor_values[:n_tokens]
 
             if pooling == "target_sentence_probs_mean_reward":
                 # exp(log_prob) -> probabilities
-                rewards.append(target_only.exp().mean())
+                rewards.append((target_only.exp() * _gamma_factor_values[:n_tokens]).sum() / _gamma_factor_values[:n_tokens].sum())
             elif pooling == "target_sentence_neg_ppl_reward":
-                rewards.append((target_only.mean() * -1).exp() * -1)
+                value = (target_only * _gamma_factor_values[:n_tokens]).sum() / _gamma_factor_values[:n_tokens].sum()
+
+                if not log_instead_of_ppl:
+                    value = (value * -1).exp() * -1
+
+                rewards.append(value)
             else:
                 raise ValueError(f"Unknown pooling method: {pooling}")
 
