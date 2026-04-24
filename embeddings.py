@@ -290,6 +290,8 @@ def get_similarity(embeddings1, embeddings2, metric="cosine"):
 
     distance = pairwise_distances(embeddings1, embeddings2, metric=metric) # cosine_distance if metric=="cosine"
 
+    assert distance.shape == (embeddings1.shape[0], embeddings2.shape[0]), f"Distance matrix shape must be (embeddings1.shape[0], embeddings2.shape[0]), got {distance.shape} vs {(embeddings1.shape[0], embeddings2.shape[0])}"
+
     if metric == "cosine":
         similarity = 1.0 - distance # 1 - cosine_distance = cosine_similarity
 

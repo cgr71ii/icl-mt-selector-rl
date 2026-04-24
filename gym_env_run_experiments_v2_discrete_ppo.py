@@ -173,18 +173,18 @@ def main(*main_args, **main_kwargs):
         # default values
         min_conf_debug = False
         #min_conf_debug = True
-        num_envs = max(1, int(parsed_kwargs.pop("num_envs", 8)))
+        num_envs = max(1, int(parsed_kwargs.pop("num_envs", 80)))
         device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
         max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
         disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
         store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
-        n_steps = int(parsed_kwargs.pop("n_steps", 100))
-        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.03755))
+        n_steps = int(parsed_kwargs.pop("n_steps", 50))
+        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.005))
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
-        skip_last_eval = parsed_kwargs.pop("skip_last_eval", False) # it will return a reward of 0
-        use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
-        subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 1)))
-        statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 1)))
+        skip_last_eval = parsed_kwargs.pop("skip_last_eval", True) # it will return a reward of 0
+        use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
+        subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 0)))
+        statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 0)))
         lr_linear_decay = bool(int(parsed_kwargs.pop("lr_linear_decay", 1)))
 
         if min_conf_debug:
@@ -244,20 +244,25 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["max_data_entries"] = max_data_entries
         parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
         parsed_kwargs["state_representation"] = state_representation
-        parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "chrf2")
-        parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
+        parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "target_sentence_neg_ppl_reward")
+        parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "target_sentence_neg_ppl_reward")
         parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
         parsed_kwargs["repeat_translation_candidates_times"] = int(parsed_kwargs.get("repeat_translation_candidates_times", 0))
         parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
         parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
         parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
         parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
-        parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
+        parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 1)))
+        parsed_kwargs["embedding_pooling_model_method_state"] = parsed_kwargs.get("embedding_pooling_model_method_state", "last")
+        parsed_kwargs["embedding_pooling_model_layer"] = parsed_kwargs.get("embedding_pooling_model_layer", -1)
+        parsed_kwargs["available_actions_strategy"] = parsed_kwargs.get("available_actions_strategy", "bm25")
+        parsed_kwargs["available_actions_strategy_n"] = int(parsed_kwargs.get("available_actions_strategy_n", 5))
         data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
         data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
         data_icl_examples = data_icl_examples[:max_data_icl_examples_entries if max_data_icl_examples_entries > 0 else None]
         process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
         multi_step_eval = parsed_kwargs["multi_step_eval"]
+        available_actions_strategy = parsed_kwargs["available_actions_strategy"]
 
         if multi_step_eval:
             if use_vec_normalize:
@@ -389,15 +394,13 @@ def main(*main_args, **main_kwargs):
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
-        activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
+        activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "relu"))
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
-        n_epochs = int(parsed_kwargs.pop("n_epochs", 11))
-        vf_coef = float(parsed_kwargs.pop("vf_coef", 0.187))
+        n_epochs = int(parsed_kwargs.pop("n_epochs", 4))
+        vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
         target_kl = parsed_kwargs.pop("target_kl", None)
-        critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 1e-4))
+        critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 5e-5))
         actor_learning_rate = critic_learning_rate
-        available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
-        parsed_kwargs["available_actions_strategy"] = available_actions_strategy
 
         if min_conf_debug:
             batch_size = 25 # TODO remove
@@ -489,7 +492,7 @@ def main(*main_args, **main_kwargs):
 
         #min_critic_learning_rate = critic_learning_rate / 10
         min_critic_learning_rate = 0.0 if lr_linear_decay else critic_learning_rate
-        total_steps = max(int(max_steps / num_envs + 0.5), 1)
+        total_steps = max(int(max_steps / num_envs / n_steps + 0.5), 1)
         critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
         clip_range = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=clip_range, total_steps=total_steps, logger=logger, min_lr_polyfit=clip_range / 10, str_id="clip_range", skip_update_learning_rate_param=True)
         ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=ent_coef / 100, str_id="ent_coef", skip_update_learning_rate_param=True)

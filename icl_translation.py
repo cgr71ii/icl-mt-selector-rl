@@ -129,7 +129,7 @@ def tokenize_prompts(prompts, tokenizer, lock=None):
 
 _gamma_factor_values = None
 
-def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None, target_sentence_n_tokens=None, gamma=0.8, log_instead_of_ppl=True):
+def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, lock=None, _inputs=None, _masks=None, target_sentence_n_tokens=None, gamma=1.0, log_prob_instead_of_neg_ppl=False):
     global _gamma_factor_values
 
     # Tokenize
@@ -327,7 +327,7 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
             elif pooling == "target_sentence_neg_ppl_reward":
                 value = (target_only * _gamma_factor_values[:n_tokens]).sum() / _gamma_factor_values[:n_tokens].sum()
 
-                if not log_instead_of_ppl:
+                if not log_prob_instead_of_neg_ppl:
                     value = (value * -1).exp() * -1
 
                 rewards.append(value)

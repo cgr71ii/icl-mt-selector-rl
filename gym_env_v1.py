@@ -20,6 +20,7 @@ import requests
 import faiss
 from sacrebleu.metrics import CHRF
 import rank_bm25
+import embeddings as embeddings_utils
 
 # https://stable-baselines3.readthedocs.io/en/master/guide/custom_env.html
 # https://gymnasium.farama.org/api/env/
@@ -208,7 +209,7 @@ class MTICLEnv(gym.Env):
         self.available_actions_strategy = _dict_or_default(kwargs, "available_actions_strategy", "none")
         self.available_actions_strategy_n = _dict_or_default(kwargs, "available_actions_strategy_n", 10)
 
-        assert self.available_actions_strategy in ("none", "bm25"), self.available_actions_strategy
+        assert self.available_actions_strategy in ("none", "bm25", "sonar_embeddings", "bm25_and_sonar_embeddings"), self.available_actions_strategy
         assert self.available_actions_strategy_n > 0, self.available_actions_strategy_n
 
         if self.select_max_icl_examples_randomly:
@@ -526,6 +527,14 @@ class MTICLEnv(gym.Env):
 
     def get_int_env_id(self):
         try:
+            if self.custom_env_id.startswith("eval_"):
+                # find last '_' and get the substring after it
+                last_underscore_idx = self.custom_env_id.rfind('_')
+
+                assert last_underscore_idx > 0, f"Unexpected custom_env_id format: {self.custom_env_id}"
+
+                return int(self.custom_env_id[last_underscore_idx + 1:])
+
             return int(self.custom_env_id)
         except:
             return None
@@ -914,6 +923,62 @@ class MTICLEnv(gym.Env):
 
             self.close_action_representation_server()
 
+        if self.available_actions_strategy in ("sonar_embeddings", "bm25_and_sonar_embeddings"):
+            # TODO inneficient to compute the representations for all sentences and ICL examples again if self.action_representation != "discrete_index"
+
+            embedding_model = "SONAR" # TODO parameter
+
+            self.logger_wrapper(gym.logger.info, "Obtaining SONAR representations for %d ICL examples", len(self.data_icl_examples))
+
+            # data_icl_examples_corpus_embeddings
+            src_sentences = [data_icl_example[0] for data_icl_example in self.data_icl_examples]
+            data = [{"src": utils.encode_base64(s), "trg": None} for s in src_sentences]
+            representations = []
+
+            for idx, batch in enumerate(utils.batchify(data, self.batch_size)):
+                response_result_src = self._get_action_representation_external(idx, batch, self.src_lang, embedding_model, "src")
+
+                assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
+
+                representations.append(response_result_src)
+
+            representations = torch.cat(representations, dim=0)
+
+            assert representations.shape[0] == len(self.data_icl_examples)
+
+            self.data_icl_examples_corpus_embeddings = representations.numpy()
+
+            self.logger_wrapper(gym.logger.info, "Obtaining SONAR representations for %d sentences", len(self.data))
+
+            # data_src_sentences_corpus_embeddings
+            src_sentences = [d[0] for d in self.data]
+            data = [{"src": utils.encode_base64(s), "trg": None} for s in src_sentences]
+            representations = []
+
+            for idx, batch in enumerate(utils.batchify(data, self.batch_size)):
+                response_result_src = self._get_action_representation_external(idx, batch, self.src_lang, embedding_model, "src")
+
+                assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
+
+                representations.append(response_result_src)
+
+            representations = torch.cat(representations, dim=0)
+
+            assert representations.shape[0] == len(self.data)
+
+            self.data_src_sentences_corpus_embeddings = representations.numpy()
+
+            self.logger_wrapper(gym.logger.info, "Computing SONAR similarity matrix (cosine similarity)")
+
+            # data_similarity_matrix_embeddings
+            self.data_similarity_matrix_embeddings = embeddings_utils.get_similarity(self.data_src_sentences_corpus_embeddings, self.data_icl_examples_corpus_embeddings, metric="cosine")
+
+            assert self.data_similarity_matrix_embeddings.shape == (len(self.data), len(self.data_icl_examples)), f"Data similarity matrix shape mismatch: {self.data_similarity_matrix_embeddings.shape} vs {(len(self.data), len(self.data_icl_examples))}"
+
+            time.sleep(self.initial_time_sleep)
+
+            self.close_action_representation_server()
+
         self.logger_wrapper(gym.logger.info, "Data loaded and kNN populated")
 
     def _hard_reset(self, seed=None, options=None):
@@ -1098,17 +1163,41 @@ class MTICLEnv(gym.Env):
             assert self.current_state_window[1].shape == (self.num_icl_examples,), f"{self.current_state_window[1].shape} vs {(self.num_icl_examples,)}"
             assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-            if self.available_actions_strategy == "bm25":
-                bm25_scores = self.get_scores_bm25()
 
-                assert bm25_scores.shape == (self.num_icl_examples,), f"Expected BM25 scores shape {(self.num_icl_examples,)}, got {bm25_scores.shape}"
+            if self.available_actions_strategy in ("bm25", "sonar_embeddings", "bm25_and_sonar_embeddings"):
+                if self.available_actions_strategy in ("bm25", "bm25_and_sonar_embeddings"):
+                    bm25_scores = self.get_scores_bm25()
 
-                top_n_indices = np.argpartition(bm25_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
-                self.current_state_window[1][top_n_indices] = 1.0
-                discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+                    assert bm25_scores.shape == (self.num_icl_examples,), f"Expected BM25 scores shape {(self.num_icl_examples,)}, got {bm25_scores.shape}"
 
-                assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
-                assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
+                    top_n_indices = np.argpartition(bm25_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
+                    top_n_indices_sorted = top_n_indices[np.argsort(bm25_scores[top_n_indices])[::-1]] # sort the top n indices by score in descending order
+                    self.current_state_window[1][top_n_indices] = 1.0
+                    discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+
+                    assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
+                    assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
+
+                    src_sentence = self.data[self.translation_candidate][0]
+                    most_similar_icl_example = self.data_icl_examples[top_n_indices_sorted[0]][0]
+
+                    self.logger_wrapper(gym.logger.info, "BM25 available actions strategy: most similar (src) ICL example (src sentence: %s): %s (BM25 score: %.4f)", src_sentence, most_similar_icl_example, bm25_scores[top_n_indices_sorted[0]])
+
+                if self.available_actions_strategy in ("sonar_embeddings", "bm25_and_sonar_embeddings"):
+                    embeddings_scores = self.get_scores_embeddings()
+
+                    assert embeddings_scores.shape == (self.num_icl_examples,), f"Expected Sonar embeddings scores shape {(self.num_icl_examples,)}, got {embeddings_scores.shape}"
+
+                    top_n_indices = np.argpartition(embeddings_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
+                    top_n_indices_sorted = top_n_indices[np.argsort(embeddings_scores[top_n_indices])[::-1]] # sort the top n indices by score in descending order
+                    self.current_state_window[1][top_n_indices] = 1.0
+                    discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+
+                    assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"Sonar embeddings available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
+                    #assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
+
+                    self.logger_wrapper(gym.logger.info, "Sonar embeddings available actions strategy: most similar (src) ICL example (src sentence: %s): %s (cosine similarity: %.4f)", src_sentence, most_similar_icl_example, embeddings_scores[top_n_indices_sorted[0]])
+
             elif self.available_actions_strategy == "none":
                 self.current_state_window[1] = np.ones_like(self.current_state_window[1])
             else:
@@ -1385,7 +1474,7 @@ class MTICLEnv(gym.Env):
         return response_result
 
     def _get_action_representation_external(self, idx, batch, lang, embedding_name, batch_side_key):
-        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
+        #assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         assert batch_side_key in ("src", "trg"), f"Invalid batch_side_key: {batch_side_key}"
 
         if embedding_name == "llm":
@@ -1427,7 +1516,7 @@ class MTICLEnv(gym.Env):
         return response_result
 
     def close_action_representation_server(self):
-        assert self.action_representation != "discrete_index", "not support discrete_index action representation"
+        #assert self.action_representation != "discrete_index", "not support discrete_index action representation"
         payload = []
 
         for name in (self.action_representation_src_sentence, self.action_representation_trg_sentence):
@@ -2464,7 +2553,7 @@ class MTICLEnv(gym.Env):
 
         return focus_icl_example_score
 
-    def get_scores_bm25(self, remove_overlapping_actions=True):
+    def get_scores_bm25(self, remove_overlapping_actions=False, remove_source_sentence_from_scores=True):
         assert isinstance(self.translation_candidate, int), type(self.translation_candidate)
         assert isinstance(self.current_icl_examples, list), type(self.current_icl_examples)
         assert isinstance(self.data[self.translation_candidate][0], str), type(self.data[self.translation_candidate][0])
@@ -2483,7 +2572,6 @@ class MTICLEnv(gym.Env):
         #top_n = self.data_icl_examples_bm25.get_top_n(tokenized_query, corpus, n=len(scores)) # debug
 
         assert isinstance(scores, np.ndarray), f"Expected BM25 scores to be a numpy array, got {type(scores)}: {scores}"
-
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
         assert len(scores) == len(self.data_icl_examples_bm25_corpus) == len(self.data_icl_examples_bm25_corpus_tokenized), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples_bm25_corpus_tokenized)}"
 
@@ -2500,6 +2588,33 @@ class MTICLEnv(gym.Env):
 
                     found_idx = idx2 + 1
                     scores[idx2] = 0.0
+
+        if remove_source_sentence_from_scores and src_translation_candidate in self.data_icl_examples_bm25_corpus:
+            src_translation_candidate_idx = self.data_icl_examples_bm25_corpus.index(src_translation_candidate)
+            argmax_score = np.argmax(scores)
+
+            assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest BM25 score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
+
+            scores[src_translation_candidate_idx] = 0.0
+
+        return scores
+
+    def get_scores_embeddings(self, remove_source_sentence_from_scores=True):
+        # Embeddings similarity (cosine similarity)
+        src_translation_candidate = str(self.data[self.translation_candidate][0])
+        scores = self.data_similarity_matrix_embeddings[self.translation_candidate]
+
+        assert isinstance(scores, np.ndarray), f"Expected BM25 scores to be a numpy array, got {type(scores)}: {scores}"
+        assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
+        assert len(scores) == len(self.data_icl_examples) == len(self.data_icl_examples), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples)}"
+
+        if remove_source_sentence_from_scores and src_translation_candidate in self.data_icl_examples_bm25_corpus: # we use self.data_icl_examples_bm25_corpus as the source sentence is guaranteed to be in this corpus (as it is used for BM25)
+            src_translation_candidate_idx = self.data_icl_examples_bm25_corpus.index(src_translation_candidate)
+            argmax_score = np.argmax(scores)
+
+            assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest BM25 score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
+
+            scores[src_translation_candidate_idx] = 0.0
 
         return scores
 
