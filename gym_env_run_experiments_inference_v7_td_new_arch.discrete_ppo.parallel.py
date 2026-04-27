@@ -1,4 +1,5 @@
 
+from collections import Counter
 import sys
 import random
 import logging
@@ -75,7 +76,6 @@ def main():
     parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
     parsed_kwargs["action_representation"] = "discrete_index"
     parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
-    multi_step_eval = parsed_kwargs["multi_step_eval"]
 
     if state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
         parsed_kwargs["model_hidden_size"] *= 2
@@ -118,10 +118,11 @@ def main():
     # custom
     logger = utils.set_up_logging_logger(logging.getLogger("MT_ICL.rl_experiments"), level=logging.DEBUG)
     linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
-    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "tanh"))
-    use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 0)))
-    available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25")
+    activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "relu"))
+    use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
+    available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25_and_sonar_embeddings")
     parsed_kwargs["available_actions_strategy"] = available_actions_strategy
+    parsed_kwargs["available_actions_strategy_n"] = int(parsed_kwargs.get("available_actions_strategy_n", 5))
 
     if use_vec_normalize:
         logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -316,26 +317,44 @@ def main():
 
     episode_rewards = []
     episode_lengths = []
+    episode_available_actions_strategy_statistics = {}
     all_rewards_data = env_eval_dev.unwrapped.get_attr("rewards")
+    all_available_actions_strategy_statistics_data = env_eval_dev.unwrapped.get_attr("available_actions_strategy_statistics")
     all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
     all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
     assert len(all_rewards_data) == num_envs
-    assert len(all_rewards) == len(n_eval_episodes)
-    assert len(all_source_sentences_and_refs_data) == len(n_eval_episodes)
+    assert len(all_rewards) == len(n_eval_episodes) == num_envs
+    assert len(all_source_sentences_and_refs_data) == len(n_eval_episodes) == num_envs
+    assert len(all_available_actions_strategy_statistics_data) == len(n_eval_episodes) == num_envs
 
-    for i in range(num_envs):
+    for i in range(num_envs): # env
         # Remove extra evaluations
         assert isinstance(all_source_sentences_and_refs_data[i], list)
+        assert isinstance(all_available_actions_strategy_statistics_data[i], list)
 
         all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
         all_source_sentences_and_refs_data[i] = all_source_sentences_and_refs_data[i][:n_eval_episodes[i]]
+        all_available_actions_strategy_statistics_data[i] = all_available_actions_strategy_statistics_data[i][:n_eval_episodes[i]]
 
         assert len(all_rewards[i]) == n_eval_episodes[i]
         assert len(all_source_sentences_and_refs_data[i]) == n_eval_episodes[i]
+        assert len(all_available_actions_strategy_statistics_data[i]) == n_eval_episodes[i]
 
-        for j in range(len(all_rewards[i])):
+        for j in range(len(all_rewards[i])): # episode
             assert isinstance(all_rewards[i][j], list)
+            assert isinstance(all_available_actions_strategy_statistics_data[i][j], list)
+            assert all(isinstance(d, list) for d in all_available_actions_strategy_statistics_data[i][j]), f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
+
+            for k in range(len(all_available_actions_strategy_statistics_data[i][j])): # step
+                assert isinstance(all_available_actions_strategy_statistics_data[i][j][k], list), f"{i} {j} {k} {all_available_actions_strategy_statistics_data[i][j]}"
+                assert all(isinstance(d, tuple) for d in all_available_actions_strategy_statistics_data[i][j][k]), f"{i} {j} {k} {all_available_actions_strategy_statistics_data[i][j]}"
+
+                if k + 1 not in episode_available_actions_strategy_statistics:
+                    episode_available_actions_strategy_statistics[k + 1] = []
+
+                only_strategy_and_rank = [(d[0], d[1]) for d in all_available_actions_strategy_statistics_data[i][j][k]]
+                episode_available_actions_strategy_statistics[k + 1].extend(only_strategy_and_rank)
 
             episode_lengths.append(len(all_rewards[i][j]))
 
@@ -346,12 +365,24 @@ def main():
 
             if len(set(all_source_sentences_and_refs_data[i][j])) == 0:
                 del all_source_sentences_and_refs_data[i][j]
+
+                assert len(all_available_actions_strategy_statistics_data[i][j]) == 0, f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
             else:
                 all_source_sentences_and_refs_data[i][j] = all_source_sentences_and_refs_data[i][j][0]
+
+                assert len(all_available_actions_strategy_statistics_data[i][j]) > 0, f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
 
         episode_rewards.extend(all_rewards[i])
 
         assert len(episode_rewards) == len(episode_lengths)
+
+    for episode_step in episode_available_actions_strategy_statistics:
+        # count (strategy, rank) for each episode step
+        episode_available_actions_strategy_statistics[episode_step] = Counter(episode_available_actions_strategy_statistics[episode_step])
+
+        print(f"episode_available_actions_strategy_statistics: episode step {episode_step}: {episode_available_actions_strategy_statistics[episode_step]}")
+
+    sys.stdout.flush()
 
     all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
 

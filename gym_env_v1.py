@@ -292,7 +292,7 @@ class MTICLEnv(gym.Env):
         ## Other API parameters
         self.embedding_pooling_model_method_state = "last"
         self.embedding_pooling_model_method_action = "mean"
-        self.embedding_pooling_model_layer = _dict_or_default(kwargs, "embedding_pooling_model_layer", "75%")
+        self.embedding_pooling_model_layer = str(_dict_or_default(kwargs, "embedding_pooling_model_layer", "-1"))
 
         #if self.state_representation == "representation_per_token":
         if self.state_representation == "representation_per_token_with_features":
@@ -410,6 +410,8 @@ class MTICLEnv(gym.Env):
         self.state_dim_per_token_time_step = _dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
         self.multi_step_eval = bool(int(_dict_or_default(kwargs, "multi_step_eval", False))) # if True, the reward will be calculated at each step and not only at the end of the episode
         self.rewards = [] # for gathering the rewards from outside the environment
+        self.available_actions_strategy_statistics = [] # outside the environment
+        self.available_actions_strategy_current_episode_data = {}
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
 
@@ -642,6 +644,25 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info,
                             "Action in time step #%d (reward: %s; %s: %s; max_icl_examples: %s; translation_candidate: %s): %s",
                             self.time_step, reward, "similarity" if self.knn_distance_ip else "distance", action_url_distance, self.current_max_icl_examples, self.translation_candidate, action_url)
+
+        if self.available_actions_strategy in ("bm25", "sonar_embeddings", "bm25_and_sonar_embeddings"):
+            # Compute available_actions_strategy_current_episode_data statistics
+            src_sentence = self.data[self.translation_candidate][0]
+            current_icl_example = str(action_url)
+
+            assert src_sentence in self.available_actions_strategy_current_episode_data
+            assert current_icl_example in self.available_actions_strategy_current_episode_data[src_sentence], f"{src_sentence} | {current_icl_example}"
+            assert len(self.available_actions_strategy_current_episode_data[src_sentence][current_icl_example]) > 0
+
+            self.available_actions_strategy_statistics[-1].append([]) # -1 -> current episode, append new list for step-level statistics as the selected ICL example can belong to different strategies (e.g. BM25, SONAR embeddings, etc.) and we want to gather statistics for each of them separately
+
+            for strategy in self.available_actions_strategy_current_episode_data[src_sentence][current_icl_example]:
+                assert len(self.available_actions_strategy_current_episode_data[src_sentence][current_icl_example]) > 0
+
+                rank = self.available_actions_strategy_current_episode_data[src_sentence][current_icl_example][strategy]["rank"]
+                score = self.available_actions_strategy_current_episode_data[src_sentence][current_icl_example][strategy]["score"]
+
+                self.available_actions_strategy_statistics[-1][-1].append((strategy, rank, score))
 
         #previous_observation = self.state_window_type_callback(self.current_state_window) # former: before adding the new observation, code which have been removed
         ## ...
@@ -938,8 +959,6 @@ class MTICLEnv(gym.Env):
             for idx, batch in enumerate(utils.batchify(data, self.batch_size)):
                 response_result_src = self._get_action_representation_external(idx, batch, self.src_lang, embedding_model, "src")
 
-                assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
-
                 representations.append(response_result_src)
 
             representations = torch.cat(representations, dim=0)
@@ -957,8 +976,6 @@ class MTICLEnv(gym.Env):
 
             for idx, batch in enumerate(utils.batchify(data, self.batch_size)):
                 response_result_src = self._get_action_representation_external(idx, batch, self.src_lang, embedding_model, "src")
-
-                assert response_result_src.shape[1] == self.model_hidden_size_action_src_sentence, f"Source representation shape mismatch: {response_result_src.shape} vs model_hidden_size_action_src_sentence {self.model_hidden_size_action_src_sentence}"
 
                 representations.append(response_result_src)
 
@@ -1063,6 +1080,7 @@ class MTICLEnv(gym.Env):
         self.translation_candidate = self.get_translation_candidate() # this function must be called at the beginning of each episode
 
         self.rewards.append([])
+        self.available_actions_strategy_statistics.append([])
 
         # Get the initial observation
         src_sentence = self.data[self.translation_candidate][0]
@@ -1163,8 +1181,12 @@ class MTICLEnv(gym.Env):
             assert self.current_state_window[1].shape == (self.num_icl_examples,), f"{self.current_state_window[1].shape} vs {(self.num_icl_examples,)}"
             assert np.allclose(self.current_state_window[1], np.zeros_like(self.current_state_window[1]))
 
-
             if self.available_actions_strategy in ("bm25", "sonar_embeddings", "bm25_and_sonar_embeddings"):
+                src_sentence = self.data[self.translation_candidate][0]
+
+                if src_sentence not in self.available_actions_strategy_current_episode_data:
+                    self.available_actions_strategy_current_episode_data[src_sentence] = {}
+
                 if self.available_actions_strategy in ("bm25", "bm25_and_sonar_embeddings"):
                     bm25_scores = self.get_scores_bm25()
 
@@ -1178,10 +1200,22 @@ class MTICLEnv(gym.Env):
                     assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
                     assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
 
-                    src_sentence = self.data[self.translation_candidate][0]
                     most_similar_icl_example = self.data_icl_examples[top_n_indices_sorted[0]][0]
 
                     self.logger_wrapper(gym.logger.info, "BM25 available actions strategy: most similar (src) ICL example (src sentence: %s): %s (BM25 score: %.4f)", src_sentence, most_similar_icl_example, bm25_scores[top_n_indices_sorted[0]])
+
+                    for rank, top_n_idx in enumerate(top_n_indices_sorted, 1):
+                        icl_example = '\t'.join(self.data_icl_examples[top_n_idx])
+                        score = bm25_scores[top_n_idx]
+
+                        if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
+                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
+
+                        if "bm25" not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
+                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"] = {"rank": rank, "score": score}
+                        else:
+                            assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"]["rank"], f"BM25 available actions strategy: inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['bm25']['rank']}"
+                            assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"]["score"]), f"BM25 available actions strategy: inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['bm25']['score']}"
 
                 if self.available_actions_strategy in ("sonar_embeddings", "bm25_and_sonar_embeddings"):
                     embeddings_scores = self.get_scores_embeddings()
@@ -1196,7 +1230,24 @@ class MTICLEnv(gym.Env):
                     assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"Sonar embeddings available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
                     #assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
 
+                    most_similar_icl_example = self.data_icl_examples[top_n_indices_sorted[0]][0]
+
                     self.logger_wrapper(gym.logger.info, "Sonar embeddings available actions strategy: most similar (src) ICL example (src sentence: %s): %s (cosine similarity: %.4f)", src_sentence, most_similar_icl_example, embeddings_scores[top_n_indices_sorted[0]])
+
+                    for rank, top_n_idx in enumerate(top_n_indices_sorted, 1):
+                        icl_example = '\t'.join(self.data_icl_examples[top_n_idx])
+                        score = embeddings_scores[top_n_idx]
+
+                        if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
+                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
+
+                        if "sonar_embeddings" not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
+                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"] = {"rank": rank, "score": score}
+                        else:
+                            assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["rank"], f"Sonar embeddings available actions strategy: inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['rank']}"
+                            assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["score"]), f"Sonar embeddings available actions strategy: inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['score']}"
+
+                gym.logger.info("self.available_actions_strategy_current_episode_data['%s']: %s", src_sentence, self.available_actions_strategy_current_episode_data[src_sentence])
 
             elif self.available_actions_strategy == "none":
                 self.current_state_window[1] = np.ones_like(self.current_state_window[1])
@@ -2575,6 +2626,8 @@ class MTICLEnv(gym.Env):
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
         assert len(scores) == len(self.data_icl_examples_bm25_corpus) == len(self.data_icl_examples_bm25_corpus_tokenized), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples_bm25_corpus_tokenized)}"
 
+        scores = scores.copy()
+
         if remove_overlapping_actions:
             found_idx = 0
 
@@ -2608,11 +2661,14 @@ class MTICLEnv(gym.Env):
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
         assert len(scores) == len(self.data_icl_examples) == len(self.data_icl_examples), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples)}"
 
+        scores = scores.copy()
+
         if remove_source_sentence_from_scores and src_translation_candidate in self.data_icl_examples_bm25_corpus: # we use self.data_icl_examples_bm25_corpus as the source sentence is guaranteed to be in this corpus (as it is used for BM25)
             src_translation_candidate_idx = self.data_icl_examples_bm25_corpus.index(src_translation_candidate)
             argmax_score = np.argmax(scores)
 
-            assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest BM25 score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
+            assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
+            assert np.isclose(scores[src_translation_candidate_idx], 1.0), f"Expected source sentence to have a score close to 1.0, got {scores[src_translation_candidate_idx]}"
 
             scores[src_translation_candidate_idx] = 0.0
 

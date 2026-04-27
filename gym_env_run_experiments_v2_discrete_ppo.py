@@ -6,6 +6,7 @@ import random
 import logging
 from datetime import datetime
 import copy
+from typing import Counter
 
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -45,20 +46,37 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
         episode_lengths = l["episode_lengths"]
         episode_rewards = []
         episode_lengths = []
+        episode_available_actions_strategy_statistics = {}
         all_rewards_data = env.unwrapped.get_attr("rewards")
+        all_available_actions_strategy_statistics_data = env.unwrapped.get_attr("available_actions_strategy_statistics")
         #gym.logger.error("wasd8686: %s", all_rewards)
         all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
-        assert len(all_rewards) == len(n_eval_episodes)
+        assert len(all_rewards) == len(n_eval_episodes) == n_envs
+        assert len(all_available_actions_strategy_statistics_data) == len(n_eval_episodes) == n_envs
 
-        for i in range(n_envs):
+        for i in range(n_envs): # env
             # Remove extra evaluations
             all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
+            all_available_actions_strategy_statistics_data[i] = all_available_actions_strategy_statistics_data[i][:n_eval_episodes[i]]
 
             assert len(all_rewards[i]) == n_eval_episodes[i]
+            assert len(all_available_actions_strategy_statistics_data[i]) == n_eval_episodes[i]
 
-            for j in range(len(all_rewards[i])):
+            for j in range(len(all_rewards[i])): # episode
                 assert isinstance(all_rewards[i][j], list)
+                assert isinstance(all_available_actions_strategy_statistics_data[i][j], list)
+                assert all(isinstance(d, list) for d in all_available_actions_strategy_statistics_data[i][j]), f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
+
+                for k in range(len(all_available_actions_strategy_statistics_data[i][j])): # step
+                    assert isinstance(all_available_actions_strategy_statistics_data[i][j][k], list), f"{i} {j} {k} {all_available_actions_strategy_statistics_data[i][j]}"
+                    assert all(isinstance(d, tuple) for d in all_available_actions_strategy_statistics_data[i][j][k]), f"{i} {j} {k} {all_available_actions_strategy_statistics_data[i][j]}"
+
+                    if k + 1 not in episode_available_actions_strategy_statistics:
+                        episode_available_actions_strategy_statistics[k + 1] = []
+
+                    only_strategy_and_rank = [(d[0], d[1]) for d in all_available_actions_strategy_statistics_data[i][j][k]]
+                    episode_available_actions_strategy_statistics[k + 1].extend(only_strategy_and_rank)
 
                 episode_lengths.append(len(all_rewards[i][j]))
 
@@ -67,6 +85,14 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
             episode_rewards.extend(all_rewards[i])
 
             assert len(episode_rewards) == len(episode_lengths)
+
+        for episode_step in episode_available_actions_strategy_statistics:
+            # count (strategy, rank) for each episode step
+            episode_available_actions_strategy_statistics[episode_step] = Counter(episode_available_actions_strategy_statistics[episode_step])
+
+            print(f"episode_available_actions_strategy_statistics: episode step {episode_step}: {episode_available_actions_strategy_statistics[episode_step]}")
+
+        sys.stdout.flush()
 
         if optuna_trial is not None:
             optuna_trial.report(np.mean(episode_rewards), step=step)
@@ -84,24 +110,39 @@ def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
 
     def inner_callback_after_eval(env):
         all_rewards_data = env.get_attr("rewards") # reset rewards
+        all_available_actions_strategy_statistics_data = env.get_attr("available_actions_strategy_statistics") # reset available actions strategy statistics
         all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
         assert len(all_rewards_data) == n_envs
+        assert len(all_available_actions_strategy_statistics_data) == n_envs
 
-        for n1 in range(n_envs):
+        for n1 in range(n_envs): # env
             assert isinstance(all_source_sentences_and_refs_data[n1], list)
+            assert isinstance(all_available_actions_strategy_statistics_data[n1], list)
+
             all_source_sentences_and_refs_data[n1] = all_source_sentences_and_refs_data[n1][:n_eval_episodes[n1]]
+            all_available_actions_strategy_statistics_data[n1] = all_available_actions_strategy_statistics_data[n1][:n_eval_episodes[n1]]
 
             assert len(all_source_sentences_and_refs_data[n1]) == n_eval_episodes[n1]
+            assert len(all_available_actions_strategy_statistics_data[n1]) == n_eval_episodes[n1]
 
-            for n2 in range(len(all_source_sentences_and_refs_data[n1])):
+            for n2 in range(len(all_source_sentences_and_refs_data[n1])): # episode
                 assert isinstance(all_source_sentences_and_refs_data[n1][n2], list), f"{n1} {n2} {all_source_sentences_and_refs_data[n1]}"
                 assert len(set(all_source_sentences_and_refs_data[n1][n2])) in (0, 1), all_source_sentences_and_refs_data[n1][n2]
+                assert isinstance(all_available_actions_strategy_statistics_data[n1][n2], list), f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1]}"
+
+                for n3 in range(len(all_available_actions_strategy_statistics_data[n1][n2])): # step
+                    assert isinstance(all_available_actions_strategy_statistics_data[n1][n2][n3], list), f"{n1} {n2} {n3} {all_available_actions_strategy_statistics_data[n1][n2]}"
+                    assert all(isinstance(d, tuple) for d in all_available_actions_strategy_statistics_data[n1][n2][n3]), f"{n1} {n2} {n3} {all_available_actions_strategy_statistics_data[n1][n2]}"
 
                 if len(set(all_source_sentences_and_refs_data[n1][n2])) == 0:
                     del all_source_sentences_and_refs_data[n1][n2]
+
+                    assert len(all_available_actions_strategy_statistics_data[n1][n2]) == 0, f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1][n2]}"
                 else:
                     all_source_sentences_and_refs_data[n1][n2] = all_source_sentences_and_refs_data[n1][n2][0]
+
+                    assert len(all_available_actions_strategy_statistics_data[n1][n2]) > 0, f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1][n2]}"
 
         all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
 
@@ -110,6 +151,7 @@ def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
 
         env.env_method("reset_fake", increase_reset_times=False)
         env.set_attr("rewards", []) # reset rewards
+        env.set_attr("available_actions_strategy_statistics", []) # reset available actions strategy statistics
 
     return inner_callback_after_eval
 
@@ -245,17 +287,17 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["max_data_icl_examples_entries"] = max_data_icl_examples_entries
         parsed_kwargs["state_representation"] = state_representation
         parsed_kwargs["eval_strategy_training"] = parsed_kwargs.get("eval_strategy_training", "target_sentence_neg_ppl_reward")
-        parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "target_sentence_neg_ppl_reward")
+        parsed_kwargs["eval_strategy_eval"] = parsed_kwargs.get("eval_strategy_eval", "chrf2")
         parsed_kwargs["repeat_translation_candidates"] = parsed_kwargs.get("repeat_translation_candidates", False)
         parsed_kwargs["repeat_translation_candidates_times"] = int(parsed_kwargs.get("repeat_translation_candidates_times", 0))
         parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
         parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
         parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
         parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
-        parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 1)))
+        parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
         parsed_kwargs["embedding_pooling_model_method_state"] = parsed_kwargs.get("embedding_pooling_model_method_state", "last")
         parsed_kwargs["embedding_pooling_model_layer"] = parsed_kwargs.get("embedding_pooling_model_layer", -1)
-        parsed_kwargs["available_actions_strategy"] = parsed_kwargs.get("available_actions_strategy", "bm25")
+        parsed_kwargs["available_actions_strategy"] = parsed_kwargs.get("available_actions_strategy", "bm25_and_sonar_embeddings")
         parsed_kwargs["available_actions_strategy_n"] = int(parsed_kwargs.get("available_actions_strategy_n", 5))
         data_to_be_translated_training = data_to_be_translated_training[:max_data_entries if max_data_entries > 0 else None]
         data_to_be_translated_dev = data_to_be_translated_dev[:max_data_entries_dev if max_data_entries_dev > 0 else None]
