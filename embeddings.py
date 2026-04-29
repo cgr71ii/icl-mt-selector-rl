@@ -252,13 +252,22 @@ def get_embeddings(name, sentences, lang, filename=None, data_dir=None, suffix_n
         if name == "SONAR":
             assert lang in flores_lang_mapping, f"Language not supported for SONAR embeddings: {lang}"
 
-            from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
+            if model is None:
+                from sonar.inference_pipelines.text import TextToEmbeddingModelPipeline
 
-            model_name_or_path = "text_sonar_basic_encoder"
-            t2vec_model = TextToEmbeddingModelPipeline(encoder=model_name_or_path, tokenizer=model_name_or_path, device=device) if model is None else model
-            model = t2vec_model
+                model_name_or_path = "text_sonar_basic_encoder"
+                model = TextToEmbeddingModelPipeline(encoder=model_name_or_path, tokenizer=model_name_or_path, device=device)
+
             _lang = flores_lang_mapping[lang]
-            embeddings = t2vec_model.predict(sentences, source_lang=_lang, max_seq_len=max_seq_len, batch_size=batch_size) # https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L211
+            embeddings = model.predict(sentences, source_lang=_lang, max_seq_len=max_seq_len, batch_size=batch_size) # https://github.com/facebookresearch/SONAR/blob/3a95f405d86e2d51ba23154c8a413df34949f1c3/sonar/inference_pipelines/text.py#L211
+            embeddings = embeddings.detach().cpu()
+        elif name.startswith("microsoft/harrier-oss-v1-"):
+            if model is None:
+                from sentence_transformers import SentenceTransformer
+
+                model = SentenceTransformer(name, device=device)
+
+            embeddings = model.encode(sentences, prompt="Instruct: Retrieve semantically similar text\nQuery: ", convert_to_numpy=False, convert_to_tensor=True, show_progress_bar=False)
             embeddings = embeddings.detach().cpu()
         else:
             raise Exception(f"Embeddings not supported: {name}")
