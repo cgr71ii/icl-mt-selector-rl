@@ -225,8 +225,8 @@ def main(*main_args, **main_kwargs):
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
         skip_last_eval = parsed_kwargs.pop("skip_last_eval", True) # it will return a reward of 0
         use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
-        subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 0)))
-        statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 0)))
+        subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 1)))
+        statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 1)))
         lr_linear_decay = bool(int(parsed_kwargs.pop("lr_linear_decay", 1)))
 
         if min_conf_debug:
@@ -310,12 +310,16 @@ def main(*main_args, **main_kwargs):
             if use_vec_normalize:
                 assert not subtract_reward_mean
 
-        if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+        if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
             process_token_time_step = False
 
         parsed_kwargs["process_token_time_step"] = process_token_time_step
         parsed_kwargs["num_icl_examples"] = len(data_icl_examples)
         parsed_kwargs["action_representation"] = "discrete_index"
+
+        if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+            logger.warning("Forcing use_vec_normalize to False for state representation %s", state_representation)
+            parsed_kwargs["apply_l2_normalization_state"] = False
 
         if use_vec_normalize:
             logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -478,6 +482,7 @@ def main(*main_args, **main_kwargs):
         state_dim_per_token = env_eval_dev_unwrapped.get_attr("state_dim_per_token")[0]
         state_window_length = env_eval_dev_unwrapped.get_attr("state_window_length")[0]
         state_dim_per_token_time_step = env_eval_dev_unwrapped.get_attr("state_dim_per_token_time_step")[0]
+        model_hidden_size_embedding = env_eval_dev_unwrapped.get_attr("model_hidden_size_embedding")[0]
         callbacks = []
 
         if state_representation == "representation_per_token_with_features":
@@ -488,18 +493,25 @@ def main(*main_args, **main_kwargs):
             n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
+        elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+            n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
         else:
             n_features = 0
 
         if use_vec_normalize:
-            assert state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"
+            assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example")
 
             normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_obs": True, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 10.0}
             normalize_kwargs["subtract_reward_mean"] = subtract_reward_mean
             normalize_kwargs["statistics_per_sentence"] = statistics_per_sentence
             normalize_kwargs["start_idx"] = 1 + (max_icl_examples + 1) # at the beginning: discrete action (avoid duplicates) and time step representation
             normalize_kwargs["start_idx"] += len(data_icl_examples) # one-hot representation of available actions
-            normalize_kwargs["offset"] = state_dim_per_token
+
+            if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+                normalize_kwargs["offset"] = model_hidden_size_embedding * 2
+            else:
+                normalize_kwargs["offset"] = state_dim_per_token
+
             env = VecNormalizeRangeAndRewardSentenceLevelICL(env, training=True, **normalize_kwargs)
             # eval env should not be normalized. Training statistics should be used for normalizing the eval env
             ## However, we initialize the eval env with training statistics, but later are updated!
@@ -560,7 +572,7 @@ def main(*main_args, **main_kwargs):
 
                 if process_token_time_step:
                     skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-            elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+            elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
                 step_embeddings = 0
                 step_embeddings_dim = 0
 

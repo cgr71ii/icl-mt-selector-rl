@@ -85,7 +85,7 @@ def main():
 
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
 
-    if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+    if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
         process_token_time_step = False
 
     parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -123,6 +123,9 @@ def main():
     available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25_and_sonar_embeddings")
     parsed_kwargs["available_actions_strategy"] = available_actions_strategy
     parsed_kwargs["available_actions_strategy_n"] = int(parsed_kwargs.get("available_actions_strategy_n", 5))
+
+    if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+        parsed_kwargs["apply_l2_normalization_state"] = False
 
     if use_vec_normalize:
         logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -197,6 +200,7 @@ def main():
     state_dim_per_token = env_eval_dev.unwrapped.get_attr("state_dim_per_token")[0]
     state_window_length = env_eval_dev.unwrapped.get_attr("state_window_length")[0]
     state_dim_per_token_time_step = env_eval_dev.unwrapped.get_attr("state_dim_per_token_time_step")[0]
+    model_hidden_size_embedding = env_eval_dev.unwrapped.get_attr("model_hidden_size_embedding")[0]
 
     if state_representation == "representation_per_token_with_features":
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
@@ -206,6 +210,8 @@ def main():
         n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
     elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
+    elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+        n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
     else:
         n_features = 0
 
@@ -215,7 +221,7 @@ def main():
 
     if use_vec_normalize:
         assert utils.file_exists(vec_normalize_path), f"VecNormalize file not found: {vec_normalize_path}"
-        assert state_representation == "representation_one_hot_representation_time_and_selected_icl_examples"
+        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example")
 
         env_eval_dev = VecNormalizeRangeAndRewardSentenceLevelICL.load(vec_normalize_path, env_eval_dev)
 
@@ -258,7 +264,7 @@ def main():
 
             if process_token_time_step:
                 skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-        elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
+        elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
             step_embeddings = 0
             step_embeddings_dim = 0
 
