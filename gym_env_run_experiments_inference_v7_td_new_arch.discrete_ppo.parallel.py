@@ -120,6 +120,7 @@ def main():
     linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
     activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "relu"))
     use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
+    store_rewards_fn = parsed_kwargs.pop("store_rewards_fn", None)
     available_actions_strategy = parsed_kwargs.get("available_actions_strategy", "bm25_and_sonar_embeddings")
     parsed_kwargs["available_actions_strategy"] = available_actions_strategy
     parsed_kwargs["available_actions_strategy_n"] = int(parsed_kwargs.get("available_actions_strategy_n", 5))
@@ -327,24 +328,24 @@ def main():
     all_rewards_data = env_eval_dev.unwrapped.get_attr("rewards")
     all_available_actions_strategy_statistics_data = env_eval_dev.unwrapped.get_attr("available_actions_strategy_statistics")
     all_rewards = list([[[r2[0] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
-    all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
+    src_mt_ref_sentences = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
     assert len(all_rewards_data) == num_envs
     assert len(all_rewards) == len(n_eval_episodes) == num_envs
-    assert len(all_source_sentences_and_refs_data) == len(n_eval_episodes) == num_envs
+    assert len(src_mt_ref_sentences) == len(n_eval_episodes) == num_envs
     assert len(all_available_actions_strategy_statistics_data) == len(n_eval_episodes) == num_envs
 
     for i in range(num_envs): # env
         # Remove extra evaluations
-        assert isinstance(all_source_sentences_and_refs_data[i], list)
+        assert isinstance(src_mt_ref_sentences[i], list)
         assert isinstance(all_available_actions_strategy_statistics_data[i], list)
 
         all_rewards[i] = all_rewards[i][:n_eval_episodes[i]]
-        all_source_sentences_and_refs_data[i] = all_source_sentences_and_refs_data[i][:n_eval_episodes[i]]
+        src_mt_ref_sentences[i] = src_mt_ref_sentences[i][:n_eval_episodes[i]]
         all_available_actions_strategy_statistics_data[i] = all_available_actions_strategy_statistics_data[i][:n_eval_episodes[i]]
 
         assert len(all_rewards[i]) == n_eval_episodes[i]
-        assert len(all_source_sentences_and_refs_data[i]) == n_eval_episodes[i]
+        assert len(src_mt_ref_sentences[i]) == n_eval_episodes[i]
         assert len(all_available_actions_strategy_statistics_data[i]) == n_eval_episodes[i]
 
         for j in range(len(all_rewards[i])): # episode
@@ -362,21 +363,35 @@ def main():
                 only_strategy_and_rank = [(d[0], d[1]) for d in all_available_actions_strategy_statistics_data[i][j][k]]
                 episode_available_actions_strategy_statistics[k + 1].extend(only_strategy_and_rank)
 
-            episode_lengths.append(len(all_rewards[i][j]))
+            if len(all_rewards[i][j]) == 0:
+                #del all_rewards[i][j]
 
-            all_rewards[i][j] = sum(all_rewards[i][j])
+                assert len(src_mt_ref_sentences[i][j]) == 0, f"{i} {j} {src_mt_ref_sentences[i][j]}"
+            else:
+                episode_lengths.append(len(all_rewards[i][j]))
 
-            assert isinstance(all_source_sentences_and_refs_data[i][j], list), f"{i} {j} {all_source_sentences_and_refs_data[i]}"
-            assert len(set(all_source_sentences_and_refs_data[i][j])) in (0, 1), all_source_sentences_and_refs_data[i][j]
+                all_rewards[i][j] = sum(all_rewards[i][j])
 
-            if len(set(all_source_sentences_and_refs_data[i][j])) == 0:
-                del all_source_sentences_and_refs_data[i][j]
+                assert len(src_mt_ref_sentences[i][j]) > 0, f"{i} {j} {src_mt_ref_sentences[i][j]}"
+
+            assert isinstance(src_mt_ref_sentences[i][j], list), f"{i} {j} {src_mt_ref_sentences[i]}"
+
+            src_sentences = [src.split("\t")[0] for src in src_mt_ref_sentences[i][j]]
+
+            assert len(set(src_sentences)) in (0, 1), src_mt_ref_sentences[i][j]
+
+            if len(src_mt_ref_sentences[i][j]) == 0:
+                del src_mt_ref_sentences[i][j]
 
                 assert len(all_available_actions_strategy_statistics_data[i][j]) == 0, f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
+                assert isinstance(all_rewards[i][j], list), f"{i} {j} {all_rewards[i][j]}"
+                assert len(all_rewards[i][j]) == 0, f"{i} {j} {all_rewards[i][j]}"
             else:
-                all_source_sentences_and_refs_data[i][j] = all_source_sentences_and_refs_data[i][j][0]
+                src_mt_ref_sentences[i][j] = src_mt_ref_sentences[i][j][-1] # the last step is the one with the mt
 
                 assert len(all_available_actions_strategy_statistics_data[i][j]) > 0, f"{i} {j} {all_available_actions_strategy_statistics_data[i][j]}"
+                assert isinstance(all_rewards[i][j], (int, float)), f"{i} {j} {all_rewards[i][j]}"
+                assert isinstance(src_mt_ref_sentences[i][j], str), f"{i} {j} {src_mt_ref_sentences[i][j]}"
 
         episode_rewards.extend(all_rewards[i])
 
@@ -390,10 +405,15 @@ def main():
 
     sys.stdout.flush()
 
-    all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
+    src_mt_ref_sentences = [x for xs in src_mt_ref_sentences for x in xs]
+    src_and_ref_sentences = [s.split("\t")[0] + "\t" + s.split("\t")[2] for s in src_mt_ref_sentences]
 
-    assert len(all_source_sentences_and_refs_data) == len(data_to_be_translated), f"{len(all_source_sentences_and_refs_data)} vs {len(data_to_be_translated)}"
-    assert set(all_source_sentences_and_refs_data) == set(data_to_be_translated)
+    assert len(src_mt_ref_sentences) == len(data_to_be_translated), f"{len(src_mt_ref_sentences)} vs {len(data_to_be_translated)}"
+    assert len(src_and_ref_sentences) == len(data_to_be_translated), f"{len(src_and_ref_sentences)} vs {len(data_to_be_translated)}"
+    assert len(set(src_and_ref_sentences)) == len(set(data_to_be_translated)), f"{len(set(src_and_ref_sentences))} vs {len(set(data_to_be_translated))}"
+    assert set(src_and_ref_sentences) == set(data_to_be_translated), f"src_and_ref_sentences not matching data_to_be_translated: {set(src_and_ref_sentences).symmetric_difference(set(data_to_be_translated))}" # symmetric_difference -> elements not shared
+    assert len(episode_rewards) == len(src_mt_ref_sentences), f"{len(episode_rewards)} vs {len(src_mt_ref_sentences)}"
+    assert len(episode_lengths) == len(src_mt_ref_sentences), f"{len(episode_lengths)} vs {len(src_mt_ref_sentences)}"
 
     mean_reward = np.mean(episode_rewards)
     std_reward = np.std(episode_rewards)
@@ -401,6 +421,19 @@ def main():
     std_length = np.std(episode_lengths)
 
     print(f"Mean reward dev: {mean_reward} +/- {std_reward} (length: {mean_length} +/- {std_length})")
+
+    if store_rewards_fn is not None:
+        src, mt, ref = zip(*[s.split("\t") for s in src_mt_ref_sentences])
+
+        # sort by source sentence to make it easier to analyze results
+        sorted_data = sorted(zip(src, mt, ref, episode_rewards, episode_lengths), key=lambda x: x[0])
+        src, mt, ref, episode_rewards, episode_lengths = zip(*sorted_data)
+
+        with open(store_rewards_fn, "wt") as fd:
+            for episode_reward, episode_length, s, m, r in zip(episode_rewards, episode_lengths, src, mt, ref):
+                fd.write(f"{episode_reward}\t{episode_length}\t{s}\t{m}\t{r}\n")
+
+        print(f"Rewards and lengths stored in (sorted by source sentence): {store_rewards_fn}")
 
 if __name__ == "__main__":
     main()

@@ -78,9 +78,13 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
                     only_strategy_and_rank = [(d[0], d[1]) for d in all_available_actions_strategy_statistics_data[i][j][k]]
                     episode_available_actions_strategy_statistics[k + 1].extend(only_strategy_and_rank)
 
-                episode_lengths.append(len(all_rewards[i][j]))
+                if len(all_rewards[i][j]) == 0:
+                    #del all_rewards[i][j]
+                    pass
+                else:
+                    episode_lengths.append(len(all_rewards[i][j]))
 
-                all_rewards[i][j] = sum(all_rewards[i][j])
+                    all_rewards[i][j] = sum(all_rewards[i][j])
 
             episode_rewards.extend(all_rewards[i])
 
@@ -111,43 +115,51 @@ def get_callback_after_eval(n_envs, data_to_be_translated, n_eval_episodes):
     def inner_callback_after_eval(env):
         all_rewards_data = env.get_attr("rewards") # reset rewards
         all_available_actions_strategy_statistics_data = env.get_attr("available_actions_strategy_statistics") # reset available actions strategy statistics
-        all_source_sentences_and_refs_data = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
+        src_mt_ref_sentences = list([[[r2[1] for r2 in r] for r in rewards_data] for rewards_data in all_rewards_data])
 
-        assert len(all_rewards_data) == n_envs
-        assert len(all_available_actions_strategy_statistics_data) == n_envs
+        assert len(all_rewards_data) == len(n_eval_episodes) == n_envs
+        assert len(src_mt_ref_sentences) == len(n_eval_episodes) == n_envs
+        assert len(all_available_actions_strategy_statistics_data) == len(n_eval_episodes) == n_envs
 
         for n1 in range(n_envs): # env
-            assert isinstance(all_source_sentences_and_refs_data[n1], list)
+            assert isinstance(src_mt_ref_sentences[n1], list)
             assert isinstance(all_available_actions_strategy_statistics_data[n1], list)
 
-            all_source_sentences_and_refs_data[n1] = all_source_sentences_and_refs_data[n1][:n_eval_episodes[n1]]
+            src_mt_ref_sentences[n1] = src_mt_ref_sentences[n1][:n_eval_episodes[n1]]
             all_available_actions_strategy_statistics_data[n1] = all_available_actions_strategy_statistics_data[n1][:n_eval_episodes[n1]]
 
-            assert len(all_source_sentences_and_refs_data[n1]) == n_eval_episodes[n1]
+            assert len(src_mt_ref_sentences[n1]) == n_eval_episodes[n1]
             assert len(all_available_actions_strategy_statistics_data[n1]) == n_eval_episodes[n1]
 
-            for n2 in range(len(all_source_sentences_and_refs_data[n1])): # episode
-                assert isinstance(all_source_sentences_and_refs_data[n1][n2], list), f"{n1} {n2} {all_source_sentences_and_refs_data[n1]}"
-                assert len(set(all_source_sentences_and_refs_data[n1][n2])) in (0, 1), all_source_sentences_and_refs_data[n1][n2]
+            for n2 in range(len(src_mt_ref_sentences[n1])): # episode
+                assert isinstance(src_mt_ref_sentences[n1][n2], list), f"{n1} {n2} {src_mt_ref_sentences[n1]}"
                 assert isinstance(all_available_actions_strategy_statistics_data[n1][n2], list), f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1]}"
 
                 for n3 in range(len(all_available_actions_strategy_statistics_data[n1][n2])): # step
                     assert isinstance(all_available_actions_strategy_statistics_data[n1][n2][n3], list), f"{n1} {n2} {n3} {all_available_actions_strategy_statistics_data[n1][n2]}"
                     assert all(isinstance(d, tuple) for d in all_available_actions_strategy_statistics_data[n1][n2][n3]), f"{n1} {n2} {n3} {all_available_actions_strategy_statistics_data[n1][n2]}"
 
-                if len(set(all_source_sentences_and_refs_data[n1][n2])) == 0:
-                    del all_source_sentences_and_refs_data[n1][n2]
+                src_sentences = [src.split("\t")[0] for src in src_mt_ref_sentences[n1][n2]]
+
+                assert len(set(src_sentences)) in (0, 1), src_mt_ref_sentences[n1][n2]
+
+                if len(src_mt_ref_sentences[n1][n2]) == 0:
+                    del src_mt_ref_sentences[n1][n2]
 
                     assert len(all_available_actions_strategy_statistics_data[n1][n2]) == 0, f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1][n2]}"
                 else:
-                    all_source_sentences_and_refs_data[n1][n2] = all_source_sentences_and_refs_data[n1][n2][0]
+                    src_mt_ref_sentences[n1][n2] = src_mt_ref_sentences[n1][n2][-1]
 
                     assert len(all_available_actions_strategy_statistics_data[n1][n2]) > 0, f"{n1} {n2} {all_available_actions_strategy_statistics_data[n1][n2]}"
+                    assert isinstance(src_mt_ref_sentences[n1][n2], str), f"{n1} {n2} {src_mt_ref_sentences[n1][n2]}"
 
-        all_source_sentences_and_refs_data = [x for xs in all_source_sentences_and_refs_data for x in xs]
+        src_mt_ref_sentences = [x for xs in src_mt_ref_sentences for x in xs]
+        src_and_ref_sentences = [s.split("\t")[0] + "\t" + s.split("\t")[2] for s in src_mt_ref_sentences]
 
-        assert len(all_source_sentences_and_refs_data) == len(data_to_be_translated), f"{len(all_source_sentences_and_refs_data)} vs {len(data_to_be_translated)}"
-        assert set(all_source_sentences_and_refs_data) == set(data_to_be_translated)
+        assert len(src_mt_ref_sentences) == len(data_to_be_translated), f"{len(src_mt_ref_sentences)} vs {len(data_to_be_translated)}"
+        assert len(src_and_ref_sentences) == len(data_to_be_translated), f"{len(src_and_ref_sentences)} vs {len(data_to_be_translated)}"
+        assert len(set(src_and_ref_sentences)) == len(set(data_to_be_translated)), f"{len(set(src_and_ref_sentences))} vs {len(set(data_to_be_translated))}"
+        assert set(src_and_ref_sentences) == set(data_to_be_translated), f"src_and_ref_sentences not matching data_to_be_translated: {set(src_and_ref_sentences).symmetric_difference(set(data_to_be_translated))}" # symmetric_difference -> elements not shared
 
         env.env_method("reset_fake", increase_reset_times=False)
         env.set_attr("rewards", []) # reset rewards
@@ -228,6 +240,23 @@ def main(*main_args, **main_kwargs):
         subtract_reward_mean = bool(int(parsed_kwargs.pop("subtract_reward_mean", 1)))
         statistics_per_sentence = bool(int(parsed_kwargs.pop("statistics_per_sentence", 1)))
         lr_linear_decay = bool(int(parsed_kwargs.pop("lr_linear_decay", 1)))
+        init_return_dict_normalization_fn = parsed_kwargs.pop("init_return_dict_normalization_fn", None)
+        init_return_dict = {}
+        reward_division = float(parsed_kwargs.get("reward_division", 1.0))
+
+        if init_return_dict_normalization_fn is not None:
+            with open(init_return_dict_normalization_fn, "rt") as fd:
+                for l in fd:
+                    l = l.rstrip("\r\n").split("\t")
+
+                    assert len(l) > 1, l
+
+                    c, r = l[0], l[-1]
+
+                    if c not in init_return_dict:
+                        init_return_dict[c] = []
+
+                    init_return_dict[c].append(float(r) / reward_division)
 
         if min_conf_debug:
             logger.warning("min_conf_debug is set to True, which overrides some parameters to make the training faster. DEBUG purpose only!")
@@ -501,16 +530,19 @@ def main(*main_args, **main_kwargs):
         if use_vec_normalize:
             assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example")
 
-            normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_obs": True, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 10.0}
+            normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 100.0}
             normalize_kwargs["subtract_reward_mean"] = subtract_reward_mean
             normalize_kwargs["statistics_per_sentence"] = statistics_per_sentence
             normalize_kwargs["start_idx"] = 1 + (max_icl_examples + 1) # at the beginning: discrete action (avoid duplicates) and time step representation
             normalize_kwargs["start_idx"] += len(data_icl_examples) # one-hot representation of available actions
+            normalize_kwargs["init_return_dict"] = init_return_dict
 
             if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
                 normalize_kwargs["offset"] = model_hidden_size_embedding * 2
+                normalize_kwargs["norm_obs"] = False
             else:
                 normalize_kwargs["offset"] = state_dim_per_token
+                normalize_kwargs["norm_obs"] = True
 
             env = VecNormalizeRangeAndRewardSentenceLevelICL(env, training=True, **normalize_kwargs)
             # eval env should not be normalized. Training statistics should be used for normalizing the eval env
