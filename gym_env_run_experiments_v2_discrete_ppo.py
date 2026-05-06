@@ -335,11 +335,13 @@ def main(*main_args, **main_kwargs):
         multi_step_eval = parsed_kwargs["multi_step_eval"]
         available_actions_strategy = parsed_kwargs["available_actions_strategy"]
 
+        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"), "Some values such as icl_mask_duplicates_last_values_from_state expect this configuration"
+
         if multi_step_eval:
             if use_vec_normalize:
                 assert not subtract_reward_mean
 
-        if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
+        if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
             process_token_time_step = False
 
         parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -469,13 +471,15 @@ def main(*main_args, **main_kwargs):
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
-        activation_fn = utils.get_activation_cls(parsed_kwargs.pop("activation_fn", "relu"))
+        activation_fn_str = parsed_kwargs.pop("activation_fn", "relu")
+        activation_fn = utils.get_activation_cls(activation_fn_str)
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
         n_epochs = int(parsed_kwargs.pop("n_epochs", 4))
         vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
         target_kl = parsed_kwargs.pop("target_kl", None)
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 5e-5))
         actor_learning_rate = critic_learning_rate
+        use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
 
         if min_conf_debug:
             batch_size = 25 # TODO remove
@@ -524,11 +528,13 @@ def main(*main_args, **main_kwargs):
             n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
             n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
+        elif state_representation == "representation_per_token_with_features_v2":
+            n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(data_icl_examples)
         else:
             n_features = 0
 
         if use_vec_normalize:
-            assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example")
+            #assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2")
 
             normalize_kwargs = {"gamma": gamma, "epsilon": 1e-8, "norm_reward": True, "clip_obs": 10.0, "clip_reward": 100.0}
             normalize_kwargs["subtract_reward_mean"] = subtract_reward_mean
@@ -538,7 +544,10 @@ def main(*main_args, **main_kwargs):
             normalize_kwargs["init_return_dict"] = init_return_dict
 
             if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
-                normalize_kwargs["offset"] = model_hidden_size_embedding * 2
+                normalize_kwargs["offset"] = model_hidden_size_embedding * 2 # TODO is necessary?
+                normalize_kwargs["norm_obs"] = False
+            elif state_representation == "representation_per_token_with_features_v2":
+                # TODO set offset?
                 normalize_kwargs["norm_obs"] = False
             else:
                 normalize_kwargs["offset"] = state_dim_per_token
@@ -567,6 +576,15 @@ def main(*main_args, **main_kwargs):
             } # "pi" is actor and "vf" the critic
 
         logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
+
+        if use_transformer:
+            logger.info("Transformer enabled: using transformer+MLP")
+
+            net_arch = {
+                "pi": [],
+                "vf": [],
+                "empty_layers": True, # custom code
+            }
 
         warmup_steps = 0
         #actor_learning_rate = 1e-3
@@ -604,14 +622,55 @@ def main(*main_args, **main_kwargs):
 
                 if process_token_time_step:
                     skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-            elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
+            elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
                 step_embeddings = 0
                 step_embeddings_dim = 0
-
-                if available_actions_strategy != "none":
-                    skip_n += len(data_icl_examples) # one-hot representation of available actions
+                skip_n += len(data_icl_examples) # one-hot representation of available actions
             else:
                 raise Exception()
+
+            if use_transformer:
+                assert state_representation == "representation_per_token_with_features_v2"
+                assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
+
+                transformer_d_model = 256
+                dropout_p = 0.0
+                transformer_kwargs = {
+                    "d_model": transformer_d_model,
+                    "nhead": 4,
+                    "dim_feedforward": transformer_d_model * 4,
+                    "nlayers": 2,
+                    "projection_in": state_dim_per_token,
+                    "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
+                    "activation": activation_fn_str,
+                    "bias": True,
+                    "norm_first": True,
+                    "initial_layer_norm": True,
+                    "initial_layer_norm_first": True,
+                    "embedding_dropout": dropout_p, # it can increse the variance in the training
+                    "dropout_p": dropout_p, # we can disable dropout setting to 0.0 if needed
+                    "projection_out_dropout_p": dropout_p,
+                    "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
+                    "skip_n_word_embeddings_from_observation": "0:0",
+                    "expected_seq_len": ((state_window_length - 5) * state_dim_per_token) // state_dim_per_token,
+                    "last_layer_norm": False,
+                    "last_linear_layer": True,
+                    "check_zeros": True,
+                    "remove_first_column_of_zeros": True,
+                    "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
+                    "step_embeddings_from_observation": True, # we expect the time step information to be included in the observation, so we can use it for the step embeddings
+                    "action_embeddings": len(data_icl_examples),
+                    "max_actions": max_icl_examples,
+                    "l2_norm": False,
+                    "mean_pooling": True,
+                    "reward_embeddings": 0,
+                    "init_zeros_last_layer": False,
+                    "use_first_n_tokens": -1,
+                    "initial_layer_norm_first_additional_layer_norm_after_projection": False,
+                    "str_id": "feature_extractor",
+                }
+            else:
+                transformer_kwargs = {}
 
             features_extractor_kwargs = {
                 "n": n,
@@ -622,6 +681,8 @@ def main(*main_args, **main_kwargs):
                 "step_embeddings_dim": step_embeddings_dim,
                 "linear_bottleneck": linear_bottleneck,
                 "activation_fn": activation_fn,
+                "use_transformer": use_transformer,
+                "transformer_kwargs": transformer_kwargs,
             }
 
         avoid_overlapping_action = True
