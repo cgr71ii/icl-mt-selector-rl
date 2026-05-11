@@ -233,7 +233,7 @@ def main(*main_args, **main_kwargs):
         disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
         store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
         n_steps = int(parsed_kwargs.pop("n_steps", 50))
-        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.005))
+        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.01))
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
         skip_last_eval = parsed_kwargs.pop("skip_last_eval", True) # it will return a reward of 0
         use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
@@ -335,7 +335,7 @@ def main(*main_args, **main_kwargs):
         multi_step_eval = parsed_kwargs["multi_step_eval"]
         available_actions_strategy = parsed_kwargs["available_actions_strategy"]
 
-        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"), "Some values such as icl_mask_duplicates_last_values_from_state expect this configuration"
+        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"), f"Some values such as icl_mask_duplicates_last_values_from_state expect this configuration: {state_representation}"
 
         if multi_step_eval:
             if use_vec_normalize:
@@ -350,6 +350,9 @@ def main(*main_args, **main_kwargs):
 
         if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
             logger.warning("Forcing use_vec_normalize to False for state representation %s", state_representation)
+            parsed_kwargs["apply_l2_normalization_state"] = False
+
+        if state_representation == "representation_per_token_with_features_v2":
             parsed_kwargs["apply_l2_normalization_state"] = False
 
         if use_vec_normalize:
@@ -472,14 +475,15 @@ def main(*main_args, **main_kwargs):
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
         activation_fn_str = parsed_kwargs.pop("activation_fn", "relu")
-        activation_fn = utils.get_activation_cls(activation_fn_str)
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
-        n_epochs = int(parsed_kwargs.pop("n_epochs", 4))
+        n_epochs = int(parsed_kwargs.pop("n_epochs", 1))
         vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
         target_kl = parsed_kwargs.pop("target_kl", None)
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 5e-5))
         actor_learning_rate = critic_learning_rate
         use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
+        activation_fn_str = "gelu" if use_transformer and activation_fn_str == "relu" else activation_fn_str
+        activation_fn = utils.get_activation_cls(activation_fn_str)
 
         if min_conf_debug:
             batch_size = 25 # TODO remove
@@ -599,7 +603,7 @@ def main(*main_args, **main_kwargs):
         total_steps = max(int(max_steps / num_envs / n_steps + 0.5), 1)
         critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
         clip_range = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=clip_range, total_steps=total_steps, logger=logger, min_lr_polyfit=clip_range / 10, str_id="clip_range", skip_update_learning_rate_param=True)
-        ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=ent_coef / 100, str_id="ent_coef", skip_update_learning_rate_param=True)
+        ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=ent_coef / 10, str_id="ent_coef", skip_update_learning_rate_param=True)
 
         if n_features <= 0:
             features_extractor_class = FlattenExtractor
@@ -633,13 +637,19 @@ def main(*main_args, **main_kwargs):
                 assert state_representation == "representation_per_token_with_features_v2"
                 assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
 
-                transformer_d_model = 256
-                dropout_p = 0.0
+                #transformer_d_model = 256
+                #transformer_d_model = 128
+                transformer_d_model = 64
+                #dropout_p = 0.0
+                #dropout_p = 0.1
+                dropout_p = 0.2
                 transformer_kwargs = {
                     "d_model": transformer_d_model,
-                    "nhead": 4,
+                    #"nhead": 4,
+                    "nhead": 2,
                     "dim_feedforward": transformer_d_model * 4,
-                    "nlayers": 2,
+                    #"nlayers": 2,
+                    "nlayers": 1,
                     "projection_in": state_dim_per_token,
                     "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
                     "activation": activation_fn_str,
@@ -652,8 +662,8 @@ def main(*main_args, **main_kwargs):
                     "projection_out_dropout_p": dropout_p,
                     "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
                     "skip_n_word_embeddings_from_observation": "0:0",
-                    "expected_seq_len": ((state_window_length - 5) * state_dim_per_token) // state_dim_per_token,
-                    "last_layer_norm": False,
+                    "expected_seq_len": state_window_length - 4,
+                    "last_layer_norm": False, # Do not set to true because the MLP layers after the feature extractor already have layer normalization, so it can be redundant and even harm the performance
                     "last_linear_layer": True,
                     "check_zeros": True,
                     "remove_first_column_of_zeros": True,
@@ -666,11 +676,17 @@ def main(*main_args, **main_kwargs):
                     "reward_embeddings": 0,
                     "init_zeros_last_layer": False,
                     "use_first_n_tokens": -1,
-                    "initial_layer_norm_first_additional_layer_norm_after_projection": False,
+                    #"initial_layer_norm_first_additional_layer_norm_after_projection": False,
+                    "initial_layer_norm_first_additional_layer_norm_after_projection": True,
                     "str_id": "feature_extractor",
                 }
+                #custom_features_dim = projection_out if projection_out is not None else d_model
+                custom_features_dim = transformer_d_model
             else:
                 transformer_kwargs = {}
+                custom_features_dim = None
+
+            logger.info("transformer_kwargs: %s", transformer_kwargs)
 
             features_extractor_kwargs = {
                 "n": n,
@@ -683,6 +699,7 @@ def main(*main_args, **main_kwargs):
                 "activation_fn": activation_fn,
                 "use_transformer": use_transformer,
                 "transformer_kwargs": transformer_kwargs,
+                "custom_features_dim": custom_features_dim,
             }
 
         avoid_overlapping_action = True
@@ -709,7 +726,8 @@ def main(*main_args, **main_kwargs):
                 "optimizer_class": torch.optim.AdamW,
                 "optimizer_kwargs": {
                     "eps": 1e-5, # smaller value than default for Adam optimizer (found in common/policies.py), but I do not understand why
-                    "weight_decay": 1e-2,
+                    #"weight_decay": 1e-2,
+                    "weight_decay": 2e-2,
                 },
                 # Other
                 "net_arch": dict(net_arch),

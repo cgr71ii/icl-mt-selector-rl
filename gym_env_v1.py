@@ -195,7 +195,7 @@ class MTICLEnv(gym.Env):
 
         self.logger_wrapper(gym.logger.info, "Provided arguments: %s", kwargs)
 
-        self.state_window_length = _dict_or_default(kwargs, "state_window_length", 4)
+        self.state_window_length = int(_dict_or_default(kwargs, "state_window_length", 4))
         self.max_icl_examples = _dict_or_default(kwargs, "max_icl_examples", 4)
         self.max_data_entries = _dict_or_default(kwargs, "max_data_entries", -1)
         self.max_data_icl_examples_entries = _dict_or_default(kwargs, "max_data_icl_examples_entries", -1)
@@ -1076,6 +1076,8 @@ class MTICLEnv(gym.Env):
 
                 sum_dim += self.current_state_window[-1].shape[0]
 
+            assert 3 + sum_dim // self.current_state_window[-1].shape[0] + 1 == self.state_window_length, f"3 + {sum_dim // self.current_state_window[-1].shape[0]} + 1 != {self.state_window_length}"
+
             self.current_state_window.append(np.zeros(self.num_icl_examples)) # selected ICL examples in the current episode (one-hot history)
 
             sum_dim += sum([self.current_state_window[idx].shape[0] for idx in (0, 1, 2, -1)])
@@ -1291,6 +1293,8 @@ class MTICLEnv(gym.Env):
             initial_idx = used_tokens - num_tokens
 
             for i in range(num_tokens):
+                assert np.allclose(self.current_state_window[i + 3], np.zeros_like(self.current_state_window[i + 3])), f"State window position {i + 3} is not empty at the beginning of the episode: {self.current_state_window[i + 3]}"
+
                 self.current_state_window[i + 3] = token_representations[i]
 
                 assert i + 1 < len(self.current_state_window), "this should not happen: last position is reserved for the history of selected actions"
@@ -1302,7 +1306,6 @@ class MTICLEnv(gym.Env):
 
             self.current_state_window[2] = np.zeros(self.max_icl_examples + 1)
             self.current_state_window[2][0] = 1.0 # representation time step (first time step)
-            self.current_state_window[3] = token_representations[0]
 
             assert np.isclose(sum(self.current_state_window[2]), 1.0)
             assert np.allclose(self.current_state_window[-1], np.zeros_like(self.current_state_window[-1]))
@@ -1983,6 +1986,8 @@ class MTICLEnv(gym.Env):
                         translations = utils.l2_normalize(translations)
 
                 if self.state_representation == "representation_per_token_with_features":
+                    assert translations.shape[-1] % self.state_dim_per_token == 0, f"Translations shape mismatch last dimension: {translations.shape} vs state_dim_per_token {self.state_dim_per_token}"
+
                     translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
                     new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
                     max_dim = min(translations.shape[-1], self.state_dim)
@@ -1992,16 +1997,19 @@ class MTICLEnv(gym.Env):
 
                     assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
                 elif self.state_representation == "representation_per_token_with_features_v2":
+                    assert translations.shape[-1] % self.state_dim_per_token == 0, f"Translations shape mismatch last dimension: {translations.shape} vs state_dim_per_token {self.state_dim_per_token}"
+
                     translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
-                    new_translations = np.zeros((translations.shape[0], self.state_dim), dtype=translations.dtype)
-                    max_dim = min(translations.shape[-1], self.state_dim)
-                    max_dim = min(max_dim, (self.state_window_length - 4) * self.state_dim_per_token)
+                    max_dim = min(translations.shape[-1], (self.state_window_length - 4) * self.state_dim_per_token)
+                    new_translations = np.zeros((translations.shape[0], max_dim), dtype=translations.dtype)
                     new_translations[:,:max_dim] = translations[:, :max_dim] # truncate or keep the same if equal (tokens are obtained with padding at the right and prompt tokens are right-to-left, so the first tokens are the most relevant ones)
                     translations = new_translations
 
-                    assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
+                    assert translations.shape[-1] % self.state_dim_per_token == 0, f"Translations shape mismatch last dimension: {translations.shape} vs state_dim_per_token {self.state_dim_per_token}"
                 else:
                     assert translations.shape[-1] == self.state_dim_per_token, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim_per_token)}"
+
+            self.logger_wrapper(gym.logger.debug, "Translations shape after concatenation and processing: %s", translations.shape)
 
         assert len(translations) == len(src_sentences), f"Translations length mismatch: {len(translations)} vs {len(src_sentences)}"
 
@@ -2719,7 +2727,6 @@ class MTICLEnv(gym.Env):
             assert np.allclose(self.current_state_window[2], np.zeros_like(self.current_state_window[2]))
 
             self.current_state_window[2][self.time_step] = 1.0 # set one-hot representation of time step
-            self.current_state_window[3] = observation
             icl_example = '\t'.join(self.current_icl_examples[0 if self.current_icl_examples_prepend else -1])
             icl_idx = self.icl_example_representation_icl2idx[icl_example]
             self.current_state_window[-1][icl_idx] += 1.0 # set one-hot representation of selected ICL example
@@ -2745,7 +2752,7 @@ class MTICLEnv(gym.Env):
 
             #current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
 
-            assert np.isclose(sum(self.current_state_window[-1]), len(self.current_icl_examples)), f"{self.current_state_window[-1]} vs {len(self.current_icl_examples)}"
+            assert np.isclose(sum((self.current_state_window[-1] + 0.5).astype(int)), len(self.current_icl_examples)), f"{self.current_state_window[-1]} vs {len(self.current_icl_examples)}"
             assert not np.allclose(self.current_state_window[-1], np.zeros_like(self.current_state_window[-1]))
 
             self.logger_wrapper(gym.logger.debug, "representation_per_token_with_features_v2: %s tokens (used: min(%d, %d))", observation.shape, used_tokens, self.state_window_length - 4)
