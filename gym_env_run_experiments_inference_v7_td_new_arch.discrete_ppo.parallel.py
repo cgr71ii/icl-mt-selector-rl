@@ -53,7 +53,7 @@ def main():
     max_data_entries = int(parsed_kwargs.get("max_data_entries", -1)) # load all data (default value)
     max_data_icl_examples_entries = int(parsed_kwargs.get("max_data_icl_examples_entries", -1)) # load all data (default value)
     #max_data_entries = 5 # TODO remove
-    #max_data_entries = 37 # TODO remove
+    #max_data_entries = 100 # TODO remove
     #max_data_icl_examples_entries = 100 # TODO remove
     #max_data_icl_examples_entries = 10 # TODO remove
     device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
@@ -85,9 +85,9 @@ def main():
 
     process_token_time_step = bool(int(parsed_kwargs.get("process_token_time_step", True)))
 
-    assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"), f"Some values such as icl_mask_duplicates_last_values_from_state expect this configuration: {state_representation}"
+    assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Some values such as icl_mask_duplicates_last_values_from_state expect this configuration: {state_representation}"
 
-    if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+    if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
         process_token_time_step = False
 
     parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -135,6 +135,8 @@ def main():
 
     if state_representation == "representation_per_token_with_features_v2":
         parsed_kwargs["apply_l2_normalization_state"] = False
+    elif state_representation == "representation_per_token_with_features_v3":
+        parsed_kwargs["apply_l2_normalization_state"] = True
 
     if use_vec_normalize:
         logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -218,11 +220,11 @@ def main():
     elif state_representation in ("representation_mean_75_perc_layer", "representation_last_75_perc_layer"):
         n_features = state_dim_per_token + (state_dim_per_token_time_step if process_token_time_step else 0)
     elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
-        n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
+        n_features = state_dim_per_token + (max_icl_examples + 1) + len(_data_icl_examples)
     elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
-        n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
-    elif state_representation == "representation_per_token_with_features_v2":
-        n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(data_icl_examples)
+        n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(_data_icl_examples)
+    elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
+        n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(_data_icl_examples)
     else:
         n_features = 0
 
@@ -284,28 +286,34 @@ def main():
 
             if process_token_time_step:
                 skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-        elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+        elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             step_embeddings = 0
             step_embeddings_dim = 0
-            skip_n += len(data_icl_examples) # one-hot representation of available actions
+            skip_n += len(_data_icl_examples) # one-hot representation of available actions
         else:
             raise Exception()
 
         if use_transformer:
-            assert state_representation == "representation_per_token_with_features_v2"
+            assert state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
             assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
 
             #transformer_d_model = 256
             #transformer_d_model = 128
-            transformer_d_model = 64
+            #transformer_d_model = 64
+            transformer_d_model = 32
+            #transformer_d_model = 16
+
+            if state_representation == "representation_per_token_with_features_v3":
+                transformer_d_model = 256
+
             dropout_p = 0.0
             transformer_kwargs = {
                 "d_model": transformer_d_model,
                 #"nhead": 4,
                 "nhead": 2,
                 "dim_feedforward": transformer_d_model * 4,
-                #"nlayers": 2,
-                "nlayers": 1,
+                "nlayers": 2,
+                #"nlayers": 1,
                 "projection_in": state_dim_per_token,
                 "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
                 "activation": activation_fn_str,
@@ -321,11 +329,11 @@ def main():
                 "expected_seq_len": state_window_length - 4,
                 "last_layer_norm": False,
                 "last_linear_layer": True,
-                "check_zeros": True,
-                "remove_first_column_of_zeros": True,
+                "check_zeros": False,
+                "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features_v2" else False,
                 "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
                 "step_embeddings_from_observation": True, # we expect the time step information to be included in the observation, so we can use it for the step embeddings
-                "action_embeddings": len(data_icl_examples),
+                "action_embeddings": len(_data_icl_examples),
                 "max_actions": max_icl_examples,
                 "l2_norm": False,
                 "mean_pooling": True,
@@ -335,6 +343,8 @@ def main():
                 #"initial_layer_norm_first_additional_layer_norm_after_projection": False,
                 "initial_layer_norm_first_additional_layer_norm_after_projection": True,
                 "str_id": "feature_extractor",
+                "disable_step_embeddings": True,
+                "mask_tokens_p": 0.0,
             }
             #custom_features_dim = projection_out if projection_out is not None else d_model
             custom_features_dim = transformer_d_model
@@ -371,7 +381,7 @@ def main():
             "layer_norm_before_activation": True,
             "activation_fn": activation_fn,
             "avoid_overlapping_action": True,
-            "icl_mask_duplicates_last_values_from_state": len(data_icl_examples),
+            "icl_mask_duplicates_last_values_from_state": len(_data_icl_examples),
             "check_general_actions_masking": True,
             "temperature": 2.0 if available_actions_strategy == "none" else 1.0,
         },

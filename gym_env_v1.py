@@ -234,6 +234,7 @@ class MTICLEnv(gym.Env):
             "representation_one_hot_representation_time_and_selected_icl_examples",
             "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example",
             "representation_per_token_with_features_v2",
+            "representation_per_token_with_features_v3",
         ), f"Unexpected state representation: {self.state_representation}"
         assert self.action_sampling_strategy in ("none", "bm25"), self.action_sampling_strategy
 
@@ -274,7 +275,7 @@ class MTICLEnv(gym.Env):
             self.state_window_length = 5
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
             self.state_window_length = 6
-        elif self.state_representation == "representation_per_token_with_features_v2":
+        elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             self.state_window_length = self.state_window_length + 4
         elif self.state_window_length < self.max_icl_examples:
             self.logger_wrapper(gym.logger.warn, "self.state_window_length = %d < self.max_icl_examples = %d. Modifying value to the latter", self.state_window_length, self.max_icl_examples)
@@ -322,7 +323,8 @@ class MTICLEnv(gym.Env):
                 self.logger_wrapper(gym.logger.warn, "Changing self.embedding_pooling_model_layer from %d to -1", self.embedding_pooling_model_layer)
 
                 self.embedding_pooling_model_layer = -1
-
+        elif self.state_representation == "representation_per_token_with_features_v3":
+            self.embedding_pooling_model_method_state = "none"
         elif self.state_representation == "representation_last_token_current_and_relative_diff":
             self.embedding_pooling_model_method_state = "last"
         elif self.state_representation == "representation_mean_plus_last_75_perc_layer_and_relative_diff":
@@ -424,8 +426,8 @@ class MTICLEnv(gym.Env):
         self.is_eval_env = _dict_or_default(kwargs, "is_eval_env", False)
         self.enable_eos_action = _dict_or_default(kwargs, "enable_eos_action", True)
         self.translation_candidate_strategy = _dict_or_default(kwargs, "translation_candidate_strategy", "choice_with_replacement")
-        self.reward_power = _dict_or_default(kwargs, "reward_power", 1)
-        self.reward_division = int(_dict_or_default(kwargs, "reward_division", 1.0))
+        self.reward_power = float(_dict_or_default(kwargs, "reward_power", 1.0))
+        self.reward_division = float(_dict_or_default(kwargs, "reward_division", 1.0))
         self.actions_without_replacement = _dict_or_default(kwargs, "actions_without_replacement", False)
         self.best_reward_seen = {}
         self.current_icl_examples_prepend = _dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
@@ -470,7 +472,7 @@ class MTICLEnv(gym.Env):
 
             self.state_dim = self.model_hidden_size_embedding * 2 + self.num_icl_examples + (self.max_icl_examples + 1) + self.action_dim + self.num_icl_examples
 
-        if self.state_representation == "representation_per_token_with_features_v2":
+        if self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             assert self.num_icl_examples is not None
 
             self.state_dim = self.num_icl_examples + (self.max_icl_examples + 1) + self.action_dim + self.num_icl_examples
@@ -499,6 +501,10 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.warn, "L2 normalization should not be enabled with '%s' state representation: disabling", self.state_representation)
 
             self.apply_l2_normalization_state = False
+        elif not self.apply_l2_normalization_state and self.state_representation == "representation_per_token_with_features_v3":
+            self.logger_wrapper(gym.logger.warn, "L2 normalization should be enabled with '%s' state representation: enabling", self.state_representation)
+
+            self.apply_l2_normalization_state = True
 
         self.logger_wrapper(gym.logger.info, "EoS action is %s", "enabled" if self.enable_eos_action else "disabled")
 
@@ -823,7 +829,7 @@ class MTICLEnv(gym.Env):
         ## ICL examples
         self.logger_wrapper(gym.logger.info, "Obtaining representations for %d ICL examples", len(self.data_icl_examples))
 
-        if self.action_representation == "discrete_index" or self.state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+        if self.action_representation == "discrete_index" or self.state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             assert self.num_icl_examples is not None
         elif self.num_icl_examples is None:
             self.num_icl_examples = len(self.data_icl_examples)
@@ -1066,7 +1072,7 @@ class MTICLEnv(gym.Env):
                 assert np.allclose(q, np.zeros_like(q))
 
                 sum_dim += q.shape[0]
-        elif self.state_representation == "representation_per_token_with_features_v2":
+        elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             self.current_state_window.append(np.zeros(self.action_dim))
             self.current_state_window.append(np.zeros(self.num_icl_examples))
             self.current_state_window.append(np.zeros(self.max_icl_examples + 1)) # time step
@@ -1268,7 +1274,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last representations (src sentence): %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
             self.logger_wrapper(gym.logger.debug, "First ... last representations (last ICL example): %s ... %s", self.current_state_window[4][:10], self.current_state_window[4][-10:])
             self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[5]))
-        elif self.state_representation == "representation_per_token_with_features_v2":
+        elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             token_representations = self.get_state_representation([src_sentence])[0] # right-to-left (last tokens are first) and right-padded LLM representation
 
             assert isinstance(token_representations, np.ndarray), type(token_representations)
@@ -1317,7 +1323,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[3][:10], self.current_state_window[-2][-10:])
             self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[-1]))
 
-        if self.state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+        if self.state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             if self.available_actions_strategy in ("bm25", "sonar_embeddings", "bm25_and_sonar_embeddings"):
                 src_sentence = self.data[self.translation_candidate][0]
 
@@ -1956,7 +1962,7 @@ class MTICLEnv(gym.Env):
 
             translations = torch.cat(translations, dim=0)
 
-            if self.state_representation in ("representation_per_token_with_features", "representation_per_token_with_features_v2"):
+            if self.state_representation in ("representation_per_token_with_features", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                 assert len(translations.shape) == 3, f"Translations shape mismatch for representation_per_token_with_features: {translations.shape}"
             else:
                 assert len(translations.shape) == 2, f"Translations shape mismatch for representation: {translations.shape}"
@@ -1996,7 +2002,7 @@ class MTICLEnv(gym.Env):
                     translations = new_translations
 
                     assert translations.shape[-1] == self.state_dim, f"Translations shape mismatch after flattening: {translations.shape} vs {(len(src_sentences), self.state_dim)}"
-                elif self.state_representation == "representation_per_token_with_features_v2":
+                elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                     assert translations.shape[-1] % self.state_dim_per_token == 0, f"Translations shape mismatch last dimension: {translations.shape} vs state_dim_per_token {self.state_dim_per_token}"
 
                     translations = translations.reshape(len(src_sentences), -1) # flatten to (num_sentences, seq_len * model_hidden_size)
@@ -2507,7 +2513,7 @@ class MTICLEnv(gym.Env):
         else:
             # Update state
 
-            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_one_hot_representation_time_and_selected_icl_examples", "representation_per_token_with_features_v2"):
+            if self.state_representation in ("model_single_representation", "representation_per_token_with_features", "representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_one_hot_representation_time_and_selected_icl_examples", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                 src_sentence = self.data[self.translation_candidate][0]
                 observation = self.get_state_representation([src_sentence], icl_examples=[self.current_icl_examples])[0]
 
@@ -2540,7 +2546,7 @@ class MTICLEnv(gym.Env):
 
         observation = observation.copy()
 
-        if self.state_representation in ("representation_per_token_with_features", "representation_per_token_with_features_v2"):
+        if self.state_representation in ("representation_per_token_with_features", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             observation = observation.reshape(-1, self.state_dim_per_token) # (seq_len, model_hidden_size)
         elif self.state_representation in ("representation_last_token_current_and_relative_diff", "representation_mean_plus_last_75_perc_layer_and_relative_diff", "representation_mean_75_perc_layer", "representation_last_75_perc_layer", "representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example"):
             pass
@@ -2559,10 +2565,12 @@ class MTICLEnv(gym.Env):
                 observation1 = utils.l2_normalize(observation[:observation.shape[-1] // 2])
                 observation2 = utils.l2_normalize(observation[observation.shape[-1] // 2:])
 
-                assert utils.check_l2_normalized(observation1), "Observation1 must be l2 normalized"
-                assert utils.check_l2_normalized(observation2), "Observation2 must be l2 normalized"
+                assert utils.check_l2_normalized(observation1)[0], "Observation1 must be l2 normalized"
+                assert utils.check_l2_normalized(observation2)[0], "Observation2 must be l2 normalized"
             else:
-                assert utils.check_l2_normalized(observation), "Observation must be l2 normalized"
+                ignore_zeros = self.state_representation in ("representation_per_token_with_features", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3")
+
+                assert utils.check_l2_normalized(observation, ignore_zeros=ignore_zeros)[0], f"Observation must be l2 normalized: {utils.check_l2_normalized(observation)}: {np.sum(observation ** 2, axis=-1)}"
 
         if self.state_representation == "model_single_representation":
             self.current_state_window[0] = observation
@@ -2702,7 +2710,7 @@ class MTICLEnv(gym.Env):
             self.logger_wrapper(gym.logger.debug, "First ... last representations (src sentence): %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
             self.logger_wrapper(gym.logger.debug, "First ... last representations (last ICL example): %s ... %s", self.current_state_window[4][:10], self.current_state_window[4][-10:])
             self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[5]))
-        elif self.state_representation == "representation_per_token_with_features_v2":
+        elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             assert len(observation.shape) == 2, observation.shape
 
             is_zero_vector = (observation == 0).all(axis=1)

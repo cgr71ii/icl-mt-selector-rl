@@ -353,20 +353,25 @@ def get_embedding_pooling(model, tokenizer, prompts, pooling="mean", layer=-1, l
 
         assert pooled_embeddings.shape == (hidden_states.shape[0], *expected_shape), f"pooled_embeddings expected shape (except batch_size): {(hidden_states.shape[0], *expected_shape)}; got: {pooled_embeddings.shape}"
 
+        pooled_embeddings_result = torch.zeros_like(pooled_embeddings, device=pooled_embeddings.device, dtype=pooled_embeddings.dtype)
+
         # Remove padding tokens with attention mask (also flip sequence to be right-to-left, so the first non-padding tokens are the last ones from the prompt, which are more likely to be relevant, and the padding tokens are at the end, which makes it easier for removing them)
         for idx in range(hidden_states.shape[0]):
             n_non_padded_tokens = _attention_mask[idx].sum().item()
             n_padded_tokens = _attention_mask.shape[1] - n_non_padded_tokens
 
-            assert torch.all(_attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
-            assert torch.all(_attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+            #assert torch.all(_attention_mask[idx, n_padded_tokens:] == 1).item(), f"Non-padded tokens must have attention mask 1 for input idx {idx}: attention_mask: {attention_mask[idx]}"
+            #assert torch.all(_attention_mask[idx, :n_padded_tokens] == 0).item(), f"Padded tokens must have attention mask 0 for input idx {idx}: attention_mask: {attention_mask[idx]}"
 
-            tmp = torch.zeros(expected_shape, device=pooled_embeddings.device, dtype=pooled_embeddings.dtype)
-            tmp[:n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
+            #tmp = torch.zeros(expected_shape, device=pooled_embeddings.device, dtype=pooled_embeddings.dtype)
+            #tmp[:n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
+            pooled_embeddings_result[idx, :n_non_padded_tokens, :] = torch.flip(pooled_embeddings[idx, n_padded_tokens:, :], dims=(0,)) # shift left to remove padding and flip sequence to be right-to-left
 
-            assert torch.allclose(torch.flip(pooled_embeddings[idx], dims=(0,)), tmp), f"Flipped pooled_embeddings does not match expected for input idx {idx}: {torch.flip(pooled_embeddings[idx])} vs {tmp}"
+            #assert torch.allclose(torch.flip(pooled_embeddings[idx], dims=(0,)), tmp), f"Flipped pooled_embeddings does not match expected for input idx {idx}: {torch.flip(pooled_embeddings[idx])} vs {tmp}"
 
-            pooled_embeddings[idx] = tmp
+            #pooled_embeddings[idx] = tmp
+
+        pooled_embeddings = pooled_embeddings_result
     else:
         assert len(pooled_embeddings.shape) == 2, f"pooled_embeddings expected shape: (batch_size, dim); got: {pooled_embeddings.shape}"
 

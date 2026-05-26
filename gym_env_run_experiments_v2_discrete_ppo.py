@@ -233,7 +233,7 @@ def main(*main_args, **main_kwargs):
         disable_eval = bool(int(parsed_kwargs.pop("disable_eval", 0)))
         store_model_on_eval = bool(int(parsed_kwargs.pop("store_model_on_eval", 0)))
         n_steps = int(parsed_kwargs.pop("n_steps", 50))
-        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.01))
+        ent_coef = float(parsed_kwargs.pop("ent_coef", 0.05))
         optuna_trial = parsed_kwargs.pop("optuna_trial", None)
         skip_last_eval = parsed_kwargs.pop("skip_last_eval", True) # it will return a reward of 0
         use_vec_normalize = bool(int(parsed_kwargs.pop("use_vec_normalize", 1)))
@@ -335,13 +335,13 @@ def main(*main_args, **main_kwargs):
         multi_step_eval = parsed_kwargs["multi_step_eval"]
         available_actions_strategy = parsed_kwargs["available_actions_strategy"]
 
-        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"), f"Some values such as icl_mask_duplicates_last_values_from_state expect this configuration: {state_representation}"
+        assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Some values such as icl_mask_duplicates_last_values_from_state expect this configuration: {state_representation}"
 
         if multi_step_eval:
             if use_vec_normalize:
                 assert not subtract_reward_mean
 
-        if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+        if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             process_token_time_step = False
 
         parsed_kwargs["process_token_time_step"] = process_token_time_step
@@ -354,6 +354,8 @@ def main(*main_args, **main_kwargs):
 
         if state_representation == "representation_per_token_with_features_v2":
             parsed_kwargs["apply_l2_normalization_state"] = False
+        elif state_representation == "representation_per_token_with_features_v3":
+            parsed_kwargs["apply_l2_normalization_state"] = True
 
         if use_vec_normalize:
             logger.info("Using VecNormalize for normalizing observations and rewards")
@@ -470,13 +472,14 @@ def main(*main_args, **main_kwargs):
         #max_steps = 50000 # steps while training
         #max_steps = 100000 # steps while training
         #max_steps = 200000
-        max_steps = int(parsed_kwargs.pop("max_steps", 1000000))
+        #max_steps = int(parsed_kwargs.pop("max_steps", 1000000))
+        max_steps = int(parsed_kwargs.pop("max_steps", 500000))
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
         activation_fn_str = parsed_kwargs.pop("activation_fn", "relu")
         redirect_output_filename = parsed_kwargs.pop("redirect_output_filename", None)
-        n_epochs = int(parsed_kwargs.pop("n_epochs", 1))
+        n_epochs = int(parsed_kwargs.pop("n_epochs", 2))
         vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
         target_kl = parsed_kwargs.pop("target_kl", None)
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 5e-5))
@@ -498,7 +501,7 @@ def main(*main_args, **main_kwargs):
         eval_freq = max(1, eval_freq // num_envs)
 
         if num_envs > 1:
-            logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment instance due to the number of parallel envinronments", max_steps, max_steps, num_envs, max_steps // num_envs)
+            logger.info("Be aware that the environment will be executed %d time steps, but %d // %d = %d per environment instance due to the number of parallel environments", max_steps, max_steps, num_envs, max_steps // num_envs)
 
         parsed_kwargs_removed_elements = {k: initial_parsed_kwargs[k] for k in initial_parsed_kwargs.keys() if k not in parsed_kwargs.keys()}
 
@@ -532,7 +535,7 @@ def main(*main_args, **main_kwargs):
             n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
             n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
-        elif state_representation == "representation_per_token_with_features_v2":
+        elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(data_icl_examples)
         else:
             n_features = 0
@@ -550,7 +553,7 @@ def main(*main_args, **main_kwargs):
             if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
                 normalize_kwargs["offset"] = model_hidden_size_embedding * 2 # TODO is necessary?
                 normalize_kwargs["norm_obs"] = False
-            elif state_representation == "representation_per_token_with_features_v2":
+            elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                 # TODO set offset?
                 normalize_kwargs["norm_obs"] = False
             else:
@@ -569,7 +572,15 @@ def main(*main_args, **main_kwargs):
         #net_arch = [512, 128, 32]
         #net_arch = [512, 256, 128]
         #net_arch = [1024, 512, 256]
-        if net_arch is None:
+        if use_transformer:
+            logger.info("Transformer enabled: using transformer+MLP")
+
+            net_arch = {
+                "pi": [],
+                "vf": [],
+                "empty_layers": True, # custom code
+            }
+        elif net_arch is None:
             net_arch = {
                 #"pi": [512, 256],
                 #"vf": [512, 256]
@@ -580,15 +591,6 @@ def main(*main_args, **main_kwargs):
             } # "pi" is actor and "vf" the critic
 
         logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
-
-        if use_transformer:
-            logger.info("Transformer enabled: using transformer+MLP")
-
-            net_arch = {
-                "pi": [],
-                "vf": [],
-                "empty_layers": True, # custom code
-            }
 
         warmup_steps = 0
         #actor_learning_rate = 1e-3
@@ -609,6 +611,7 @@ def main(*main_args, **main_kwargs):
             features_extractor_class = FlattenExtractor
             #features_extractor_class = NoFlattenExtractor
             features_extractor_kwargs = {}
+            features_extractor_vf_kwargs = {}
         else:
             features_extractor_class = NFeaturesExtractorWithTimeStepEmbeddings
             n = n_features
@@ -626,7 +629,7 @@ def main(*main_args, **main_kwargs):
 
                 if process_token_time_step:
                     skip_n += state_dim_per_token_time_step # the model adds the time step information to the features, so we need to skip it
-            elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2"):
+            elif state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples", "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                 step_embeddings = 0
                 step_embeddings_dim = 0
                 skip_n += len(data_icl_examples) # one-hot representation of available actions
@@ -634,22 +637,29 @@ def main(*main_args, **main_kwargs):
                 raise Exception()
 
             if use_transformer:
-                assert state_representation == "representation_per_token_with_features_v2"
+                assert state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
                 assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
 
                 #transformer_d_model = 256
                 #transformer_d_model = 128
-                transformer_d_model = 64
+                #transformer_d_model = 64
+                transformer_d_model = 32
+                #transformer_d_model = 16
+
+                if state_representation == "representation_per_token_with_features_v3":
+                    transformer_d_model = 256
+
                 #dropout_p = 0.0
                 #dropout_p = 0.1
                 dropout_p = 0.2
+                #dropout_p = 0.3
                 transformer_kwargs = {
                     "d_model": transformer_d_model,
                     #"nhead": 4,
                     "nhead": 2,
                     "dim_feedforward": transformer_d_model * 4,
-                    #"nlayers": 2,
-                    "nlayers": 1,
+                    "nlayers": 2,
+                    #"nlayers": 1,
                     "projection_in": state_dim_per_token,
                     "projection_out": None, # let the MLP layers after the feature extractor handle the rest of the processing
                     "activation": activation_fn_str,
@@ -665,8 +675,8 @@ def main(*main_args, **main_kwargs):
                     "expected_seq_len": state_window_length - 4,
                     "last_layer_norm": False, # Do not set to true because the MLP layers after the feature extractor already have layer normalization, so it can be redundant and even harm the performance
                     "last_linear_layer": True,
-                    "check_zeros": True,
-                    "remove_first_column_of_zeros": True,
+                    "check_zeros": False,
+                    "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features_v2" else False,
                     "step_embeddings": max_icl_examples + 1, # add embeddings for each time step (+1 to avoid error in the model forward for computing next_actions, although the result will be discarded)
                     "step_embeddings_from_observation": True, # we expect the time step information to be included in the observation, so we can use it for the step embeddings
                     "action_embeddings": len(data_icl_examples),
@@ -679,6 +689,10 @@ def main(*main_args, **main_kwargs):
                     #"initial_layer_norm_first_additional_layer_norm_after_projection": False,
                     "initial_layer_norm_first_additional_layer_norm_after_projection": True,
                     "str_id": "feature_extractor",
+                    #"disable_step_embeddings": True,
+                    "disable_step_embeddings": False,
+                    #"mask_tokens_p": 0.2,
+                    "mask_tokens_p": 0.0,
                 }
                 #custom_features_dim = projection_out if projection_out is not None else d_model
                 custom_features_dim = transformer_d_model
@@ -701,6 +715,13 @@ def main(*main_args, **main_kwargs):
                 "transformer_kwargs": transformer_kwargs,
                 "custom_features_dim": custom_features_dim,
             }
+            features_extractor_vf_kwargs = dict(features_extractor_kwargs)
+
+            if "transformer_kwargs" in features_extractor_vf_kwargs:
+                features_extractor_vf_kwargs["transformer_kwargs"]["embedding_dropout"] = 0.0 # disable dropout for the critic as it can harm the performance
+                features_extractor_vf_kwargs["transformer_kwargs"]["dropout_p"] = 0.0
+                features_extractor_vf_kwargs["transformer_kwargs"]["projection_out_dropout_p"] = 0.0
+                features_extractor_vf_kwargs["transformer_kwargs"]["mask_tokens_p"] = 0.0
 
         avoid_overlapping_action = True
         #layer_norm_input = True
@@ -735,6 +756,7 @@ def main(*main_args, **main_kwargs):
                 "layer_norm_before_activation": layer_norm_before_activation,
                 "features_extractor_class": features_extractor_class,
                 "features_extractor_kwargs": features_extractor_kwargs,
+                "features_extractor_vf_kwargs": features_extractor_vf_kwargs,
                 "share_features_extractor": False,
                 "activation_fn": activation_fn,
                 "avoid_overlapping_action": avoid_overlapping_action, # It assumes that the first element in the observation is the representation of the source sentence being translated
@@ -834,6 +856,7 @@ def main(*main_args, **main_kwargs):
                     "layer_norm_before_activation": layer_norm_before_activation,
                     "features_extractor_class": features_extractor_class,
                     "features_extractor_kwargs": features_extractor_kwargs,
+                    "features_extractor_vf_kwargs": features_extractor_vf_kwargs,
                     "share_features_extractor": False,
                     "activation_fn": activation_fn,
                     "avoid_overlapping_action": avoid_overlapping_action,

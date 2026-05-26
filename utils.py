@@ -199,7 +199,7 @@ def l2_normalize(emb, eps=1e-6):
 
     return result
 
-def check_l2_normalized(emb, tol=1e-1):
+def check_l2_normalized(emb, tol=1e-1, ignore_zeros=False):
     assert isinstance(emb, (np.ndarray, torch.Tensor)), "Input must be a numpy array or a PyTorch tensor"
 
     if isinstance(emb, np.ndarray):
@@ -208,6 +208,9 @@ def check_l2_normalized(emb, tol=1e-1):
         norms = torch.norm(emb, dim=-1)
 
     v = np.abs(norms.cpu().numpy() - 1) if isinstance(norms, torch.Tensor) else np.abs(norms - 1)
+
+    if ignore_zeros:
+        v = v[norms != 0]
 
     return np.all(v <= tol), np.sum(v).item()
 
