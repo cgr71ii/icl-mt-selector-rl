@@ -1621,6 +1621,8 @@ class MTICLEnv(gym.Env):
         url_idx = 0 if url_idx is None else url_idx % len(url)
         url = url[url_idx]
 
+        assert False, "This function does not implement flask server returning Response object when using self.embedding_pooling_model_api"
+
         for sample in batch:
             if src_is_empty:
                 # source sentence cannot be empty, so let's hack the trg sentence as src sentence (and swap src and trg languages)
@@ -1941,19 +1943,28 @@ class MTICLEnv(gym.Env):
             response = utils.requests_post(url, data=payload)
 
             assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
-            assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
 
-            response_text = json.loads(response.text)
-
-            assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
-
-            response_result = response_text["ok"]
-
-            if only_representation:
-                response_result = base64.b64decode(response_result) # base64 tensor representation
-                response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+            if only_representation and _pooling not in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
+                shape = tuple(map(int, response.headers["X-Shape"].split(',')))
+                dtype = np.dtype(response.headers["X-Dtype"])
+                arr = np.frombuffer(response.content, dtype=dtype).reshape(shape)
+                response_result = torch.from_numpy(arr)
                 response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
                 response_result = response_result.to(torch.float32)
+            else:
+                assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+
+                response_text = json.loads(response.text)
+
+                assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
+
+                response_result = response_text["ok"]
+
+                if only_representation:
+                    response_result = base64.b64decode(response_result) # base64 tensor representation
+                    response_result = pickle.loads(response_result) # transform to tensor from pickle serialization
+                    response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
+                    response_result = response_result.to(torch.float32)
 
             translations.append(response_result)
 

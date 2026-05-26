@@ -19,6 +19,7 @@ from flask import (
     Flask,
     request,
     jsonify,
+    Response
 )
 from service_streamer import ThreadedStreamer
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -457,6 +458,17 @@ def get_embedding_pooling():
 
     if get_representation[0]:
         logger.debug("Results shape: %s", results.shape)
+
+        arr = results.contiguous().numpy()
+
+        return Response(
+            arr.tobytes(),
+            mimetype="application/octet-stream",
+            headers={
+                "X-Shape": ','.join(map(str, arr.shape)),
+                "X-Dtype": str(arr.dtype),
+            },
+        )
 
         results = pickle.dumps(results)
         results = base64.b64encode(results).decode() # base64 tensor
