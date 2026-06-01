@@ -64,7 +64,7 @@ for data in $(echo "flores_200.devtest:flores_devtest_test_split.:.shuf.out.test
       max_icl_examples="5" state_representation="representation_per_token_with_features_v3" linear_bottleneck="0" \
       eval_strategy_eval="api-eval" eval_model_api="http://${server}:8000/evaluate_comet_22" store_rewards_fn="${out}.rewards" \
       embedding_pooling_model_layer="75%" use_transformer="1" state_window_length="512" use_vec_normalize="0" \
-    &> "$out"
+      &> "$out"
 done
 
 date
