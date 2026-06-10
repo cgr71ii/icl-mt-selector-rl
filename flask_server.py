@@ -24,6 +24,8 @@ from flask import (
 from service_streamer import ThreadedStreamer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import accelerate
+import fasttext
+from huggingface_hub import hf_hub_download
 
 app = Flask("MT-ICL-flask-server")
 global_conf = {} # Empty since it will be filled once main is run
@@ -96,6 +98,7 @@ def info():
             "/get_embedding_pooling": ["GET", "POST"],
             "/get_embedding_from_given_model": ["GET", "POST"],
             "/get_reward": ["GET", "POST"],
+            "/lid": ["GET", "POST"],
             "/template_info": ["GET"],
         },
         indent=4).replace('\n', '<br/>').replace(' ', '&nbsp;')
@@ -927,6 +930,82 @@ def translate_batch(data):
 
     return results
 
+@app.route('/lid', methods=["GET", "POST"])
+def lid():
+    route_name = request.base_url.rstrip('/').split('/')[-1]
+
+    if request.method not in ("GET", "POST"):
+        return jsonify({"ok": "null", "err": "method is not: GET, POST"})
+
+    if request.method == "GET":
+        # GET method should be used only for testing purposes since HTML encoding is not being handled
+        request_method = request.args
+    elif request.method == "POST":
+        request_method = request.form
+    else:
+        logger.error("Unknown method: %s", request.method)
+
+        return jsonify({"ok": "null", "err": f"unknown method: {request.method}"})
+
+    # Get parameters
+    try:
+        text = utils.string2list(request_method.getlist("text"))
+    except KeyError as e:
+        logger.error("KeyError: %s", e)
+
+        return jsonify({"ok": "null", "err": f"could not get some mandatory field: 'urls' are mandatory"})
+
+    assert len(text) > 0, "text should not be empty"
+
+    logger.debug("Got %d texts", len(text))
+
+    try:
+        text = [base64.b64decode(t.replace(' ', '+')).decode("utf-8", errors="backslashreplace").replace('\t', ' ').replace('\n', ' ').replace('\r', '').strip() for t in text]
+    except Exception as e:
+        logger.error("Exception when decoding BASE64: %s", e)
+
+        return jsonify({"ok": "null", "err": "error decoding BASE64 data"})
+
+    # Inference
+
+    #disable_streamer = global_conf["disable_streamer"]
+    #get_results = global_conf["streamer_lid"].predict if not disable_streamer else lid_batch
+    get_results = lid_batch
+    data = list(zip(text))
+    results = get_results(data)
+
+    # Return results
+    for idx, (t, result) in enumerate(zip(text, results), 1):
+        logger.debug("LID results #%d: %s\t%s", idx, t, result)
+
+    return jsonify({
+        "ok": results,
+        "err": "null",
+    })
+
+def lid_batch(data):
+    text, = zip(*data)
+
+    if "model_lid" not in global_conf:
+        model_path = hf_hub_download(repo_id="facebook/fasttext-language-identification", filename="model.bin")
+        global_conf["model_lid"] = fasttext.load_model(model_path)
+
+    model = global_conf["model_lid"]
+    results = []
+
+    for t in text:
+        assert isinstance(t, str)
+
+        labels, _ = model.predict(t, k=1)
+
+        assert len(labels) == 1
+
+        predicted_lang = labels[0].removeprefix("__label__")
+
+        results.append(predicted_lang)
+
+    return results
+
 @app.route('/get_embedding_from_model_embedding_matrix', methods=["GET", "POST"])
 def get_embedding_from_model_embedding_matrix():
     if request.method not in ("GET", "POST"):
@@ -1240,6 +1319,7 @@ def main(args):
     global_conf["streamer_llm_embedding_tokens"] = ThreadedStreamer(lambda d: embedding_tokens_batch(d)[0], batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["streamer_embedding"] = ThreadedStreamer(embedding_from_given_model_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["streamer_get_reward"] = ThreadedStreamer(translate_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
+    #global_conf["streamer_lid"] = ThreadedStreamer(lid_batch, batch_size=args.batch_size, max_latency=streamer_max_latency, worker_timeout=worker_timeout)
     global_conf["disable_streamer"] = disable_streamer
     global_conf["debug"] = args.debug
     global_conf["lock"] = Lock()
