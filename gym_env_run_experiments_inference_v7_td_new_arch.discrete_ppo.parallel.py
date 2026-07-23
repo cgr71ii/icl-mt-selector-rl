@@ -73,7 +73,7 @@ def main():
     parsed_kwargs["model_hidden_size_action_src_sentence"] = parsed_kwargs.get("model_hidden_size_action_src_sentence", 1024)
     parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False)
     parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
-    parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
+    parsed_kwargs["model_hidden_size"] = int(parsed_kwargs.get("model_hidden_size", 1536))
     parsed_kwargs["action_representation"] = "discrete_index"
     parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
 
@@ -211,7 +211,9 @@ def main():
     state_dim_per_token = env_eval_dev.unwrapped.get_attr("state_dim_per_token")[0]
     state_window_length = env_eval_dev.unwrapped.get_attr("state_window_length")[0]
     state_dim_per_token_time_step = env_eval_dev.unwrapped.get_attr("state_dim_per_token_time_step")[0]
-    model_hidden_size_embedding = env_eval_dev.unwrapped.get_attr("model_hidden_size_embedding")[0]
+
+    if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+        state_dim_per_token = env_eval_dev.unwrapped.get_attr("model_hidden_size_embedding")[0]
 
     if state_representation == "representation_per_token_with_features":
         n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
@@ -222,7 +224,7 @@ def main():
     elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
         n_features = state_dim_per_token + (max_icl_examples + 1) + len(_data_icl_examples)
     elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
-        n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(_data_icl_examples)
+        n_features = state_dim_per_token * 2 + (max_icl_examples + 1) + len(_data_icl_examples)
     elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
         n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(_data_icl_examples)
     else:
@@ -294,7 +296,7 @@ def main():
             raise Exception()
 
         if use_transformer:
-            assert state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
+            assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
             assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
 
             #transformer_d_model = 256
@@ -303,7 +305,7 @@ def main():
             transformer_d_model = 32
             #transformer_d_model = 16
 
-            if state_representation == "representation_per_token_with_features_v3":
+            if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v3"):
                 transformer_d_model = 256
 
             dropout_p = 0.0

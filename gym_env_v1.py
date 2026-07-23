@@ -21,6 +21,8 @@ import faiss
 from sacrebleu.metrics import CHRF
 import rank_bm25
 import embeddings as embeddings_utils
+import fasttext
+from huggingface_hub import hf_hub_download
 
 # https://stable-baselines3.readthedocs.io/en/master/guide/custom_env.html
 # https://gymnasium.farama.org/api/env/
@@ -289,22 +291,27 @@ class MTICLEnv(gym.Env):
         self.eval_model_api = _dict_or_default(kwargs, "eval_model_api", "http://127.0.0.1:8000/evaluate_comet_22")
         self.embedding_external_system = _dict_or_default(kwargs, "embedding_external_system", "http://127.0.0.1:8000/get_embedding_from_given_model", f=lambda s: s.rstrip('/'))
         self.reward_model_api = _dict_or_default(kwargs, "reward_model_api", "http://127.0.0.1:8000/get_reward")
+        self.lacomet_like_reward_api = _dict_or_default(kwargs, "lacomet_like_reward_api", '')
 
         assert isinstance(self.translate_model_api, str), f"translate_model_api: {type(self.translate_model_api)}: {self.translate_model_api}"
         assert isinstance(self.embedding_single_token_model_api, str), f"embedding_single_token_model_api: {type(self.embedding_single_token_model_api)}: {self.embedding_single_token_model_api}"
         assert isinstance(self.embedding_pooling_model_api, str), f"embedding_pooling_model_api: {type(self.embedding_pooling_model_api)}: {self.embedding_pooling_model_api}"
         assert isinstance(self.eval_model_api, str), f"eval_model_api: {type(self.eval_model_api)}: {self.eval_model_api}"
         assert isinstance(self.reward_model_api, str), f"reward_model_api: {type(self.reward_model_api)}: {self.reward_model_api}"
+        assert isinstance(self.lacomet_like_reward_api, str), f"lacomet_like_reward_api: {type(self.lacomet_like_reward_api)}: {self.lacomet_like_reward_api}"
+
         self.translate_model_api = self.translate_model_api.split('|')
         self.embedding_pooling_model_api = self.embedding_pooling_model_api.split('|')
         self.embedding_external_system = self.embedding_external_system.split('|')
         self.reward_model_api = self.reward_model_api.split('|')
+        self.lacomet_like_reward_api = self.lacomet_like_reward_api.split('|')
 
         self.logger_wrapper(gym.logger.debug, "translate_model_api (pool size: %d): %s", len(self.translate_model_api), self.translate_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_single_token_model_api: %s", self.embedding_single_token_model_api)
         self.logger_wrapper(gym.logger.debug, "embedding_pooling_model_api (pool size: %d): %s", len(self.embedding_pooling_model_api), self.embedding_pooling_model_api)
         self.logger_wrapper(gym.logger.debug, "eval_model_api: %s", self.eval_model_api)
         self.logger_wrapper(gym.logger.debug, "reward_model_api (pool size: %d): %s", len(self.reward_model_api), self.reward_model_api)
+        self.logger_wrapper(gym.logger.debug, "lacomet_like_reward_api (pool size: %d): %s", len(self.lacomet_like_reward_api), self.lacomet_like_reward_api)
 
         ## Other API parameters
         self.embedding_pooling_model_method_state = _dict_or_default(kwargs, "embedding_pooling_model_method_state", "last")
@@ -433,9 +440,28 @@ class MTICLEnv(gym.Env):
         self.current_icl_examples_prepend = _dict_or_default(kwargs, "current_icl_examples_prepend", False) # current_icl_examples_prepend=True -> insert(0, ...) vs append(...)
         self.state_dim_per_token_time_step = _dict_or_default(kwargs, "state_dim_per_token_time_step", 4)
         self.multi_step_eval = bool(int(_dict_or_default(kwargs, "multi_step_eval", False))) # if True, the reward will be calculated at each step and not only at the end of the episode
+        self.lacomet_like_reward_language = _dict_or_default(kwargs, "lacomet_like_reward_language", '')
         self.rewards = [] # for gathering the rewards from outside the environment
         self.available_actions_strategy_statistics = [] # outside the environment
         self.available_actions_strategy_current_episode_data = {}
+        self.initial_state_int32_group_id = None
+
+        self.reset_initial_state_int32_group_id() # Intended to work with self.repeat_translation_candidates_times
+
+        self.logger_wrapper(gym.logger.info, "Group ID assigned: %s", self.initial_state_int32_group_id)
+
+        if len(self.lacomet_like_reward_language) > 0:
+            self.logger_wrapper(gym.logger.info, "laCOMET-like reward language: %s", self.lacomet_like_reward_language)
+
+            assert self.lacomet_like_reward_language in embeddings_utils.flores_lang_mapping.values(), self.lacomet_like_reward_language
+
+            if len(self.lacomet_like_reward_api[0]) == 0: # Priority: api > local model
+                self.logger_wrapper(gym.logger.info, "Loading LID model")
+
+                model_path = hf_hub_download(repo_id="facebook/fasttext-language-identification", filename="model.bin")
+                self.lid_model = fasttext.load_model(model_path)
+        else:
+            self.lid_model = None
 
         self.logger_wrapper(gym.logger.info, "Current ICL examples will be %s to the state representation (current_icl_examples_prepend=False)", "prepended" if self.current_icl_examples_prepend else "appended")
 
@@ -1390,7 +1416,7 @@ class MTICLEnv(gym.Env):
                             assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["rank"], f"Sonar embeddings available actions strategy: inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['rank']}"
                             assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["score"]), f"Sonar embeddings available actions strategy: inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['score']}"
 
-                gym.logger.info("Available actions strategy: self.available_actions_strategy_current_episode_data['%s'] = %s", src_sentence, self.available_actions_strategy_current_episode_data[src_sentence])
+                #gym.logger.info("Available actions strategy: self.available_actions_strategy_current_episode_data['%s'] = %s", src_sentence, self.available_actions_strategy_current_episode_data[src_sentence])
 
             elif self.available_actions_strategy == "none":
                 self.current_state_window[1] = np.ones_like(self.current_state_window[1])
@@ -1573,6 +1599,27 @@ class MTICLEnv(gym.Env):
         else:
             reward = 0.0
 
+        if len(self.lacomet_like_reward_language) > 0 and translation is not None:
+            assert len(translation) == 1, f"Expected single translation for laCOMET-like reward, got {len(translation)}"
+            assert isinstance(translation[0], str), f"Expected translation to be a list of strings, got {type(translation[0])}: {translation[0]}"
+
+            if len(translation[0].strip()) == 0:
+                reward = 0.0
+            else:
+                if len(self.lacomet_like_reward_api[0]) > 0:
+                    predicted_lang = self.api_lacomet(translation)[0] # expected format: list of strings
+                else:
+                    labels, _ = self.lid_model.predict(translation[0], k=1)
+
+                    assert len(labels) == 1
+
+                    predicted_lang = labels[0].removeprefix("__label__")
+
+                self.logger_wrapper(gym.logger.debug, "laCOMET-like reward: predicted language is %s: %s", predicted_lang, translation[0])
+
+                if predicted_lang != self.lacomet_like_reward_language:
+                    reward = 0.0
+
         return reward
 
     def api_eval(self, src, mt, ref):
@@ -1610,6 +1657,38 @@ class MTICLEnv(gym.Env):
         avg = sum(scores) / len(scores)
 
         return avg, scores
+
+    def api_lacomet(self, text):
+        assert isinstance(text, list)
+
+        url = self.lacomet_like_reward_api
+        url_idx = self.get_int_env_id()
+        url_idx = 0 if url_idx is None else url_idx % len(url)
+        url = url[url_idx]
+        batch_size = self.batch_size
+        data = [{"text": utils.encode_base64(t)} for t in text]
+        result = []
+
+        for idx, batch in enumerate(utils.batchify(data, batch_size)):
+            payload = []
+
+            for sample in batch:
+                payload.append(('text', sample["text"]))
+
+            response = utils.requests_post(url, data=payload)
+
+            assert response.status_code == 200, f"Response status code is not 200 (idx: {idx}): {response.status_code}"
+            assert len(response.text) > 0, f"Response text is empty (idx: {idx})"
+
+            response_text = json.loads(response.text)
+
+            assert response_text["err"] == "null", f"Response error (idx: {idx}): {response_text['err']}"
+
+            response_result = response_text["ok"]
+
+            result.extend(response_result)
+
+        return result
 
     def _get_action_representation_llm(self, idx, batch, src_is_empty=False, trg_is_empty=False):
         assert self.action_representation != "discrete_index", "not support discrete_index action representation"
@@ -1947,7 +2026,7 @@ class MTICLEnv(gym.Env):
             if only_representation and _pooling not in ("target_sentence_probs_mean_reward", "target_sentence_neg_ppl_reward"):
                 shape = tuple(map(int, response.headers["X-Shape"].split(',')))
                 dtype = np.dtype(response.headers["X-Dtype"])
-                arr = np.frombuffer(response.content, dtype=dtype).reshape(shape)
+                arr = np.frombuffer(response.content, dtype=dtype).reshape(shape).copy()
                 response_result = torch.from_numpy(arr)
                 response_result = response_result.detach().cpu() if isinstance(response_result, torch.Tensor) else torch.tensor(response_result)
                 response_result = response_result.to(torch.float32)
@@ -2446,6 +2525,10 @@ class MTICLEnv(gym.Env):
                 self.translation_candidates_selected_consecutive_episode[idx] = 0
                 self.repeat_translation_candidates_times_counter = self.repeat_translation_candidates_times
 
+                self.reset_initial_state_int32_group_id()
+
+                self.logger_wrapper(gym.logger.info, "Group ID assigned: %s", self.initial_state_int32_group_id)
+
         translation_candidate = self.translation_candidate if repeat else None
 
         # Select translation candidate
@@ -2683,12 +2766,14 @@ class MTICLEnv(gym.Env):
 
             #current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
 
-            assert np.isclose(sum(self.current_state_window[4]), len(self.current_icl_examples)), f"{self.current_state_window[4]} vs {len(self.current_icl_examples)}"
+            assert np.isclose(sum((self.current_state_window[4] + 0.5).astype(int)), len(self.current_icl_examples)), f"{self.current_state_window[4]} vs {len(self.current_icl_examples)}"
             assert not np.allclose(self.current_state_window[4], np.zeros_like(self.current_state_window[4]))
 
             self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[2])
             self.logger_wrapper(gym.logger.debug, "First ... last representations: %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
             self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[4]))
+
+            self.current_state_window[4][icl_idx] += 1e-4 * self.time_step # add small value to break ties between examples selected the same number of times, so the order of selection also matters
         elif self.state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
             assert len(observation.shape) == 1, observation.shape
             assert np.isclose(sum(self.current_state_window[2]), 1.0)
@@ -2714,13 +2799,15 @@ class MTICLEnv(gym.Env):
 
             #current_icl_examples_set = set(map(lambda i: '\t'.join(i), self.current_icl_examples))
 
-            assert np.isclose(sum(self.current_state_window[5]), len(self.current_icl_examples)), f"{self.current_state_window[5]} vs {len(self.current_icl_examples)}"
+            assert np.isclose(sum((self.current_state_window[5] + 0.5).astype(int)), len(self.current_icl_examples)), f"{self.current_state_window[5]} vs {len(self.current_icl_examples)}"
             assert not np.allclose(self.current_state_window[5], np.zeros_like(self.current_state_window[5]))
 
             self.logger_wrapper(gym.logger.debug, "Time step representations: %s", self.current_state_window[2])
             self.logger_wrapper(gym.logger.debug, "First ... last representations (src sentence): %s ... %s", self.current_state_window[3][:10], self.current_state_window[3][-10:])
             self.logger_wrapper(gym.logger.debug, "First ... last representations (last ICL example): %s ... %s", self.current_state_window[4][:10], self.current_state_window[4][-10:])
             self.logger_wrapper(gym.logger.debug, "Sum selected ICL examples: %s", sum(self.current_state_window[5]))
+
+            self.current_state_window[5][icl_idx] += 1e-4 * self.time_step # add small value to break ties between examples selected the same number of times, so the order of selection also matters
         elif self.state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             assert len(observation.shape) == 2, observation.shape
 
@@ -2942,6 +3029,15 @@ class MTICLEnv(gym.Env):
             scores[src_translation_candidate_idx] = 0.0
 
         return scores
+
+    def reset_initial_state_int32_group_id(self):
+        # 32-bit random integer
+        n = None
+
+        while n is None or (self.initial_state_int32_group_id is not None and self.initial_state_int32_group_id == n):
+            n = int(np.random.randint(0, 2**31 - 1, dtype=np.int32))
+
+        self.initial_state_int32_group_id = n
 
 if __name__ == "__main__":
     src_lang = sys.argv[1]

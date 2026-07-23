@@ -8,7 +8,7 @@ import requests
 def encode_base64(s):
     return base64.b64encode(s.encode('utf-8')).decode('utf-8')
 
-def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, avoid_icl_example_equal_to_src=True):
+def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, avoid_icl_example_equal_to_src=True, no_duplicates=True):
     assert len(icl_examples_pool) > icl_num_examples, f"icl_examples_pool must contain more examples than icl_num_examples (at least, one more) to guarantee that is possible to sample a different src sentence: {len(icl_examples_pool)} vs {icl_num_examples}"
 
     for i in range(0, len(lst), batch_size):
@@ -18,14 +18,21 @@ def batchify(lst, batch_size, icl_examples_pool=None, icl_num_examples=0, avoid_
         for j in range(bsz):
             while True:
                 _icl_examples = random.sample(icl_examples_pool, icl_num_examples) if icl_examples_pool is not None and icl_num_examples > 0 else []
+                add_icl_example = False
 
                 if avoid_icl_example_equal_to_src and len(_icl_examples) > 0:
                     src_sentence = lst[i + j].strip()
                     src_icl_examples = {icl_src_example.strip() for icl_src_example, _ in _icl_examples}
 
                     if src_sentence not in src_icl_examples:
-                        break
+                        add_icl_example = True
                 else:
+                    add_icl_example = True
+
+                if no_duplicates and len(set(_icl_examples)) < len(_icl_examples):
+                    add_icl_example = False
+
+                if add_icl_example:
                     break
 
             assert len(_icl_examples) == icl_num_examples, f"Each icl example must have exactly {icl_num_examples} elements, got {len(_icl_examples)}"

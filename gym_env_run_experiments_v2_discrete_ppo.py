@@ -227,6 +227,8 @@ def main(*main_args, **main_kwargs):
         # default values
         min_conf_debug = False
         #min_conf_debug = True
+        tmp_conf = False
+        #tmp_conf = True # TODO remember to remove!
         num_envs = max(1, int(parsed_kwargs.pop("num_envs", 80)))
         device = parsed_kwargs.get("device", "cuda" if utils.use_cuda() else "cpu")
         max_icl_examples = int(parsed_kwargs.get("max_icl_examples", 5))
@@ -243,6 +245,16 @@ def main(*main_args, **main_kwargs):
         init_return_dict_normalization_fn = parsed_kwargs.pop("init_return_dict_normalization_fn", None)
         init_return_dict = {}
         reward_division = float(parsed_kwargs.get("reward_division", 1.0))
+        input_model_path = parsed_kwargs.pop("input_model_path", None)
+
+        if tmp_conf:
+            assert input_model_path is not None
+
+        if input_model_path is not None:
+            assert input_model_path.endswith("_model.zip"), input_model_path
+            assert utils.file_exists(input_model_path), f"Input model not found: {input_model_path}"
+
+            logger.info("Loading model: %s", input_model_path)
 
         if init_return_dict_normalization_fn is not None:
             with open(init_return_dict_normalization_fn, "rt") as fd:
@@ -263,9 +275,11 @@ def main(*main_args, **main_kwargs):
 
         if min_conf_debug:
             num_envs = 10 # TODO remove
-            disable_eval = False # TODO remove
+            #disable_eval = False # TODO remove
+            disable_eval = True
             store_model_on_eval = False # TODO remove
-            n_steps = 5
+            #n_steps = 5
+            n_steps = 10
 
         logger.info("n_steps: %d; the model will be trained with %d data points (num_envs * n_steps)", n_steps, num_envs * n_steps)
 
@@ -322,7 +336,7 @@ def main(*main_args, **main_kwargs):
         parsed_kwargs["enable_eos_action"] = parsed_kwargs.get("enable_eos_action", False)
         parsed_kwargs["actions_without_replacement"] = parsed_kwargs.get("actions_without_replacement", False) # allow/disallow selecting the same ICL example more than once in the same trajectory
         parsed_kwargs["current_icl_examples_prepend"] = bool(int(parsed_kwargs.get("current_icl_examples_prepend", False)))
-        parsed_kwargs["model_hidden_size"] = parsed_kwargs.get("model_hidden_size", 1536)
+        parsed_kwargs["model_hidden_size"] = int(parsed_kwargs.get("model_hidden_size", 1536))
         parsed_kwargs["multi_step_eval"] = bool(int(parsed_kwargs.get("multi_step_eval", 0)))
         parsed_kwargs["embedding_pooling_model_method_state"] = parsed_kwargs.get("embedding_pooling_model_method_state", "last")
         parsed_kwargs["embedding_pooling_model_layer"] = parsed_kwargs.get("embedding_pooling_model_layer", -1)
@@ -473,7 +487,7 @@ def main(*main_args, **main_kwargs):
         #max_steps = 100000 # steps while training
         #max_steps = 200000
         #max_steps = int(parsed_kwargs.pop("max_steps", 1000000))
-        max_steps = int(parsed_kwargs.pop("max_steps", 500000))
+        max_steps = int(parsed_kwargs.pop("max_steps", 160000 if tmp_conf else 500000))
         #max_steps = 10000000 # steps while training # TODO remove?
         max_steps += num_envs + 1 # to be sure that the last model is stored after training, given that eval_freq is adjusted by num_envs
         linear_bottleneck = int(parsed_kwargs.pop("linear_bottleneck", 0))
@@ -490,7 +504,8 @@ def main(*main_args, **main_kwargs):
 
         if min_conf_debug:
             batch_size = 25 # TODO remove
-            max_steps = 200
+            #max_steps = 200
+            max_steps = 1000
 
         assert (n_steps * num_envs) % batch_size == 0, f"Expected n_steps * num_envs to be divisible by batch_size, but got n_steps={n_steps}, num_envs={num_envs}, batch_size={batch_size}"
 
@@ -522,8 +537,10 @@ def main(*main_args, **main_kwargs):
         state_dim_per_token = env_eval_dev_unwrapped.get_attr("state_dim_per_token")[0]
         state_window_length = env_eval_dev_unwrapped.get_attr("state_window_length")[0]
         state_dim_per_token_time_step = env_eval_dev_unwrapped.get_attr("state_dim_per_token_time_step")[0]
-        model_hidden_size_embedding = env_eval_dev_unwrapped.get_attr("model_hidden_size_embedding")[0]
         callbacks = []
+
+        if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
+            state_dim_per_token = env_eval_dev_unwrapped.get_attr("model_hidden_size_embedding")[0]
 
         if state_representation == "representation_per_token_with_features":
             n_features = state_dim_per_token * (state_window_length - 1) # -1 due to the action representation which we skip
@@ -534,7 +551,7 @@ def main(*main_args, **main_kwargs):
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples":
             n_features = state_dim_per_token + (max_icl_examples + 1) + len(data_icl_examples)
         elif state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
-            n_features = model_hidden_size_embedding * 2 + (max_icl_examples + 1) + len(data_icl_examples)
+            n_features = state_dim_per_token * 2 + (max_icl_examples + 1) + len(data_icl_examples)
         elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
             n_features = state_dim_per_token * (state_window_length - 4) + (max_icl_examples + 1) + len(data_icl_examples)
         else:
@@ -551,7 +568,7 @@ def main(*main_args, **main_kwargs):
             normalize_kwargs["init_return_dict"] = init_return_dict
 
             if state_representation == "representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example":
-                normalize_kwargs["offset"] = model_hidden_size_embedding * 2 # TODO is necessary?
+                normalize_kwargs["offset"] = state_dim_per_token * 2 # TODO is necessary?
                 normalize_kwargs["norm_obs"] = False
             elif state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"):
                 # TODO set offset?
@@ -602,10 +619,18 @@ def main(*main_args, **main_kwargs):
 
         #min_critic_learning_rate = critic_learning_rate / 10
         min_critic_learning_rate = 0.0 if lr_linear_decay else critic_learning_rate
+        min_clip_range = clip_range / 10
+        min_ent_coef = ent_coef / 10
+
+        if tmp_conf:
+            critic_learning_rate = 1.65e-05
+            clip_range = 0.039032
+            ent_coef = 0.019516
+
         total_steps = max(int(max_steps / num_envs / n_steps + 0.5), 1)
         critic_lr_schedule = LinearWithWarmUpLRSchedule(warmup_steps=warmup_steps, initial_lr=critic_learning_rate, total_steps=total_steps, logger=logger, min_lr_polyfit=min_critic_learning_rate, str_id="critic")
-        clip_range = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=clip_range, total_steps=total_steps, logger=logger, min_lr_polyfit=clip_range / 10, str_id="clip_range", skip_update_learning_rate_param=True)
-        ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=ent_coef / 10, str_id="ent_coef", skip_update_learning_rate_param=True)
+        clip_range = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=clip_range, total_steps=total_steps, logger=logger, min_lr_polyfit=min_clip_range, str_id="clip_range", skip_update_learning_rate_param=True)
+        ent_coef = LinearWithWarmUpLRSchedule(warmup_steps=0, initial_lr=ent_coef, total_steps=total_steps, logger=logger, min_lr_polyfit=min_ent_coef, str_id="ent_coef", skip_update_learning_rate_param=True)
 
         if n_features <= 0:
             features_extractor_class = FlattenExtractor
@@ -637,7 +662,7 @@ def main(*main_args, **main_kwargs):
                 raise Exception()
 
             if use_transformer:
-                assert state_representation in ("representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
+                assert state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v2", "representation_per_token_with_features_v3"), f"Unexpected state_representation: {state_representation}"
                 assert state_window_length - 4 > 0, f"Expected state_window_length to be greater than 4 for state representation {state_representation}, but got {state_window_length}"
 
                 #transformer_d_model = 256
@@ -646,7 +671,7 @@ def main(*main_args, **main_kwargs):
                 transformer_d_model = 32
                 #transformer_d_model = 16
 
-                if state_representation == "representation_per_token_with_features_v3":
+                if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v3"):
                     transformer_d_model = 256
 
                 #dropout_p = 0.0
@@ -735,9 +760,9 @@ def main(*main_args, **main_kwargs):
         logger.info("temperature: %s, available_actions_strategy: %s", temperature, available_actions_strategy)
 
         model_class = PPO
-        model = model_class(
-            "MlpPolicy",
-            env,
+        model = (model_class.load if input_model_path is not None else model_class)(
+            input_model_path if input_model_path is not None else "MlpPolicy",
+            env=env,
             verbose=1,
             seed=seed,
             batch_size=batch_size,
