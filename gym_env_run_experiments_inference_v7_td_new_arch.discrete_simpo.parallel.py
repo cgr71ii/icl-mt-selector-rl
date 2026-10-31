@@ -254,16 +254,18 @@ def main():
         "pi": [256, 256],
         "vf": [256, 256]
     } # "pi" is actor and "vf" the critic
+    empty_layers = False
 
     logger.info("net_arch: %s, linear_bottleneck: %s, activation_fn: %s", net_arch, linear_bottleneck, activation_fn)
 
     if use_transformer:
         logger.info("Transformer enabled: using transformer+MLP")
 
+        empty_layers = True
         net_arch = {
             "pi": [],
             "vf": [],
-            "empty_layers": True, # custom code
+            "empty_layers": empty_layers, # custom code
         }
 
     if n_features <= 0:
@@ -327,7 +329,7 @@ def main():
                 "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
                 "skip_n_word_embeddings_from_observation": "0:0",
                 "expected_seq_len": state_window_length - 4,
-                "last_layer_norm": False,
+                "last_layer_norm": empty_layers, # Do not set to true when empty_layers is False because the MLP layers after the feature extractor already have layer normalization, so it can be redundant and even harm the performance
                 "last_linear_layer": True,
                 "check_zeros": False,
                 "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features_v2" else False,
