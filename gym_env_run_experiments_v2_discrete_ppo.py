@@ -496,6 +496,7 @@ def main(*main_args, **main_kwargs):
         n_epochs = int(parsed_kwargs.pop("n_epochs", 2))
         vf_coef = float(parsed_kwargs.pop("vf_coef", 0.5))
         target_kl = parsed_kwargs.pop("target_kl", None)
+        target_kl = float(target_kl) if target_kl is not None else None
         critic_learning_rate = float(parsed_kwargs.pop("learning_rate", 5e-5))
         actor_learning_rate = critic_learning_rate
         use_transformer = bool(int(parsed_kwargs.pop("use_transformer", 0)))
@@ -589,13 +590,16 @@ def main(*main_args, **main_kwargs):
         #net_arch = [512, 128, 32]
         #net_arch = [512, 256, 128]
         #net_arch = [1024, 512, 256]
+        empty_layers = False
+
         if use_transformer:
             logger.info("Transformer enabled: using transformer+MLP")
 
+            empty_layers = True
             net_arch = {
                 "pi": [],
                 "vf": [],
-                "empty_layers": True, # custom code
+                "empty_layers": empty_layers, # custom code
             }
         elif net_arch is None:
             net_arch = {
@@ -674,9 +678,9 @@ def main(*main_args, **main_kwargs):
                 if state_representation in ("representation_one_hot_representation_time_and_selected_icl_examples_external_embedding_src_and_last_example", "representation_per_token_with_features_v3"):
                     transformer_d_model = 256
 
-                #dropout_p = 0.0
+                dropout_p = 0.0
                 #dropout_p = 0.1
-                dropout_p = 0.2
+                #dropout_p = 0.2
                 #dropout_p = 0.3
                 transformer_kwargs = {
                     "d_model": transformer_d_model,
@@ -698,7 +702,7 @@ def main(*main_args, **main_kwargs):
                     "max_seq_len": 8192, # the positional encoding is absolute and using this big value does not affect to the previous positions
                     "skip_n_word_embeddings_from_observation": "0:0",
                     "expected_seq_len": state_window_length - 4,
-                    "last_layer_norm": False, # Do not set to true because the MLP layers after the feature extractor already have layer normalization, so it can be redundant and even harm the performance
+                    "last_layer_norm": empty_layers, # Do not set to true when empty_layers is False because the MLP layers after the feature extractor already have layer normalization, so it can be redundant and even harm the performance
                     "last_linear_layer": True,
                     "check_zeros": False,
                     "remove_first_column_of_zeros": True if state_representation == "representation_per_token_with_features_v2" else False,
@@ -740,7 +744,7 @@ def main(*main_args, **main_kwargs):
                 "transformer_kwargs": transformer_kwargs,
                 "custom_features_dim": custom_features_dim,
             }
-            features_extractor_vf_kwargs = dict(features_extractor_kwargs)
+            features_extractor_vf_kwargs = copy.deepcopy(features_extractor_kwargs)
 
             if "transformer_kwargs" in features_extractor_vf_kwargs:
                 features_extractor_vf_kwargs["transformer_kwargs"]["embedding_dropout"] = 0.0 # disable dropout for the critic as it can harm the performance

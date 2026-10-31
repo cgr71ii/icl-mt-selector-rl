@@ -179,6 +179,9 @@ class MTICLEnv(gym.Env):
 
         # kNN
         self.data_icl_examples = []
+        self.data_icl_examples_groups = [] # group of each ICL example (optional 3rd column of the ICL examples file)
+        self.data_icl_examples_has_groups = False # if False, all ICL examples belong to the group self.data_icl_examples_default_group
+        self.data_icl_examples_default_group = "general"
         self.data_icl_examples_bm25_corpus = []
         self.data_icl_examples_bm25_corpus_tokenized = []
         self.knn_always_add_eos_action = _dict_or_default(kwargs, "knn_always_add_eos_action", False) # critic will evaluate when is needed
@@ -1356,65 +1359,79 @@ class MTICLEnv(gym.Env):
                 if src_sentence not in self.available_actions_strategy_current_episode_data:
                     self.available_actions_strategy_current_episode_data[src_sentence] = {}
 
+                assert len(self.data_icl_examples) == self.num_icl_examples, f"Available actions strategy: expected ICL examples indices to match the action indices: {len(self.data_icl_examples)} vs {self.num_icl_examples}"
+
+                # top-N ICL examples for each group (and strategy)
                 if self.available_actions_strategy in ("bm25", "bm25_and_sonar_embeddings"):
-                    bm25_scores = self.get_scores_bm25()
+                    for group, group_indices in self.data_icl_examples_group_indices.items():
+                        label = self.get_available_actions_strategy_label("bm25", group)
+                        bm25_scores = self.get_scores_bm25(group=group) # scores of the ICL examples of the group
 
-                    assert bm25_scores.shape == (self.num_icl_examples,), f"Expected BM25 scores shape {(self.num_icl_examples,)}, got {bm25_scores.shape}"
+                        assert bm25_scores.shape == group_indices.shape, f"Expected BM25 scores shape {group_indices.shape} (group: {group}), got {bm25_scores.shape}"
 
-                    top_n_indices = np.argpartition(bm25_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
-                    top_n_indices_sorted = top_n_indices[np.argsort(bm25_scores[top_n_indices])[::-1]] # sort the top n indices by score in descending order
-                    self.current_state_window[1][top_n_indices] = 1.0
+                        n = min(self.available_actions_strategy_n, len(group_indices))
+                        top_n_group_indices = np.argpartition(bm25_scores, -n)[-n:]
+                        top_n_group_indices_sorted = top_n_group_indices[np.argsort(bm25_scores[top_n_group_indices])[::-1]] # sort the top n indices by score in descending order
+                        top_n_indices = group_indices[top_n_group_indices] # group indices -> ICL examples indices
+                        self.current_state_window[1][top_n_indices] = 1.0
+                        discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+
+                        assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
+
+                        #most_similar_icl_example = self.data_icl_examples[group_indices[top_n_group_indices_sorted[0]]][0]
+
+                        #self.logger_wrapper(gym.logger.info, "BM25 available actions strategy: most similar (src) ICL example (src sentence: %s): %s (BM25 score: %.4f)", src_sentence, most_similar_icl_example, bm25_scores[top_n_group_indices_sorted[0]])
+
+                        for rank, top_n_group_idx in enumerate(top_n_group_indices_sorted, 1):
+                            icl_example = '\t'.join(self.data_icl_examples[group_indices[top_n_group_idx]])
+                            score = bm25_scores[top_n_group_idx]
+
+                            if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
+                                self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
+
+                            if label not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
+                                self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label] = {"rank": rank, "score": score}
+                            else:
+                                assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]["rank"], f"BM25 available actions strategy ({label}): inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]['rank']}"
+                                assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]["score"]), f"BM25 available actions strategy ({label}): inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]['score']}"
+
                     discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
 
-                    assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
-                    assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
-
-                    #most_similar_icl_example = self.data_icl_examples[top_n_indices_sorted[0]][0]
-
-                    #self.logger_wrapper(gym.logger.info, "BM25 available actions strategy: most similar (src) ICL example (src sentence: %s): %s (BM25 score: %.4f)", src_sentence, most_similar_icl_example, bm25_scores[top_n_indices_sorted[0]])
-
-                    for rank, top_n_idx in enumerate(top_n_indices_sorted, 1):
-                        icl_example = '\t'.join(self.data_icl_examples[top_n_idx])
-                        score = bm25_scores[top_n_idx]
-
-                        if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
-                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
-
-                        if "bm25" not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
-                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"] = {"rank": rank, "score": score}
-                        else:
-                            assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"]["rank"], f"BM25 available actions strategy: inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['bm25']['rank']}"
-                            assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["bm25"]["score"]), f"BM25 available actions strategy: inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['bm25']['score']}"
+                    assert np.sum(discrete_current_state_window) == sum(min(self.available_actions_strategy_n, len(group_indices)) for group_indices in self.data_icl_examples_group_indices.values()) # groups are disjoint
 
                 if self.available_actions_strategy in ("sonar_embeddings", "bm25_and_sonar_embeddings"):
-                    embeddings_scores = self.get_scores_embeddings()
+                    for group, group_indices in self.data_icl_examples_group_indices.items():
+                        label = self.get_available_actions_strategy_label("sonar_embeddings", group)
+                        embeddings_scores = self.get_scores_embeddings(group=group) # scores of the ICL examples of the group
 
-                    assert embeddings_scores.shape == (self.num_icl_examples,), f"Expected Sonar embeddings scores shape {(self.num_icl_examples,)}, got {embeddings_scores.shape}"
+                        assert embeddings_scores.shape == group_indices.shape, f"Expected Sonar embeddings scores shape {group_indices.shape} (group: {group}), got {embeddings_scores.shape}"
 
-                    top_n_indices = np.argpartition(embeddings_scores, -self.available_actions_strategy_n)[-self.available_actions_strategy_n:]
-                    top_n_indices_sorted = top_n_indices[np.argsort(embeddings_scores[top_n_indices])[::-1]] # sort the top n indices by score in descending order
-                    self.current_state_window[1][top_n_indices] = 1.0
-                    discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+                        n = min(self.available_actions_strategy_n, len(group_indices))
+                        top_n_group_indices = np.argpartition(embeddings_scores, -n)[-n:]
+                        top_n_group_indices_sorted = top_n_group_indices[np.argsort(embeddings_scores[top_n_group_indices])[::-1]] # sort the top n indices by score in descending order
+                        top_n_indices = group_indices[top_n_group_indices] # group indices -> ICL examples indices
+                        self.current_state_window[1][top_n_indices] = 1.0
+                        discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
 
-                    assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"Sonar embeddings available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
-                    #assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
+                        assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"Sonar embeddings available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
+                        #assert np.sum(discrete_current_state_window) == min(self.available_actions_strategy_n, len(self.data_icl_examples))
 
-                    #most_similar_icl_example = self.data_icl_examples[top_n_indices_sorted[0]][0]
+                        #most_similar_icl_example = self.data_icl_examples[group_indices[top_n_group_indices_sorted[0]]][0]
 
-                    #self.logger_wrapper(gym.logger.info, "Sonar embeddings available actions strategy: most similar (src) ICL example (src sentence: %s): %s (cosine similarity: %.4f)", src_sentence, most_similar_icl_example, embeddings_scores[top_n_indices_sorted[0]])
+                        #self.logger_wrapper(gym.logger.info, "Sonar embeddings available actions strategy: most similar (src) ICL example (src sentence: %s): %s (cosine similarity: %.4f)", src_sentence, most_similar_icl_example, embeddings_scores[top_n_group_indices_sorted[0]])
 
-                    for rank, top_n_idx in enumerate(top_n_indices_sorted, 1):
-                        icl_example = '\t'.join(self.data_icl_examples[top_n_idx])
-                        score = embeddings_scores[top_n_idx]
+                        for rank, top_n_group_idx in enumerate(top_n_group_indices_sorted, 1):
+                            icl_example = '\t'.join(self.data_icl_examples[group_indices[top_n_group_idx]])
+                            score = embeddings_scores[top_n_group_idx]
 
-                        if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
-                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
+                            if icl_example not in self.available_actions_strategy_current_episode_data[src_sentence]:
+                                self.available_actions_strategy_current_episode_data[src_sentence][icl_example] = {}
 
-                        if "sonar_embeddings" not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
-                            self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"] = {"rank": rank, "score": score}
-                        else:
-                            assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["rank"], f"Sonar embeddings available actions strategy: inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['rank']}"
-                            assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example]["sonar_embeddings"]["score"]), f"Sonar embeddings available actions strategy: inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example]['sonar_embeddings']['score']}"
+                            if label not in self.available_actions_strategy_current_episode_data[src_sentence][icl_example]:
+                                self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label] = {"rank": rank, "score": score}
+                            else:
+                                assert rank == self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]["rank"], f"Sonar embeddings available actions strategy ({label}): inconsistent rank for ICL example {icl_example} and source sentence {src_sentence}: {rank} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]['rank']}"
+                                assert np.isclose(score, self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]["score"]), f"Sonar embeddings available actions strategy ({label}): inconsistent score for ICL example {icl_example} and source sentence {src_sentence}: {score} vs {self.available_actions_strategy_current_episode_data[src_sentence][icl_example][label]['score']}"
 
                 #gym.logger.info("Available actions strategy: self.available_actions_strategy_current_episode_data['%s'] = %s", src_sentence, self.available_actions_strategy_current_episode_data[src_sentence])
 
@@ -1515,12 +1532,23 @@ class MTICLEnv(gym.Env):
 
         with utils.open_or_iter(self.file_data_icl_examples, "rt") as fd:
             for idx, url_entry in enumerate(fd, 1):
-                # Format: source<tab>reference
+                # Format: source<tab>reference[<tab>group]
 
                 try:
                     entry_data = url_entry.rstrip("\r\n").split('\t')
 
-                    assert len(entry_data) == 2
+                    assert len(entry_data) in (2, 3), f"Expected 2 or 3 columns, got {len(entry_data)}"
+
+                    has_group = len(entry_data) == 3
+
+                    if idx == 1:
+                        self.data_icl_examples_has_groups = has_group
+
+                    assert has_group == self.data_icl_examples_has_groups, f"Mixed ICL examples entries: either all lines contain the group (3rd column) or none of them (first line has group: {self.data_icl_examples_has_groups})"
+
+                    group = entry_data.pop(2).strip() if has_group else self.data_icl_examples_default_group
+
+                    assert len(group) > 0, "Empty group"
 
                     #src_sentence, trg_sentence = entry_data
 
@@ -1528,6 +1556,7 @@ class MTICLEnv(gym.Env):
                         self.src_data_overlap_src_icl_examples += 1
 
                     self.data_icl_examples.append(entry_data)
+                    self.data_icl_examples_groups.append(group)
                     self.data_icl_examples_bm25_corpus.append(entry_data[0])
                     self.data_icl_examples_bm25_corpus_tokenized.append(self.data_icl_examples_bm25_corpus[-1].split())
                 except Exception as e:
@@ -1544,6 +1573,44 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): finished! %d entries read (%d URLs loaded)", idx, len(self.data_icl_examples))
 
         self.data_icl_examples_bm25 = rank_bm25.BM25Okapi(self.data_icl_examples_bm25_corpus_tokenized)
+
+        # Groups of ICL examples
+        icl_example2group = {}
+
+        for icl_example, group in zip(self.data_icl_examples, self.data_icl_examples_groups):
+            # Avoid collisions in the ICL examples file (i.e., same ICL example in different groups)
+            icl_example_str = '\t'.join(icl_example)
+
+            assert icl_example_str not in icl_example2group, f"Duplicated ICL example (groups: '{icl_example2group.get(icl_example_str)}' and '{group}'). Remove the collisions from the ICL examples file: {icl_example_str}"
+
+            icl_example2group[icl_example_str] = group
+
+        self.data_icl_examples_group_indices = {} # group -> list with indices of self.data_icl_examples
+
+        for icl_example_idx, group in enumerate(self.data_icl_examples_groups):
+            if group not in self.data_icl_examples_group_indices:
+                self.data_icl_examples_group_indices[group] = []
+
+            self.data_icl_examples_group_indices[group].append(icl_example_idx)
+
+        self.data_icl_examples_group_indices = {group: np.array(indices, dtype=np.int64) for group, indices in self.data_icl_examples_group_indices.items()}
+        self.data_icl_examples_bm25_corpus_per_group = {}
+        self.data_icl_examples_bm25_per_group = {} # BM25 statistics (e.g., IDF) depend on the corpus, so each group needs its own index
+
+        for group, indices in self.data_icl_examples_group_indices.items():
+            if len(self.data_icl_examples_group_indices) == 1:
+                # Single group: reuse the global BM25 index
+                self.data_icl_examples_bm25_corpus_per_group[group] = self.data_icl_examples_bm25_corpus
+                self.data_icl_examples_bm25_per_group[group] = self.data_icl_examples_bm25
+            else:
+                self.data_icl_examples_bm25_corpus_per_group[group] = [self.data_icl_examples_bm25_corpus[i] for i in indices]
+                self.data_icl_examples_bm25_per_group[group] = rank_bm25.BM25Okapi([self.data_icl_examples_bm25_corpus_tokenized[i] for i in indices])
+
+        self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): groups (provided in file: %s): %s", self.data_icl_examples_has_groups, {group: len(indices) for group, indices in self.data_icl_examples_group_indices.items()})
+
+    def get_available_actions_strategy_label(self, strategy, group):
+        # Without groups in the ICL examples file, the label is just the strategy (i.e., same statistics as before groups were supported)
+        return f"{strategy}:{group}" if self.data_icl_examples_has_groups else strategy
 
     def insert_embeddings(self, urls, embeddings, _index=None, _urls_representation=None, _urls_representation_url2idx=None, update_representation=True, check_l2_norm=True):
         assert self.action_representation != "discrete_index", "not support discrete_index action representation"
@@ -2960,7 +3027,8 @@ class MTICLEnv(gym.Env):
 
         return focus_icl_example_score
 
-    def get_scores_bm25(self, remove_overlapping_actions=False, remove_source_sentence_from_scores=True):
+    def get_scores_bm25(self, remove_overlapping_actions=False, remove_source_sentence_from_scores=True, group=None):
+        # group=None -> scores of all ICL examples; otherwise, scores of the ICL examples of the group (same order as self.data_icl_examples_group_indices[group])
         assert isinstance(self.translation_candidate, int), type(self.translation_candidate)
         assert isinstance(self.current_icl_examples, list), type(self.current_icl_examples)
         assert isinstance(self.data[self.translation_candidate][0], str), type(self.data[self.translation_candidate][0])
@@ -2974,13 +3042,15 @@ class MTICLEnv(gym.Env):
         # BM25
         assert len(self.data_icl_examples_bm25_corpus) >= self.current_max_icl_examples
 
+        bm25 = self.data_icl_examples_bm25 if group is None else self.data_icl_examples_bm25_per_group[group]
+        corpus = self.data_icl_examples_bm25_corpus if group is None else self.data_icl_examples_bm25_corpus_per_group[group]
         tokenized_query = src_translation_candidate.split()
-        scores = self.data_icl_examples_bm25.get_scores(tokenized_query)
+        scores = bm25.get_scores(tokenized_query)
         #top_n = self.data_icl_examples_bm25.get_top_n(tokenized_query, corpus, n=len(scores)) # debug
 
         assert isinstance(scores, np.ndarray), f"Expected BM25 scores to be a numpy array, got {type(scores)}: {scores}"
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
-        assert len(scores) == len(self.data_icl_examples_bm25_corpus) == len(self.data_icl_examples_bm25_corpus_tokenized), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples_bm25_corpus_tokenized)}"
+        assert len(scores) == len(corpus), f"BM25 scores length mismatch (group: {group}): {len(scores)} vs {len(corpus)}"
 
         scores = scores.copy()
 
@@ -2990,16 +3060,16 @@ class MTICLEnv(gym.Env):
             for idx, current_icl_example in enumerate(self.current_icl_examples):
                 current_icl_example_str = str(current_icl_example[0])
 
-                if current_icl_example_str in self.data_icl_examples_bm25_corpus:
-                    idx2 = self.data_icl_examples_bm25_corpus.index(current_icl_example_str, found_idx)
+                if current_icl_example_str in corpus:
+                    idx2 = corpus.index(current_icl_example_str, found_idx)
 
                     assert idx == idx2
 
                     found_idx = idx2 + 1
                     scores[idx2] = 0.0
 
-        if remove_source_sentence_from_scores and src_translation_candidate in self.data_icl_examples_bm25_corpus:
-            src_translation_candidate_idx = self.data_icl_examples_bm25_corpus.index(src_translation_candidate)
+        if remove_source_sentence_from_scores and src_translation_candidate in corpus:
+            src_translation_candidate_idx = corpus.index(src_translation_candidate)
             argmax_score = np.argmax(scores)
 
             assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest BM25 score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
@@ -3008,8 +3078,9 @@ class MTICLEnv(gym.Env):
 
         return scores
 
-    def get_scores_embeddings(self, remove_source_sentence_from_scores=True):
+    def get_scores_embeddings(self, remove_source_sentence_from_scores=True, group=None):
         # Embeddings similarity (cosine similarity)
+        # group=None -> scores of all ICL examples; otherwise, scores of the ICL examples of the group (same order as self.data_icl_examples_group_indices[group])
         src_translation_candidate = str(self.data[self.translation_candidate][0])
         scores = self.data_similarity_matrix_embeddings[self.translation_candidate]
 
@@ -3017,10 +3088,11 @@ class MTICLEnv(gym.Env):
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
         assert len(scores) == len(self.data_icl_examples) == len(self.data_icl_examples), f"BM25 scores length mismatch: {len(scores)} vs {len(self.data_icl_examples_bm25_corpus)} vs {len(self.data_icl_examples)}"
 
-        scores = scores.copy()
+        corpus = self.data_icl_examples_bm25_corpus if group is None else self.data_icl_examples_bm25_corpus_per_group[group]
+        scores = scores.copy() if group is None else scores[self.data_icl_examples_group_indices[group]] # fancy indexing already returns a copy
 
-        if remove_source_sentence_from_scores and src_translation_candidate in self.data_icl_examples_bm25_corpus: # we use self.data_icl_examples_bm25_corpus as the source sentence is guaranteed to be in this corpus (as it is used for BM25)
-            src_translation_candidate_idx = self.data_icl_examples_bm25_corpus.index(src_translation_candidate)
+        if remove_source_sentence_from_scores and src_translation_candidate in corpus: # we use the BM25 corpus as the source sentence is guaranteed to be in this corpus (as it is used for BM25)
+            src_translation_candidate_idx = corpus.index(src_translation_candidate)
             argmax_score = np.argmax(scores)
 
             assert argmax_score == src_translation_candidate_idx, f"Expected source sentence to have the highest score, got argmax_score {argmax_score} with score {scores[argmax_score]} vs source sentence idx {src_translation_candidate_idx} with score {scores[src_translation_candidate_idx]}"
