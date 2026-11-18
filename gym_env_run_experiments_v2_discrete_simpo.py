@@ -47,6 +47,7 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
         episode_rewards = []
         episode_lengths = []
         episode_available_actions_strategy_statistics = {}
+        episode_available_actions_strategy_statistics_per_selection = {} # one element per selected ICL example (i.e., counts add up to the number of episodes for each step)
         all_rewards_data = env.unwrapped.get_attr("rewards")
         all_available_actions_strategy_statistics_data = env.unwrapped.get_attr("available_actions_strategy_statistics")
         #gym.logger.error("wasd8686: %s", all_rewards)
@@ -74,9 +75,11 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
 
                     if k + 1 not in episode_available_actions_strategy_statistics:
                         episode_available_actions_strategy_statistics[k + 1] = []
+                        episode_available_actions_strategy_statistics_per_selection[k + 1] = []
 
                     only_strategy_and_rank = [(d[0], d[1]) for d in all_available_actions_strategy_statistics_data[i][j][k]]
                     episode_available_actions_strategy_statistics[k + 1].extend(only_strategy_and_rank)
+                    episode_available_actions_strategy_statistics_per_selection[k + 1].append(tuple(sorted(only_strategy_and_rank))) # all the (strategy, rank) of the selected ICL example as a single element
 
                 if len(all_rewards[i][j]) == 0:
                     #del all_rewards[i][j]
@@ -95,6 +98,13 @@ def create_callback_episode_rewards(n_eval_episodes, optuna_trial=None):
             episode_available_actions_strategy_statistics[episode_step] = Counter(episode_available_actions_strategy_statistics[episode_step])
 
             print(f"episode_available_actions_strategy_statistics: episode step {episode_step}: {episode_available_actions_strategy_statistics[episode_step]}")
+
+        for episode_step, per_selection in episode_available_actions_strategy_statistics_per_selection.items():
+            # count each selected ICL example once: all its (strategy, rank), and the groups that retrieved it (label format: strategy[:group])
+            per_selection_groups = [tuple(sorted({label.split(':', 1)[1] if ':' in label else "general" for label, _ in strategies_and_ranks})) for strategies_and_ranks in per_selection]
+
+            print(f"episode_available_actions_strategy_statistics_per_selection: episode step {episode_step} (selections: {len(per_selection)}): {Counter(per_selection)}")
+            print(f"episode_available_actions_groups_per_selection: episode step {episode_step} (selections: {len(per_selection)}): {Counter(per_selection_groups)}")
 
         sys.stdout.flush()
 

@@ -21,6 +21,7 @@ import faiss
 from sacrebleu.metrics import CHRF
 import rank_bm25
 import embeddings as embeddings_utils
+from sklearn.preprocessing import normalize as sklearn_normalize
 import fasttext
 from huggingface_hub import hf_hub_download
 
@@ -179,7 +180,7 @@ class MTICLEnv(gym.Env):
 
         # kNN
         self.data_icl_examples = []
-        self.data_icl_examples_groups = [] # group of each ICL example (optional 3rd column of the ICL examples file)
+        self.data_icl_examples_groups = [] # groups of each ICL example (optional 3rd column of the ICL examples file; an ICL example repeated in different groups belongs to all of them)
         self.data_icl_examples_has_groups = False # if False, all ICL examples belong to the group self.data_icl_examples_default_group
         self.data_icl_examples_default_group = "general"
         self.data_icl_examples_bm25_corpus = []
@@ -968,7 +969,8 @@ class MTICLEnv(gym.Env):
         if self.action_representation != "discrete_index":
             assert self.embeddings_index.ntotal >= self.max_icl_examples, f"{self.embeddings_index.ntotal} < {self.max_icl_examples}"
 
-        assert self.num_icl_examples == len(self.data_icl_examples) + (1 if self.enable_eos_action else 0)
+        assert self.num_icl_examples == sum(list(map(len, self.data_icl_examples_groups))) + (1 if self.enable_eos_action else 0), f"{self.num_icl_examples} != {sum(list(map(len, self.data_icl_examples_groups.values())))} + {(1 if self.enable_eos_action else 0)}"
+        #assert self.num_icl_examples == len(self.data_icl_examples) + (1 if self.enable_eos_action else 0), f"{self.num_icl_examples} != {len(self.data_icl_examples)} + {(1 if self.enable_eos_action else 0)}"
 
         ## Source sentences (do not insert, but add the representation to self.str2representation)
         ### These representation are intenteded to be used as initial first state for the translation candidate in order to detect if some ICL example is selected and results to be the same source sentence as the translation candidate
@@ -1054,12 +1056,15 @@ class MTICLEnv(gym.Env):
 
             self.data_src_sentences_corpus_embeddings = representations.numpy()
 
-            self.logger_wrapper(gym.logger.info, "Computing SONAR similarity matrix (cosine similarity)")
+            del representations
 
-            # data_similarity_matrix_embeddings
-            self.data_similarity_matrix_embeddings = embeddings_utils.get_similarity(self.data_src_sentences_corpus_embeddings, self.data_icl_examples_corpus_embeddings, metric="cosine")
+            assert self.data_src_sentences_corpus_embeddings.shape[1] == self.data_icl_examples_corpus_embeddings.shape[1], f"Embedding dimension mismatch: {self.data_src_sentences_corpus_embeddings.shape} vs {self.data_icl_examples_corpus_embeddings.shape}"
 
-            assert self.data_similarity_matrix_embeddings.shape == (len(self.data), len(self.data_icl_examples)), f"Data similarity matrix shape mismatch: {self.data_similarity_matrix_embeddings.shape} vs {(len(self.data), len(self.data_icl_examples))}"
+            # The full (len(self.data), len(self.data_icl_examples)) cosine similarity matrix is not precomputed (too much RAM with many
+            #  environments and large training sets): rows are computed on demand in get_scores_embeddings. Here we apply the same L2
+            #  normalization that sklearn's cosine_similarity applies internally (in place, to avoid an extra copy)
+            self.data_icl_examples_corpus_embeddings = sklearn_normalize(self.data_icl_examples_corpus_embeddings, norm="l2", copy=False)
+            self.data_src_sentences_corpus_embeddings = sklearn_normalize(self.data_src_sentences_corpus_embeddings, norm="l2", copy=False)
 
             time.sleep(self.initial_time_sleep)
 
@@ -1359,11 +1364,12 @@ class MTICLEnv(gym.Env):
                 # Reset the data of the source sentence in each episode: the same source sentence might appear several times in the data with slightly different scores (e.g., SONAR embeddings computed in different batches)
                 self.available_actions_strategy_current_episode_data[src_sentence] = {}
 
-                assert len(self.data_icl_examples) == self.num_icl_examples, f"Available actions strategy: expected ICL examples indices to match the action indices: {len(self.data_icl_examples)} vs {self.num_icl_examples}"
+                #assert len(self.data_icl_examples) == self.num_icl_examples, f"Available actions strategy: expected ICL examples indices to match the action indices: {len(self.data_icl_examples)} vs {self.num_icl_examples}"
+                assert self.num_icl_examples == sum(list(map(len, self.data_icl_examples_groups))) + (1 if self.enable_eos_action else 0), f"{self.num_icl_examples} != {sum(list(map(len, self.data_icl_examples_groups.values())))} + {(1 if self.enable_eos_action else 0)}"
 
                 # top-N ICL examples for each group (and strategy)
                 if self.available_actions_strategy in ("bm25", "bm25_and_sonar_embeddings"):
-                    bm25_expected_available_actions = 0
+                    bm25_expected_available_actions = set() # ICL examples indices (an ICL example in several groups might be in the top-N of more than one group)
 
                     for group, group_indices in self.data_icl_examples_group_indices.items():
                         label = self.get_available_actions_strategy_label("bm25", group)
@@ -1372,7 +1378,6 @@ class MTICLEnv(gym.Env):
                         assert bm25_scores.shape == group_indices.shape, f"Expected BM25 scores shape {group_indices.shape} (group: {group}), got {bm25_scores.shape}"
 
                         n = min(self.available_actions_strategy_n, int(np.isfinite(bm25_scores).sum())) # removed ICL examples (i.e., source sentence) have a score of -inf and must never be available
-                        bm25_expected_available_actions += n
 
                         if n == 0:
                             continue # all the ICL examples of the group were removed (note that x[-0:] would return all the elements)
@@ -1382,6 +1387,7 @@ class MTICLEnv(gym.Env):
                         top_n_indices = group_indices[top_n_group_indices] # group indices -> ICL examples indices
                         self.current_state_window[1][top_n_indices] = 1.0
                         discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
+                        bm25_expected_available_actions.update(top_n_indices.tolist())
 
                         assert np.all(np.logical_or(discrete_current_state_window == 0, discrete_current_state_window == 1)), f"BM25 available actions strategy: expected binary values in current_state_window[1], got: {self.current_state_window[1]}"
 
@@ -1402,7 +1408,7 @@ class MTICLEnv(gym.Env):
 
                     discrete_current_state_window = (self.current_state_window[1] + 0.5).astype(int) # convert to 0 and 1
 
-                    assert np.sum(discrete_current_state_window) == bm25_expected_available_actions # groups are disjoint
+                    assert np.sum(discrete_current_state_window) == len(bm25_expected_available_actions), f"BM25 available actions strategy: expected {len(bm25_expected_available_actions)} available actions, got {np.sum(discrete_current_state_window)}"
 
                 if self.available_actions_strategy in ("sonar_embeddings", "bm25_and_sonar_embeddings"):
                     for group, group_indices in self.data_icl_examples_group_indices.items():
@@ -1537,6 +1543,8 @@ class MTICLEnv(gym.Env):
         self.logger_wrapper(gym.logger.info, "Loading data: finished! %d entries read (%d URLs loaded)", idx, len(self.data))
         self.logger_wrapper(gym.logger.info, "Loading data (ICL examples)")
 
+        icl_example2idx = {} # ICL example (source<tab>reference) -> index of self.data_icl_examples
+
         with utils.open_or_iter(self.file_data_icl_examples, "rt") as fd:
             for idx, url_entry in enumerate(fd, 1):
                 # Format: source<tab>reference[<tab>group]
@@ -1559,13 +1567,25 @@ class MTICLEnv(gym.Env):
 
                     #src_sentence, trg_sentence = entry_data
 
-                    if entry_data[0] in src_data_set:
-                        self.src_data_overlap_src_icl_examples += 1
+                    icl_example_str = '\t'.join(entry_data)
 
-                    self.data_icl_examples.append(entry_data)
-                    self.data_icl_examples_groups.append(group)
-                    self.data_icl_examples_bm25_corpus.append(entry_data[0])
-                    self.data_icl_examples_bm25_corpus_tokenized.append(self.data_icl_examples_bm25_corpus[-1].split())
+                    if icl_example_str in icl_example2idx:
+                        # Same ICL example in different groups: a single ICL example (i.e., a single action) that belongs to all its groups
+                        icl_example_groups = self.data_icl_examples_groups[icl_example2idx[icl_example_str]]
+
+                        assert group not in icl_example_groups, f"Duplicated ICL example in the same group ('{group}'): {icl_example_str}"
+
+                        icl_example_groups.append(group)
+                    else:
+                        if entry_data[0] in src_data_set:
+                            self.src_data_overlap_src_icl_examples += 1
+
+                        icl_example2idx[icl_example_str] = len(self.data_icl_examples)
+
+                        self.data_icl_examples.append(entry_data)
+                        self.data_icl_examples_groups.append([group])
+                        self.data_icl_examples_bm25_corpus.append(entry_data[0])
+                        self.data_icl_examples_bm25_corpus_tokenized.append(self.data_icl_examples_bm25_corpus[-1].split())
                 except Exception as e:
                     self.logger_wrapper(gym.logger.error, "Loading data: error in line #%d", idx)
 
@@ -1582,23 +1602,14 @@ class MTICLEnv(gym.Env):
         self.data_icl_examples_bm25 = rank_bm25.BM25Okapi(self.data_icl_examples_bm25_corpus_tokenized)
 
         # Groups of ICL examples
-        icl_example2group = {}
+        self.data_icl_examples_group_indices = {} # group -> list with indices of self.data_icl_examples (an ICL example in several groups appears in all of them)
 
-        for icl_example, group in zip(self.data_icl_examples, self.data_icl_examples_groups):
-            # Avoid collisions in the ICL examples file (i.e., same ICL example in different groups)
-            icl_example_str = '\t'.join(icl_example)
+        for icl_example_idx, icl_example_groups in enumerate(self.data_icl_examples_groups):
+            for group in icl_example_groups:
+                if group not in self.data_icl_examples_group_indices:
+                    self.data_icl_examples_group_indices[group] = []
 
-            assert icl_example_str not in icl_example2group, f"Duplicated ICL example (groups: '{icl_example2group.get(icl_example_str)}' and '{group}'). Remove the collisions from the ICL examples file: {icl_example_str}"
-
-            icl_example2group[icl_example_str] = group
-
-        self.data_icl_examples_group_indices = {} # group -> list with indices of self.data_icl_examples
-
-        for icl_example_idx, group in enumerate(self.data_icl_examples_groups):
-            if group not in self.data_icl_examples_group_indices:
-                self.data_icl_examples_group_indices[group] = []
-
-            self.data_icl_examples_group_indices[group].append(icl_example_idx)
+                self.data_icl_examples_group_indices[group].append(icl_example_idx)
 
         self.data_icl_examples_group_indices = {group: np.array(indices, dtype=np.int64) for group, indices in self.data_icl_examples_group_indices.items()}
         self.data_icl_examples_bm25_corpus_per_group = {}
@@ -1613,7 +1624,7 @@ class MTICLEnv(gym.Env):
                 self.data_icl_examples_bm25_corpus_per_group[group] = [self.data_icl_examples_bm25_corpus[i] for i in indices]
                 self.data_icl_examples_bm25_per_group[group] = rank_bm25.BM25Okapi([self.data_icl_examples_bm25_corpus_tokenized[i] for i in indices])
 
-        self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): groups (provided in file: %s): %s", self.data_icl_examples_has_groups, {group: len(indices) for group, indices in self.data_icl_examples_group_indices.items()})
+        self.logger_wrapper(gym.logger.info, "Loading data (ICL examples): groups (provided in file: %s): %s (ICL examples in several groups: %d)", self.data_icl_examples_has_groups, {group: len(indices) for group, indices in self.data_icl_examples_group_indices.items()}, sum(1 for icl_example_groups in self.data_icl_examples_groups if len(icl_example_groups) > 1))
 
     def get_available_actions_strategy_label(self, strategy, group):
         # Without groups in the ICL examples file, the label is just the strategy (i.e., same statistics as before groups were supported)
@@ -3088,11 +3099,29 @@ class MTICLEnv(gym.Env):
 
         return scores
 
+    def get_similarity_row_embeddings(self, data_idx):
+        # Equivalent to embeddings_utils.get_similarity(self.data_src_sentences_corpus_embeddings, self.data_icl_examples_corpus_embeddings, metric="cosine")[data_idx]
+        #  (same operations as sklearn's cosine_distances + 1.0 - distance), but computing only one row. Embeddings were already L2-normalized
+        similarity = self.data_icl_examples_corpus_embeddings @ self.data_src_sentences_corpus_embeddings[data_idx] # cosine_similarity
+
+        # cosine_distances
+        distance = similarity
+        distance *= -1
+        distance += 1
+        distance = np.clip(distance, 0.0, 2.0)
+
+        similarity = 1.0 - distance # 1 - cosine_distance = cosine_similarity
+
+        assert similarity.shape == (len(self.data_icl_examples),), f"Similarity row shape mismatch: {similarity.shape} vs {(len(self.data_icl_examples),)}"
+        assert np.all(similarity <= 1.0) and np.all(similarity >= -1.0), f"Cosine similarity must be between -1 and 1, got {similarity}"
+
+        return similarity # greater is more similar
+
     def get_scores_embeddings(self, remove_source_sentence_from_scores=True, group=None):
         # Embeddings similarity (cosine similarity)
         # group=None -> scores of all ICL examples; otherwise, scores of the ICL examples of the group (same order as self.data_icl_examples_group_indices[group])
         src_translation_candidate = str(self.data[self.translation_candidate][0])
-        scores = self.data_similarity_matrix_embeddings[self.translation_candidate]
+        scores = self.get_similarity_row_embeddings(self.translation_candidate)
 
         assert isinstance(scores, np.ndarray), f"Expected BM25 scores to be a numpy array, got {type(scores)}: {scores}"
         assert len(scores.shape) == 1, f"Expected BM25 scores to be a 1D array, got shape {scores.shape}: {scores}"
